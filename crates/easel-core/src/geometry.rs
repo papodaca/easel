@@ -99,9 +99,148 @@ fn scale_from_grid(grid: u16, span: u32) -> i32 {
     scaled.round() as i32
 }
 
+/// A point in image-pixel or view-pixel space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Axis-aligned rectangle in view pixels. Distinct from [`Rect`], which is
+/// integer image pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// Image-to-view transform. `offset` is the view position of the image origin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Viewport {
+    pub image_size: Size,
+    pub view_size: Size,
+    pub scale: f32,
+    pub offset: Point,
+}
+
+impl Viewport {
+    pub const MIN_SCALE: f32 = 0.05;
+    pub const MAX_SCALE: f32 = 32.0;
+    const MIN_VISIBLE_PX: f32 = 64.0;
+
+    /// Fits the image inside the view, centered, never scaling above 1.
+    #[must_use]
+    pub fn fit(image_size: Size, view_size: Size) -> Self {
+        let mut viewport = Self {
+            image_size,
+            view_size,
+            scale: 1.0,
+            offset: Point { x: 0.0, y: 0.0 },
+        };
+        viewport.scale = fit_scale(image_size, view_size);
+        viewport.recenter();
+        viewport.clamp();
+        viewport
+    }
+
+    /// Shows the image at 100% and recenters it.
+    pub fn actual_size(&mut self) {
+        self.scale = 1.0;
+        self.recenter();
+        self.clamp();
+    }
+
+    /// Multiplies the scale by `factor`, keeping `view_point` on the same image pixel.
+    pub fn zoom_at(&mut self, view_point: Point, factor: f32) {
+        if !factor.is_finite() || factor <= 0.0 || self.scale <= 0.0 {
+            return;
+        }
+        let image_point = self.view_to_image(view_point);
+        self.scale = (self.scale * factor).clamp(Self::MIN_SCALE, Self::MAX_SCALE);
+        self.offset = Point {
+            x: view_point.x - image_point.x * self.scale,
+            y: view_point.y - image_point.y * self.scale,
+        };
+        self.clamp();
+    }
+
+    /// Moves the image by `delta` view pixels, then clamps it on screen.
+    pub fn pan_by(&mut self, delta: Point) {
+        self.offset.x += delta.x;
+        self.offset.y += delta.y;
+        self.clamp();
+    }
+
+    /// Keeps at least `min(image extent in view, 64px)` of the image inside the view.
+    pub fn clamp(&mut self) {
+        let rect = self.image_rect_in_view();
+        let view_w = self.view_size.w as f32;
+        let view_h = self.view_size.h as f32;
+        self.offset.x = clamp_offset(self.offset.x, rect.w, view_w);
+        self.offset.y = clamp_offset(self.offset.y, rect.h, view_h);
+    }
+
+    #[must_use]
+    pub fn image_to_view(&self, image_point: Point) -> Point {
+        Point {
+            x: image_point.x * self.scale + self.offset.x,
+            y: image_point.y * self.scale + self.offset.y,
+        }
+    }
+
+    #[must_use]
+    pub fn view_to_image(&self, view_point: Point) -> Point {
+        let scale = if self.scale == 0.0 { 1.0 } else { self.scale };
+        Point {
+            x: (view_point.x - self.offset.x) / scale,
+            y: (view_point.y - self.offset.y) / scale,
+        }
+    }
+
+    #[must_use]
+    pub fn image_rect_in_view(&self) -> ViewRect {
+        ViewRect {
+            x: self.offset.x,
+            y: self.offset.y,
+            w: self.image_size.w as f32 * self.scale,
+            h: self.image_size.h as f32 * self.scale,
+        }
+    }
+
+    fn recenter(&mut self) {
+        let rect_w = self.image_size.w as f32 * self.scale;
+        let rect_h = self.image_size.h as f32 * self.scale;
+        self.offset = Point {
+            x: (self.view_size.w as f32 - rect_w) / 2.0,
+            y: (self.view_size.h as f32 - rect_h) / 2.0,
+        };
+    }
+}
+
+fn fit_scale(image: Size, view: Size) -> f32 {
+    if image.w == 0 || image.h == 0 || view.w == 0 || view.h == 0 {
+        return 1.0;
+    }
+    let scale_x = view.w as f32 / image.w as f32;
+    let scale_y = view.h as f32 / image.h as f32;
+    scale_x.min(scale_y).min(1.0)
+}
+
+fn clamp_offset(offset: f32, displayed: f32, view: f32) -> f32 {
+    let margin = displayed.min(Viewport::MIN_VISIBLE_PX).min(view.max(0.0));
+    let min_offset = margin - displayed;
+    let max_offset = view - margin;
+    if min_offset > max_offset {
+        return (view - displayed) / 2.0;
+    }
+    offset.clamp(min_offset, max_offset)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{GridBox, Rect, Size};
+    use super::{GridBox, Point, Rect, Size, Viewport};
 
     #[test]
     fn to_grid_matches_the_official_flux_example() {
@@ -164,5 +303,112 @@ mod tests {
                 && (back.h - rect.h).abs() <= 1,
             "round trip {rect:?} -> {back:?} on {frame:?}"
         );
+    }
+
+    fn wide_image() -> Viewport {
+        Viewport::fit(Size { w: 4000, h: 2000 }, Size { w: 1000, h: 800 })
+    }
+
+    #[test]
+    fn fit_centers_a_wide_image_without_cropping() {
+        let viewport = wide_image();
+        assert!((viewport.scale - 0.25).abs() < 1e-4);
+        let rect = viewport.image_rect_in_view();
+        assert!((rect.x - 0.0).abs() < 1e-3);
+        assert!((rect.y - 150.0).abs() < 1e-3);
+        assert!((rect.w - 1000.0).abs() < 1e-3);
+        assert!((rect.h - 500.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn fit_does_not_upscale_an_image_smaller_than_the_view() {
+        let viewport = Viewport::fit(Size { w: 100, h: 50 }, Size { w: 1000, h: 800 });
+        assert!((viewport.scale - 1.0).abs() < 1e-4);
+        let rect = viewport.image_rect_in_view();
+        assert!((rect.x - 450.0).abs() < 1e-3);
+        assert!((rect.y - 375.0).abs() < 1e-3);
+        assert!((rect.w - 100.0).abs() < 1e-3);
+        assert!((rect.h - 50.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn zoom_at_keeps_the_image_point_under_the_cursor() {
+        let mut viewport = wide_image();
+        let cursor = Point { x: 500.0, y: 400.0 };
+        let before = viewport.view_to_image(cursor);
+        viewport.zoom_at(cursor, 2.0);
+        let after = viewport.view_to_image(cursor);
+        assert!((before.x - after.x).abs() < 1e-3);
+        assert!((before.y - after.y).abs() < 1e-3);
+        assert!((viewport.scale - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn zoom_clamps_to_the_scale_limits() {
+        let mut viewport = wide_image();
+        let cursor = Point { x: 100.0, y: 100.0 };
+        viewport.zoom_at(cursor, 10_000.0);
+        assert!((viewport.scale - 32.0).abs() < 1e-3);
+        viewport.zoom_at(cursor, 0.000_01);
+        assert!((viewport.scale - 0.05).abs() < 1e-3);
+    }
+
+    #[test]
+    fn pan_keeps_at_least_64_px_of_the_image_visible() {
+        let mut viewport = wide_image();
+        viewport.pan_by(Point {
+            x: -10_000.0,
+            y: 10_000.0,
+        });
+        let rect = viewport.image_rect_in_view();
+        let visible_w = (rect.x + rect.w).min(1000.0) - rect.x.max(0.0);
+        let visible_h = (rect.y + rect.h).min(800.0) - rect.y.max(0.0);
+        assert!((visible_w - 64.0).abs() < 1e-2, "visible width {visible_w}");
+        assert!(
+            (visible_h - 64.0).abs() < 1e-2,
+            "visible height {visible_h}"
+        );
+    }
+
+    #[test]
+    fn image_and_view_points_are_inverses() {
+        let samples = [
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 12.5, y: 40.0 },
+            Point { x: 400.0, y: 250.0 },
+            Point {
+                x: 3999.0,
+                y: 1999.0,
+            },
+        ];
+        for scale in [0.05_f32, 0.25, 1.0, 3.5, 32.0] {
+            let viewport = Viewport {
+                image_size: Size { w: 4000, h: 2000 },
+                view_size: Size { w: 1000, h: 800 },
+                scale,
+                offset: Point { x: -20.0, y: 15.0 },
+            };
+            for image_point in samples {
+                let view_point = viewport.image_to_view(image_point);
+                let back = viewport.view_to_image(view_point);
+                assert!(
+                    (back.x - image_point.x).abs() < 1e-2 && (back.y - image_point.y).abs() < 1e-2,
+                    "scale {scale}: {image_point:?} -> {view_point:?} -> {back:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn actual_size_sets_scale_one_and_recenters() {
+        let mut viewport = wide_image();
+        viewport.zoom_at(Point { x: 10.0, y: 10.0 }, 4.0);
+        viewport.actual_size();
+        assert!((viewport.scale - 1.0).abs() < 1e-4);
+        let rect = viewport.image_rect_in_view();
+        assert!((rect.w - 4000.0).abs() < 1e-2);
+        assert!((rect.h - 2000.0).abs() < 1e-2);
+        assert!((rect.x - ((1000.0 - 4000.0) / 2.0)).abs() < 1e-2);
+        assert!((rect.y - ((800.0 - 2000.0) / 2.0)).abs() < 1e-2);
     }
 }
