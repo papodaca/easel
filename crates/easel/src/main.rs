@@ -5,6 +5,7 @@ mod bottom_strip;
 mod canvas;
 mod chrome;
 mod image_load;
+mod jobs;
 mod net;
 mod notifications;
 mod root;
@@ -43,6 +44,7 @@ impl log::Log for StderrLog {
 static STDERR_LOG: StderrLog = StderrLog;
 
 fn main() {
+    let _ = jobs::data_dir();
     let _ = log::set_logger(&STDERR_LOG);
     log::set_max_level(log::LevelFilter::Debug);
     linux(WindowingModes::WAYLAND | WindowingModes::X11)

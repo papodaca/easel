@@ -76,11 +76,13 @@ use crate::scene::Scene;
 
 use self::bfl::flux3::CompiledPrompt;
 
+#[derive(Clone)]
 pub enum ImageInput {
     RawBase64(String),
     Url(String),
 }
 
+#[derive(Clone)]
 pub enum ReferenceStep {
     Inline(ImageInput),
     Upload {

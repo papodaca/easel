@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+directories = "6"
 easel-core = { path = "../easel-core" }
 bytes = "1"
 image = { workspace = true, features = ["jpeg", "png", "webp"] }

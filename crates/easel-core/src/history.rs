@@ -222,6 +222,9 @@ impl HistoryStore {
 
     pub fn set_state(&self, id: &JobId, state: JobState) -> Result<(), StoreError> {
         let mut meta = self.read_meta(id)?;
+        if state.is_terminal() {
+            meta.poll_url = None;
+        }
         meta.state = state;
         let created_at = meta.created_at.clone();
         let cost = meta.cost;
