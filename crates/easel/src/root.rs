@@ -3,6 +3,8 @@ use gpui::{
     PathPromptOptions, Render, ResizeEdge, Styled, Window, div, prelude::*, px, rgb,
 };
 
+use easel_core::providers::Provider;
+
 use crate::actions::{ActualSize, Fit, Open, Paste, Quit, SaveAs, Settings};
 use crate::app_state::AppState;
 use crate::assets;
@@ -40,7 +42,6 @@ impl Root {
         let notifications = cx.new(|_cx| Notifications::new());
         let title_bar = cx.new(|_cx| TitleBar::new());
         let toolbar = cx.new(|_cx| Toolbar::new(app_state.clone()));
-        let status_bar = cx.new(|_cx| StatusBar::new(notifications.clone(), app_state.clone()));
         let canvas = cx.new(|cx| Canvas::new(app_state.clone(), notifications.clone(), cx));
         let keys = std::sync::Arc::new(SharedKeys::default());
         let transport: std::sync::Arc<dyn HttpTransport> = std::sync::Arc::new(
@@ -66,8 +67,10 @@ impl Root {
                 )
             }
         };
+        let credit_transport = std::sync::Arc::clone(&transport);
         let runner_transport = transport;
         let runner_keys = std::sync::Arc::new(Resolver(std::sync::Arc::clone(&keys)));
+        let credit_keys = std::sync::Arc::clone(&runner_keys);
         let strip_history = std::sync::Arc::clone(&history);
         let runner = cx.new(move |_| {
             JobRunner::new(
@@ -78,6 +81,20 @@ impl Root {
             )
         });
         let panel_runner = runner.clone();
+        let credit_runner = runner.clone();
+        let credit_settings = settings.clone();
+        let status_bar = cx.new(|cx| {
+            StatusBar::new(
+                notifications.clone(),
+                app_state.clone(),
+                easel_core::providers::bfl::flux3::Flux3.spec().provider,
+                credit_transport,
+                credit_keys,
+                Some(credit_runner),
+                Some(credit_settings),
+                cx,
+            )
+        });
         let strip_runner = runner;
         let data_directory = crate::jobs::data_dir().display().to_string();
         settings.update(cx, |settings, cx| {
