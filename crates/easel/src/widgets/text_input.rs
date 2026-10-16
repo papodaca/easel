@@ -65,6 +65,7 @@ pub enum TextEvent {
 }
 
 type Callback = Box<dyn Fn(&mut Window, &mut App) + 'static>;
+type SubmitCallback = Box<dyn Fn(&str, &mut Window, &mut App) + 'static>;
 
 pub struct TextInput {
     focus_handle: FocusHandle,
@@ -83,7 +84,7 @@ pub struct TextInput {
     is_selecting: bool,
     preferred_column: usize,
     on_change: Option<Box<dyn Fn(&Value, &mut Window, &mut App) + 'static>>,
-    on_submit: Option<Callback>,
+    on_submit: Option<SubmitCallback>,
     on_blur: Option<Callback>,
     focus_subscription: Option<Subscription>,
 }
@@ -140,6 +141,12 @@ impl TextInput {
         }
     }
 
+    pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
+        let end = self.content.len();
+        self.selected_range = 0..end;
+        cx.notify();
+    }
+
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.content = text.into();
         let end = self.content.len();
@@ -178,7 +185,7 @@ impl TextInput {
         cx.notify();
     }
 
-    pub fn on_submit_callback(&mut self, callback: Callback) {
+    pub fn on_submit_callback(&mut self, callback: SubmitCallback) {
         self.on_submit = Some(callback);
     }
 
@@ -339,7 +346,7 @@ impl TextInput {
     ) {
         if event.keystroke.key == "enter" && !self.multiline {
             if let Some(callback) = self.on_submit.as_ref() {
-                callback(window, cx);
+                callback(self.content.as_ref(), window, cx);
             }
             cx.emit(TextEvent::Submit);
         }

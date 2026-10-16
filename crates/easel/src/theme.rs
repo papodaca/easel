@@ -30,6 +30,13 @@ pub const TEXT_DISABLED: u32 = 0x6c7086;
 pub const ACCENT: u32 = 0x89b4fa;
 pub const ERROR: u32 = 0xf38ba8;
 
+// Box outlines. Fills use the same hue at low alpha.
+pub const BOX_LAYOUT: u32 = 0x89b4fa;
+pub const BOX_NEW: u32 = 0xa6e3a1;
+pub const BOX_KEEP: u32 = 0xf9e2af;
+pub const BOX_MOVE: u32 = 0xcba6f7;
+pub const BOX_REMOVE: u32 = 0xf38ba8;
+
 // Fields keep the darkest surface so they read as "inset".
 pub const FIELD: u32 = SURFACE;
 

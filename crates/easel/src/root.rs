@@ -36,7 +36,7 @@ impl Root {
         let app_state = cx.new(|_cx| AppState::new());
         let notifications = cx.new(|_cx| Notifications::new());
         let title_bar = cx.new(|_cx| TitleBar::new());
-        let toolbar = cx.new(|_cx| Toolbar);
+        let toolbar = cx.new(|_cx| Toolbar::new(app_state.clone()));
         let status_bar = cx.new(|_cx| StatusBar::new(notifications.clone(), app_state.clone()));
         let canvas = cx.new(|cx| Canvas::new(app_state.clone(), notifications.clone(), cx));
         let keys = std::sync::Arc::new(SharedKeys::default());
@@ -45,7 +45,7 @@ impl Root {
         );
         let settings_notes = notifications.clone();
         let settings = cx.new(move |cx| SettingsPanel::open(settings_notes, transport, keys, cx));
-        let side_panel = cx.new(|_cx| SidePanel::new(app_state.clone(), settings));
+        let side_panel = cx.new(|cx| SidePanel::new(app_state.clone(), settings, cx));
         let bottom_strip = cx.new(|_cx| BottomStrip);
         Self {
             focus_handle: cx.focus_handle(),

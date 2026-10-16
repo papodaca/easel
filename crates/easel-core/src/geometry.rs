@@ -219,6 +219,93 @@ impl Viewport {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handle {
+    NorthWest,
+    North,
+    NorthEast,
+    East,
+    SouthEast,
+    South,
+    SouthWest,
+    West,
+}
+
+/// Last matching rectangle wins, so the topmost box is the last one drawn.
+#[must_use]
+pub fn hit_test(point: Point, boxes: &[ViewRect]) -> Option<usize> {
+    boxes.iter().rposition(|rect| contains(*rect, point))
+}
+
+#[must_use]
+pub fn handle_at(point: Point, rect: ViewRect) -> Option<Handle> {
+    const TOLERANCE: f32 = 8.0;
+    let anchors = [
+        (Handle::NorthWest, rect.x, rect.y),
+        (Handle::North, rect.x + rect.w / 2.0, rect.y),
+        (Handle::NorthEast, rect.x + rect.w, rect.y),
+        (Handle::East, rect.x + rect.w, rect.y + rect.h / 2.0),
+        (Handle::SouthEast, rect.x + rect.w, rect.y + rect.h),
+        (Handle::South, rect.x + rect.w / 2.0, rect.y + rect.h),
+        (Handle::SouthWest, rect.x, rect.y + rect.h),
+        (Handle::West, rect.x, rect.y + rect.h / 2.0),
+    ];
+    anchors
+        .into_iter()
+        .find(|(_, x, y)| {
+            let dx = point.x - x;
+            let dy = point.y - y;
+            dx * dx + dy * dy <= TOLERANCE * TOLERANCE
+        })
+        .map(|(handle, _, _)| handle)
+}
+
+#[must_use]
+pub fn resize_rect(rect: Rect, handle: Handle, to: Point) -> Rect {
+    let mut left = rect.x;
+    let mut top = rect.y;
+    let mut right = rect.x.saturating_add(rect.w);
+    let mut bottom = rect.y.saturating_add(rect.h);
+    let x = to.x.round() as i32;
+    let y = to.y.round() as i32;
+    match handle {
+        Handle::NorthWest => {
+            left = x;
+            top = y;
+        }
+        Handle::North => top = y,
+        Handle::NorthEast => {
+            right = x;
+            top = y;
+        }
+        Handle::East => right = x,
+        Handle::SouthEast => {
+            right = x;
+            bottom = y;
+        }
+        Handle::South => bottom = y,
+        Handle::SouthWest => {
+            left = x;
+            bottom = y;
+        }
+        Handle::West => left = x,
+    }
+    Rect {
+        x: left,
+        y: top,
+        w: right - left,
+        h: bottom - top,
+    }
+    .normalize()
+}
+
+fn contains(rect: ViewRect, point: Point) -> bool {
+    point.x >= rect.x
+        && point.y >= rect.y
+        && point.x <= rect.x + rect.w
+        && point.y <= rect.y + rect.h
+}
+
 fn fit_scale(image: Size, view: Size) -> f32 {
     if image.w == 0 || image.h == 0 || view.w == 0 || view.h == 0 {
         return 1.0;
@@ -240,7 +327,9 @@ fn clamp_offset(offset: f32, displayed: f32, view: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{GridBox, Point, Rect, Size, Viewport};
+    use super::{
+        GridBox, Handle, Point, Rect, Size, ViewRect, Viewport, handle_at, hit_test, resize_rect,
+    };
 
     #[test]
     fn to_grid_matches_the_official_flux_example() {
@@ -397,6 +486,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn hit_test_returns_the_topmost_box() {
+        let boxes = [
+            ViewRect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
+            ViewRect {
+                x: 50.0,
+                y: 50.0,
+                w: 100.0,
+                h: 100.0,
+            },
+        ];
+        assert_eq!(hit_test(Point { x: 60.0, y: 60.0 }, &boxes), Some(1));
+        assert_eq!(hit_test(Point { x: 10.0, y: 10.0 }, &boxes), Some(0));
+        assert_eq!(hit_test(Point { x: 200.0, y: 10.0 }, &boxes), None);
+    }
+
+    #[test]
+    fn handle_at_uses_an_eight_pixel_tolerance() {
+        let rect = ViewRect {
+            x: 100.0,
+            y: 100.0,
+            w: 80.0,
+            h: 40.0,
+        };
+        assert_eq!(
+            handle_at(Point { x: 104.0, y: 96.0 }, rect),
+            Some(Handle::NorthWest)
+        );
+        assert_eq!(
+            handle_at(Point { x: 140.0, y: 100.0 }, rect),
+            Some(Handle::North)
+        );
+        assert_eq!(handle_at(Point { x: 140.0, y: 120.0 }, rect), None);
+    }
+
+    #[test]
+    fn resizing_past_the_opposite_corner_stays_positive() {
+        let rect = Rect {
+            x: 100,
+            y: 80,
+            w: 40,
+            h: 30,
+        };
+        let resized = resize_rect(rect, Handle::NorthWest, Point { x: 200.0, y: 180.0 });
+        assert!(resized.w > 0 && resized.h > 0);
+        assert_eq!(
+            resized,
+            Rect {
+                x: 140,
+                y: 110,
+                w: 60,
+                h: 70,
+            }
+        );
     }
 
     #[test]

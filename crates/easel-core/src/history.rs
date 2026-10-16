@@ -25,7 +25,7 @@ pub enum StoreError {
 pub struct Completion {
     pub cost: Option<f64>,
     pub prompt: Option<String>,
-    pub     duration: Option<f64>,
+    pub duration: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

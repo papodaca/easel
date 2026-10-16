@@ -29,7 +29,7 @@ impl NumberInput {
         let weak = cx.weak_entity();
         input.update(cx, |input, _| {
             let submit = weak.clone();
-            input.on_submit_callback(Box::new(move |window, cx| {
+            input.on_submit_callback(Box::new(move |_text, window, cx| {
                 submit.update(cx, |this, cx| this.commit(window, cx)).ok();
             }));
             let blur = weak.clone();

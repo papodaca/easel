@@ -3,7 +3,7 @@
 
 use gpui::{
     App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, px, rgb,
+    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, rgb,
 };
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -21,6 +21,7 @@ pub struct Button {
     label: SharedString,
     style: ButtonStyle,
     on_click: Option<ClickHandler>,
+    disabled: bool,
 }
 
 impl Button {
@@ -38,7 +39,13 @@ impl Button {
             label: label.into(),
             style,
             on_click: None,
+            disabled: false,
         }
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
     }
 
     pub fn on_click(
@@ -70,8 +77,12 @@ impl IntoElement for Button {
             .px(px(8.))
             .rounded_sm()
             .text_sm()
-            .text_color(rgb(crate::theme::TEXT))
-            .cursor_pointer()
+            .text_color(rgb(if self.disabled {
+                crate::theme::TEXT_DISABLED
+            } else {
+                crate::theme::TEXT
+            }))
+            .when(!self.disabled, |button| button.cursor_pointer())
             .child(self.label);
         button = match self.style {
             ButtonStyle::Ghost => button
@@ -84,7 +95,7 @@ impl IntoElement for Button {
                 .hover(|style| style.bg(rgb(crate::theme::ELEMENT_HOVER)))
                 .active(|style| style.bg(rgb(crate::theme::ELEMENT_ACTIVE))),
         };
-        if let Some(handler) = self.on_click {
+        if let Some(handler) = self.on_click.filter(|_| !self.disabled) {
             button = button.on_click(move |event, window, cx| handler(event, window, cx));
         }
         button
