@@ -37,6 +37,14 @@ pub struct Entry {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct LoadedRequest {
+    pub compiled_prompt: String,
+    pub params: serde_json::Map<String, serde_json::Value>,
+    pub images: Vec<ImageSummary>,
+    pub box_snapshot: Vec<BoxElement>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct EntrySummary {
     pub id: JobId,
     pub state: JobState,
@@ -255,6 +263,43 @@ impl HistoryStore {
         let mut rows = self.read_index()?;
         rows.retain(|row| row.id != id.as_str());
         self.write_index(&rows)
+    }
+
+    pub fn result_bytes(&self, id: &JobId) -> Result<Vec<u8>, StoreError> {
+        let dir = self.entry_dir(id)?;
+        for name in ["result.png", "result.jpg", "result.webp", "result.bin"] {
+            let path = dir.join(name);
+            if path.exists() {
+                return fs::read(path).map_err(io_err);
+            }
+        }
+        Err(StoreError::Io("result file is missing".into()))
+    }
+
+    pub fn thumb_bytes(&self, id: &JobId) -> Option<Vec<u8>> {
+        let path = self.entry_dir(id).ok()?.join("thumb.jpg");
+        fs::read(path).ok()
+    }
+
+    pub fn load_request(&self, id: &JobId) -> Result<LoadedRequest, StoreError> {
+        let path = self.entry_dir(id)?.join("request.json");
+        let bytes = fs::read(path).map_err(io_err)?;
+        let stored: StoredRequest =
+            serde_json::from_slice(&bytes).map_err(|err| StoreError::Protocol(err.to_string()))?;
+        let params = match stored.params {
+            serde_json::Value::Object(map) => map,
+            other => {
+                let mut map = serde_json::Map::new();
+                map.insert("value".into(), other);
+                map
+            }
+        };
+        Ok(LoadedRequest {
+            compiled_prompt: stored.compiled_prompt,
+            params,
+            images: stored.images,
+            box_snapshot: stored.box_snapshot,
+        })
     }
 
     pub fn list(&self) -> Result<Vec<EntrySummary>, StoreError> {

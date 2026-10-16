@@ -89,7 +89,34 @@ impl SidePanel {
 impl Render for SidePanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mode = self.app_state.read(cx).side_mode;
+        let inspection = self.app_state.read(cx).inspection.clone();
         let (header, body) = match mode {
+            SideMode::Editor if let Some(inspection) = inspection => {
+                let state = self.app_state.clone();
+                (
+                    pane_header("Compare").child(
+                        Button::ghost("compare-return", "Return").on_click(move |_, _, cx| {
+                            state.update(cx, |app, cx| {
+                                app.inspection = None;
+                                cx.notify();
+                            });
+                        }),
+                    ),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(div().text_sm().child(inspection.prompt.clone()))
+                        .children(inspection.rows.iter().map(|(key, value)| {
+                            div().flex().flex_col().gap(px(2.)).child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme::TEXT_MUTED))
+                                    .child(format!("{key}: {value}")),
+                            )
+                        })),
+                )
+            }
             SideMode::Editor => (
                 pane_header("Editor"),
                 div()

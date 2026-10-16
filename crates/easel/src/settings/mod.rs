@@ -15,7 +15,7 @@ use crate::net::{HttpTransport, KeyResolver};
 use crate::notifications::{Notifications, Toast, ToastLevel};
 use crate::theme;
 use crate::ui::{Button, muted_text, section_label};
-use crate::widgets::TextInput;
+use crate::widgets::{TextInput, field_row};
 
 const TEST_URL: &str = "https://api.bfl.ai/v1/get_result?id=nonexistent";
 
@@ -219,6 +219,7 @@ pub struct SettingsPanel {
     field_message: gpui::SharedString,
     test_log: Vec<String>,
     revealed: bool,
+    data_directory: gpui::SharedString,
 }
 
 impl SettingsPanel {
@@ -283,7 +284,13 @@ impl SettingsPanel {
             field_message: gpui::SharedString::default(),
             test_log: Vec::new(),
             revealed: false,
+            data_directory: gpui::SharedString::default(),
         }
+    }
+
+    pub fn set_data_directory(&mut self, path: impl Into<String>, cx: &mut Context<Self>) {
+        self.data_directory = path.into().into();
+        cx.notify();
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -446,5 +453,10 @@ impl Render for SettingsPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.clear(cx))),
                     ),
             )
+            .child(field_row(
+                Some("Data directory"),
+                None,
+                div().text_sm().child(self.data_directory.clone()),
+            ))
     }
 }

@@ -66,6 +66,7 @@ impl Root {
         };
         let runner_transport = transport;
         let runner_keys = std::sync::Arc::new(Resolver(std::sync::Arc::clone(&keys)));
+        let strip_history = std::sync::Arc::clone(&history);
         let runner = cx.new(move |_| {
             JobRunner::new(
                 easel_core::providers::bfl::flux3::Flux3,
@@ -74,10 +75,18 @@ impl Root {
                 history,
             )
         });
+        let panel_runner = runner.clone();
+        let strip_runner = runner.clone();
+        let data_directory = crate::jobs::data_dir().display().to_string();
+        settings.update(cx, |settings, cx| {
+            settings.set_data_directory(data_directory, cx);
+        });
         let panel_state = app_state.clone();
+        let strip_state = app_state.clone();
         let side_panel =
-            cx.new(move |cx| SidePanel::new(panel_state, settings, keys, Some(runner), cx));
-        let bottom_strip = cx.new(|_cx| BottomStrip);
+            cx.new(move |cx| SidePanel::new(panel_state, settings, keys, Some(panel_runner), cx));
+        let bottom_strip =
+            cx.new(move |cx| BottomStrip::new(strip_state, Some(strip_runner), strip_history, cx));
         Self {
             focus_handle: cx.focus_handle(),
             app_state,

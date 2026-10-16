@@ -441,7 +441,13 @@ impl Render for Canvas {
         self.sync_frame(cx);
         let image = self.app_state.read(cx).image.clone();
         let frame = self.app_state.read(cx).scene.frame();
-        let boxes = self.app_state.read(cx).scene.boxes.clone();
+        let boxes = {
+            let app = self.app_state.read(cx);
+            match &app.inspection {
+                Some(inspection) => inspection.boxes.clone(),
+                None => app.scene.boxes.clone(),
+            }
+        };
         let image_layer = match &image {
             Some(image) => {
                 let rect = self.viewport.image_rect_in_view();

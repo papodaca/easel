@@ -37,6 +37,7 @@ pub struct AppState {
     pub revert_kind: Option<BoxKind>,
     pub saved_src: Option<Rect>,
     pub saved_tgt: Option<Rect>,
+    pub inspection: Option<crate::jobs::Inspection>,
     retired_renders: Vec<Arc<RenderImage>>,
 }
 
@@ -56,6 +57,7 @@ impl AppState {
             revert_kind: None,
             saved_src: None,
             saved_tgt: None,
+            inspection: None,
             retired_renders: Vec::new(),
         }
     }

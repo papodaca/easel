@@ -25,6 +25,17 @@ struct Slot {
     elapsed: Duration,
     bytes: Option<Vec<u8>>,
     dead: bool,
+    status: String,
+    cost: Option<f64>,
+}
+
+pub struct LiveJob {
+    pub token: u64,
+    pub id: Option<easel_core::providers::JobId>,
+    pub state: JobState,
+    pub cost: Option<f64>,
+    pub status: String,
+    pub bytes: Option<Vec<u8>>,
 }
 
 pub struct JobRunner<P> {
@@ -66,6 +77,8 @@ impl<P: Provider + 'static> JobRunner<P> {
             elapsed: Duration::ZERO,
             bytes: None,
             dead: false,
+            status: "Queued".into(),
+            cost: None,
         });
         self.pump(cx);
     }
@@ -94,6 +107,41 @@ impl<P: Provider + 'static> JobRunner<P> {
 
     pub fn states(&self) -> Vec<JobState> {
         self.slots.iter().map(|slot| slot.state.clone()).collect()
+    }
+
+    pub fn live_jobs(&self) -> Vec<LiveJob> {
+        self.slots
+            .iter()
+            .rev()
+            .filter(|slot| !matches!(slot.state, JobState::Dismissed))
+            .map(|slot| LiveJob {
+                token: slot.token,
+                id: slot
+                    .submitted
+                    .as_ref()
+                    .map(|submitted| submitted.job_id.clone()),
+                state: slot.state.clone(),
+                cost: slot.cost,
+                status: slot.status.clone(),
+                bytes: slot.bytes.clone(),
+            })
+            .collect()
+    }
+
+    pub fn dismiss_token(&mut self, token: u64, cx: &mut Context<Self>) {
+        let Some(index) = self.slots.iter().position(|slot| slot.token == token) else {
+            return;
+        };
+        self.dismiss(index, cx);
+    }
+
+    pub fn forget_token(&mut self, token: u64) {
+        if let Some(slot) = self.slots.iter().find(|slot| slot.token == token)
+            && slot.state.is_in_flight()
+        {
+            return;
+        }
+        self.slots.retain(|slot| slot.token != token);
     }
 
     pub fn result_bytes(&self, index: usize) -> Option<Vec<u8>> {
@@ -133,6 +181,8 @@ impl<P: Provider + 'static> JobRunner<P> {
                 elapsed: Duration::ZERO,
                 bytes: None,
                 dead: false,
+                status: "Polling".into(),
+                cost: None,
             });
             self.schedule_poll(token, cx);
         }
@@ -288,9 +338,12 @@ impl<P: Provider + 'static> JobRunner<P> {
                 }
                 if let Some(slot) = self.slot_mut(token) {
                     let state = std::mem::replace(&mut slot.state, JobState::Queued);
+                    slot.cost = submitted.quote.as_ref().map(|quote| quote.cost);
+                    slot.status = "Submitted".into();
                     slot.state = advance(state, JobEvent::Submitted(submitted.clone()));
                     slot.submitted = Some(submitted);
                 }
+                cx.notify();
                 self.schedule_poll(token, cx);
             }
             Err(error) => self.fail(token, error, cx),
@@ -384,12 +437,20 @@ impl<P: Provider + 'static> JobRunner<P> {
             }
         };
         let downloading = matches!(outcome, PollOutcome::Ready { .. });
+        if let PollOutcome::InFlight { status, .. } = &outcome
+            && let Some(slot) = self.slot_mut(token)
+        {
+            slot.status = status.clone();
+        }
         if let Some(slot) = self.slot_mut(token) {
             let state = std::mem::replace(&mut slot.state, JobState::Queued);
             slot.state = advance(state, JobEvent::Poll(outcome.clone()));
         }
         match self.slot_mut(token).map(|slot| slot.state.clone()) {
-            Some(JobState::Polling { .. }) => self.schedule_poll(token, cx),
+            Some(JobState::Polling { .. }) => {
+                cx.notify();
+                self.schedule_poll(token, cx);
+            }
             Some(JobState::Downloading) if downloading => self.start_download(token, outcome, cx),
             Some(JobState::Failed { error }) => self.persist_failure(token, error, cx),
             Some(state) if state.is_terminal() => self.pump(cx),
@@ -486,6 +547,9 @@ impl<P: Provider + 'static> JobRunner<P> {
                     easel_core::image_prep::thumbnail(&response.body, 256).unwrap_or_default();
                 if let Some(slot) = self.slot_mut(token) {
                     slot.bytes = Some(response.body.clone());
+                    if let Some(cost) = cost {
+                        slot.cost = Some(cost);
+                    }
                 }
                 let id = self.server_id(token);
                 let stored = id.as_ref().and_then(|id| {
@@ -520,6 +584,7 @@ impl<P: Provider + 'static> JobRunner<P> {
                         },
                     );
                 }
+                cx.notify();
                 self.pump(cx);
             }
         }
