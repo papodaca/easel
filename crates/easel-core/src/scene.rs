@@ -1,14 +1,42 @@
-use crate::geometry::Rect;
+use crate::geometry::{Rect, Size};
+use crate::prose::{self, RefChange};
 use serde::{Deserialize, Serialize};
 
 fn current_version() -> u32 {
     1
 }
 
-/// Project-relative path of an image file.
+/// Project-relative path of an image file, plus the pixel size used as a frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageRef {
     pub path: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+}
+
+impl ImageRef {
+    #[must_use]
+    pub fn new(path: impl Into<String>, width: u32, height: u32) -> Self {
+        Self {
+            path: path.into(),
+            width,
+            height,
+        }
+    }
+
+    #[must_use]
+    pub fn size(&self) -> Option<Size> {
+        if self.width == 0 || self.height == 0 {
+            None
+        } else {
+            Some(Size {
+                w: self.width,
+                h: self.height,
+            })
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -94,6 +122,177 @@ pub struct Scene {
 }
 
 impl Scene {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            version: current_version(),
+            source_image: None,
+            references: Vec::new(),
+            boxes: Vec::new(),
+            prose: String::new(),
+            aspect_ratio: None,
+        }
+    }
+
+    /// Source pixel size, or a 1000-wide virtual frame for a concrete ratio.
+    #[must_use]
+    pub fn frame(&self) -> Option<Size> {
+        if let Some(size) = self.source_image.as_ref().and_then(ImageRef::size) {
+            return Some(size);
+        }
+        virtual_frame(self.aspect_ratio.as_deref())
+    }
+
+    #[must_use]
+    pub fn allowed_kinds(&self) -> &'static [BoxKind] {
+        if self.source_image.is_some() {
+            &[BoxKind::New, BoxKind::Keep, BoxKind::Move, BoxKind::Remove]
+        } else {
+            &[BoxKind::Layout]
+        }
+    }
+
+    pub fn add_box(&mut self, rect: Rect, kind: BoxKind) -> BoxId {
+        self.add_box_with_prefix(rect, kind, "box")
+    }
+
+    pub fn add_box_with_prefix(&mut self, rect: Rect, kind: BoxKind, prefix: &str) -> BoxId {
+        let id = self.next_id(prefix);
+        let (src, tgt, from_image) = placed_rect(kind, rect);
+        self.boxes.push(BoxElement {
+            id: id.clone(),
+            kind,
+            desc: String::new(),
+            src,
+            tgt,
+            from_image,
+        });
+        id
+    }
+
+    pub fn update_box(&mut self, id: &BoxId, edit: impl FnOnce(&mut BoxElement)) -> bool {
+        let Some(element) = self.boxes.iter_mut().find(|element| &element.id == id) else {
+            return false;
+        };
+        edit(element);
+        true
+    }
+
+    pub fn remove_box(&mut self, id: &BoxId) -> bool {
+        let before = self.boxes.len();
+        self.boxes.retain(|element| &element.id != id);
+        self.boxes.len() != before
+    }
+
+    pub fn rename_box(&mut self, id: &BoxId, new_raw: &str) -> Result<(), String> {
+        let new_id = BoxId::parse(new_raw)?;
+        if self
+            .boxes
+            .iter()
+            .any(|element| element.id == new_id && &element.id != id)
+        {
+            return Err(format!("box id `{new_raw}` is already in use"));
+        }
+        let Some(element) = self.boxes.iter_mut().find(|element| &element.id == id) else {
+            return Err(format!("no box `{id}`", id = id.as_str()));
+        };
+        let old = element.id.as_str().to_string();
+        element.id = new_id;
+        self.prose = prose::rename_tag(&self.prose, &old, new_raw);
+        Ok(())
+    }
+
+    pub fn set_source(&mut self, image: ImageRef) {
+        let previous = self.frame();
+        if self.source_image.is_none() && !self.references.is_empty() {
+            self.prose = prose::shift_ref_tags(&self.prose, RefChange::InsertedAt(0));
+            retarget_boxes(&mut self.boxes, RefChange::InsertedAt(0));
+        }
+        self.source_image = Some(image);
+        self.rescale_after(previous);
+    }
+
+    pub fn clear_source(&mut self) {
+        if self.source_image.is_none() {
+            return;
+        }
+        let previous = self.frame();
+        self.source_image = None;
+        self.prose = prose::shift_ref_tags(&self.prose, RefChange::Removed(0));
+        retarget_boxes(&mut self.boxes, RefChange::Removed(0));
+        self.rescale_after(previous);
+    }
+
+    pub fn add_reference(&mut self, image: ImageRef) {
+        self.references.push(image);
+    }
+
+    pub fn remove_reference(&mut self, index: usize) {
+        let mut slots = self.slots();
+        if index >= slots.len() {
+            return;
+        }
+        let previous = self.frame();
+        slots.remove(index);
+        self.prose = prose::shift_ref_tags(&self.prose, RefChange::Removed(index));
+        retarget_boxes(&mut self.boxes, RefChange::Removed(index));
+        self.write_slots(slots);
+        self.rescale_after(previous);
+    }
+
+    pub fn move_reference(&mut self, from: usize, to: usize) {
+        let mut slots = self.slots();
+        if from >= slots.len() || to >= slots.len() || from == to {
+            return;
+        }
+        let previous = self.frame();
+        let image = slots.remove(from);
+        slots.insert(to, image);
+        self.prose = prose::shift_ref_tags(&self.prose, RefChange::Moved { from, to });
+        retarget_boxes(&mut self.boxes, RefChange::Moved { from, to });
+        self.write_slots(slots);
+        self.rescale_after(previous);
+    }
+
+    fn slots(&self) -> Vec<ImageRef> {
+        let mut slots = Vec::new();
+        if let Some(source) = &self.source_image {
+            slots.push(source.clone());
+        }
+        slots.extend(self.references.iter().cloned());
+        slots
+    }
+
+    fn write_slots(&mut self, slots: Vec<ImageRef>) {
+        if let Some((source, rest)) = slots.split_first() {
+            self.source_image = Some(source.clone());
+            self.references = rest.to_vec();
+        } else {
+            self.source_image = None;
+            self.references.clear();
+        }
+    }
+
+    fn rescale_after(&mut self, previous: Option<Size>) {
+        let Some(previous) = previous else {
+            return;
+        };
+        let Some(next) = self.frame() else {
+            return;
+        };
+        if previous == next {
+            return;
+        }
+        for element in &mut self.boxes {
+            if let Some(src) = element.src {
+                element.src = Some(Rect::from_grid(src.to_grid(previous), next));
+            }
+            if let Some(tgt) = element.tgt {
+                element.tgt = Some(Rect::from_grid(tgt.to_grid(previous), next));
+            }
+        }
+    }
+
     /// Next unused `{prefix}_{n}` id, one past the highest existing suffix.
     #[must_use]
     pub fn next_id(&self, prefix: &str) -> BoxId {
@@ -111,6 +310,38 @@ impl Scene {
             max_suffix = max_suffix.max(suffix);
         }
         BoxId::parse(&format!("{prefix}_{}", max_suffix + 1)).expect("prefix produced a box id")
+    }
+}
+
+fn placed_rect(kind: BoxKind, rect: Rect) -> (Option<Rect>, Option<Rect>, Option<usize>) {
+    match kind {
+        BoxKind::Layout => (Some(rect), None, None),
+        BoxKind::New => (None, Some(rect), None),
+        BoxKind::Keep => (Some(rect), Some(rect), Some(0)),
+        BoxKind::Move | BoxKind::Remove => (Some(rect), None, Some(0)),
+    }
+}
+
+fn virtual_frame(ratio: Option<&str>) -> Option<Size> {
+    let ratio = ratio?;
+    if ratio.is_empty() || ratio == "auto" {
+        return None;
+    }
+    let (width, height) = ratio.split_once(':')?;
+    let width: u32 = width.parse().ok()?;
+    let height: u32 = height.parse().ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(Size {
+        w: 1000,
+        h: 1000 * height / width,
+    })
+}
+
+fn retarget_boxes(boxes: &mut [BoxElement], change: RefChange) {
+    for element in boxes {
+        element.from_image = element.from_image.and_then(|index| change.map_index(index));
     }
 }
 
@@ -151,16 +382,143 @@ mod tests {
         assert_eq!(scene.next_id("animal").as_str(), "animal_4");
     }
 
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    fn grid_scaled(rect: Rect, from: crate::geometry::Size, to: crate::geometry::Size) -> Rect {
+        Rect::from_grid(rect.to_grid(from), to)
+    }
+
+    #[test]
+    fn add_box_allocates_ids_past_the_highest_suffix() {
+        let mut scene = Scene::empty();
+        let first = scene.add_box_with_prefix(rect(0, 0, 10, 10), BoxKind::Layout, "animal");
+        let second = scene.add_box_with_prefix(rect(0, 0, 10, 10), BoxKind::Layout, "animal");
+        assert_eq!(first.as_str(), "animal_1");
+        assert_eq!(second.as_str(), "animal_2");
+        scene.remove_box(&first);
+        let third = scene.add_box_with_prefix(rect(0, 0, 10, 10), BoxKind::Layout, "animal");
+        assert_eq!(third.as_str(), "animal_3");
+    }
+
+    #[test]
+    fn rename_box_rewrites_prose_and_rejects_collisions() {
+        let mut scene = Scene::empty();
+        let id = scene.add_box_with_prefix(rect(0, 0, 10, 10), BoxKind::Layout, "cat");
+        scene.prose = "make <cat_1> orange".into();
+        scene.rename_box(&id, "cat_2").unwrap();
+        assert_eq!(scene.prose, "make <cat_2> orange");
+        assert_eq!(scene.boxes[0].id.as_str(), "cat_2");
+
+        scene.add_box_with_prefix(rect(0, 0, 10, 10), BoxKind::Layout, "cat");
+        let err = scene.rename_box(&scene.boxes[0].id.clone(), "cat_3");
+        assert!(err.is_err(), "cat_3 is already in use");
+        assert!(scene.rename_box(&scene.boxes[0].id.clone(), "Cat").is_err());
+    }
+
+    #[test]
+    fn allowed_kinds_follow_the_source_image() {
+        let mut scene = Scene::empty();
+        assert_eq!(scene.allowed_kinds(), &[BoxKind::Layout]);
+        scene.set_source(ImageRef::new("src.png", 100, 100));
+        assert_eq!(
+            scene.allowed_kinds(),
+            &[BoxKind::New, BoxKind::Keep, BoxKind::Move, BoxKind::Remove]
+        );
+    }
+
+    #[test]
+    fn removing_the_source_shifts_reference_tags_and_from_image() {
+        let mut scene = Scene::empty();
+        scene.set_source(ImageRef::new("src.png", 100, 100));
+        scene.add_reference(ImageRef::new("extra.png", 100, 100));
+        scene.prose = "use <ref_image_1>".into();
+        scene.boxes.push(element("log_1"));
+        scene.boxes[0].from_image = Some(1);
+        scene.remove_reference(0);
+        assert_eq!(scene.prose, "use <ref_image_0>");
+        assert_eq!(scene.boxes[0].from_image, Some(0));
+        assert_eq!(scene.source_image.as_ref().unwrap().path, "extra.png");
+        assert!(scene.references.is_empty());
+    }
+
+    #[test]
+    fn moving_a_reference_rewrites_every_affected_tag() {
+        let mut scene = Scene::empty();
+        scene.set_source(ImageRef::new("a.png", 10, 10));
+        scene.add_reference(ImageRef::new("b.png", 10, 10));
+        scene.add_reference(ImageRef::new("c.png", 10, 10));
+        scene.prose = "<ref_image_0> <ref_image_1> <ref_image_2>".into();
+        scene.move_reference(2, 0);
+        assert_eq!(scene.prose, "<ref_image_1> <ref_image_2> <ref_image_0>");
+        assert_eq!(scene.source_image.as_ref().unwrap().path, "c.png");
+        assert_eq!(scene.references[0].path, "a.png");
+        assert_eq!(scene.references[1].path, "b.png");
+    }
+
+    #[test]
+    fn frame_uses_the_source_or_a_virtual_ratio() {
+        let mut scene = Scene::empty();
+        scene.aspect_ratio = Some("auto".into());
+        scene.boxes.push(element("box_1"));
+        assert_eq!(scene.frame(), None);
+
+        scene.boxes.clear();
+        scene.aspect_ratio = Some("16:9".into());
+        assert_eq!(
+            scene.frame(),
+            Some(crate::geometry::Size { w: 1000, h: 562 })
+        );
+
+        scene.set_source(ImageRef::new("src.png", 4000, 2250));
+        assert_eq!(
+            scene.frame(),
+            Some(crate::geometry::Size { w: 4000, h: 2250 })
+        );
+    }
+
+    #[test]
+    fn set_source_and_clear_source_rescale_boxes_through_the_grid() {
+        let mut scene = Scene::empty();
+        scene.aspect_ratio = Some("16:9".into());
+        let drawn = rect(100, 100, 300, 300);
+        scene.add_box(drawn, BoxKind::Layout);
+        scene.set_source(ImageRef::new("wide.png", 4000, 2250));
+        assert_eq!(scene.boxes[0].kind, BoxKind::Layout);
+        let wide = crate::geometry::Size { w: 4000, h: 2250 };
+        let virtual_16_9 = crate::geometry::Size { w: 1000, h: 562 };
+        let scaled = scene.boxes[0].src.unwrap();
+        assert_eq!(scaled, grid_scaled(drawn, virtual_16_9, wide));
+        assert!((scaled.x - 400).abs() <= 2 && (scaled.y - 400).abs() <= 2);
+        assert!((scaled.w - 1200).abs() <= 2 && (scaled.h - 1200).abs() <= 2);
+
+        let mut square_scene = Scene::empty();
+        square_scene.aspect_ratio = Some("1:1".into());
+        square_scene.set_source(ImageRef::new("sq.png", 2000, 2000));
+        let placed = rect(400, 400, 200, 200);
+        square_scene.add_box(placed, BoxKind::Keep);
+        square_scene.clear_source();
+        assert_eq!(
+            square_scene.frame(),
+            Some(crate::geometry::Size { w: 1000, h: 1000 })
+        );
+        let mapped = grid_scaled(
+            placed,
+            crate::geometry::Size { w: 2000, h: 2000 },
+            crate::geometry::Size { w: 1000, h: 1000 },
+        );
+        let kept = square_scene.boxes[0].src.unwrap();
+        assert_eq!(kept, mapped);
+        assert_eq!(square_scene.boxes[0].tgt.unwrap(), mapped);
+    }
+
     #[test]
     fn scene_round_trip() {
         let scene = Scene {
             version: 1,
-            source_image: Some(ImageRef {
-                path: "source.png".into(),
-            }),
-            references: vec![ImageRef {
-                path: "ref.png".into(),
-            }],
+            source_image: Some(ImageRef::new("source.png", 0, 0)),
+            references: vec![ImageRef::new("ref.png", 0, 0)],
             boxes: vec![BoxElement {
                 id: BoxId::parse("animal_1").unwrap(),
                 kind: BoxKind::Move,
