@@ -58,6 +58,14 @@ impl Notifications {
             .is_some_and(|toast| toast.level == ToastLevel::Error)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn last_toast_text(&self) -> String {
+        self.toasts
+            .last()
+            .map(|toast| toast.text.to_string())
+            .unwrap_or_default()
+    }
+
     pub fn set_status(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.status = text.into();
         cx.notify();

@@ -6,6 +6,7 @@ mod image_load;
 mod net;
 mod notifications;
 mod root;
+mod settings;
 mod side_panel;
 mod theme;
 mod toolbar;

@@ -15,7 +15,7 @@ pub trait KeyResolver: Send + Sync {
     fn key_for(&self, provider: ProviderId) -> Option<Zeroizing<String>>;
 }
 
-pub trait HttpTransport {
+pub trait HttpTransport: Send + Sync {
     fn request(
         &self,
         request: HttpRequest,

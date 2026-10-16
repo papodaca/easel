@@ -73,6 +73,7 @@ pub struct TextInput {
     label: Option<String>,
     help: Option<String>,
     enabled: bool,
+    masked: bool,
     multiline: bool,
     selected_range: Range<usize>,
     selection_reversed: bool,
@@ -104,6 +105,7 @@ impl TextInput {
             label: None,
             help: None,
             enabled: true,
+            masked: false,
             multiline,
             selected_range: 0..0,
             selection_reversed: false,
@@ -149,6 +151,11 @@ impl TextInput {
 
     pub fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.enabled = enabled;
+        cx.notify();
+    }
+
+    pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
+        self.masked = masked;
         cx.notify();
     }
 
@@ -482,6 +489,21 @@ impl TextInput {
 
 impl EventEmitter<TextEvent> for TextInput {}
 
+impl std::fmt::Debug for TextInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let content = if self.masked {
+            "<redacted>"
+        } else {
+            self.content.as_ref()
+        };
+        formatter
+            .debug_struct("TextInput")
+            .field("content", &content)
+            .field("masked", &self.masked)
+            .finish()
+    }
+}
+
 impl EntityInputHandler for TextInput {
     fn text_for_range(
         &mut self,
@@ -673,7 +695,11 @@ impl Element for TextElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
-        let content = input.content.clone();
+        let content = if input.masked {
+            SharedString::from("*".repeat(input.content.len()))
+        } else {
+            input.content.clone()
+        };
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let style = window.text_style();

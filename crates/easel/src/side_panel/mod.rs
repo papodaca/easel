@@ -2,15 +2,20 @@ use gpui::{Context, IntoElement, ParentElement, Render, Styled, Window, div, pre
 
 use crate::actions::Settings;
 use crate::app_state::{AppState, SideMode};
+use crate::settings::SettingsPanel;
 use crate::theme;
 
 pub struct SidePanel {
     app_state: gpui::Entity<AppState>,
+    settings: gpui::Entity<SettingsPanel>,
 }
 
 impl SidePanel {
-    pub fn new(app_state: gpui::Entity<AppState>) -> Self {
-        Self { app_state }
+    pub fn new(app_state: gpui::Entity<AppState>, settings: gpui::Entity<SettingsPanel>) -> Self {
+        Self {
+            app_state,
+            settings,
+        }
     }
 }
 
@@ -24,22 +29,28 @@ impl Render for SidePanel {
                     .text_color(rgb(theme::MUTED))
                     .child("The box tool and parameter form land in a later step."),
             ),
-            SideMode::Settings => div().flex().flex_col().gap(px(8.)).child("Settings").child(
-                div()
-                    .id("settings-back")
-                    .flex()
-                    .items_center()
-                    .h(px(28.))
-                    .px(px(10.))
-                    .w(px(72.))
-                    .bg(rgb(theme::BUTTON))
-                    .text_color(rgb(theme::TEXT))
-                    .cursor_pointer()
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(Settings), cx);
-                    })
-                    .child("Back"),
-            ),
+            SideMode::Settings => div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child("Settings")
+                .child(self.settings.clone())
+                .child(
+                    div()
+                        .id("settings-back")
+                        .flex()
+                        .items_center()
+                        .h(px(28.))
+                        .px(px(10.))
+                        .w(px(72.))
+                        .bg(rgb(theme::BUTTON))
+                        .text_color(rgb(theme::TEXT))
+                        .cursor_pointer()
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(Settings), cx);
+                        })
+                        .child("Back"),
+                ),
         };
         div()
             .flex()

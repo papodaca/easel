@@ -8,7 +8,9 @@ use crate::app_state::AppState;
 use crate::bottom_strip::BottomStrip;
 use crate::canvas::Canvas;
 use crate::image_load::{self, prompt_failure_text};
+use crate::net::{HttpTransport, ReqwestTransport};
 use crate::notifications::Notifications;
+use crate::settings::{Resolver, SettingsPanel, SharedKeys};
 use crate::side_panel::SidePanel;
 use crate::theme;
 use crate::toolbar::Toolbar;
@@ -29,7 +31,13 @@ impl Root {
         let notifications = cx.new(|_cx| Notifications::new());
         let toolbar = cx.new(|_cx| Toolbar::new(notifications.clone()));
         let canvas = cx.new(|cx| Canvas::new(app_state.clone(), notifications.clone(), cx));
-        let side_panel = cx.new(|_cx| SidePanel::new(app_state.clone()));
+        let keys = std::sync::Arc::new(SharedKeys::default());
+        let transport: std::sync::Arc<dyn HttpTransport> = std::sync::Arc::new(
+            ReqwestTransport::new(Resolver(std::sync::Arc::clone(&keys))),
+        );
+        let settings_notes = notifications.clone();
+        let settings = cx.new(move |cx| SettingsPanel::open(settings_notes, transport, keys, cx));
+        let side_panel = cx.new(|_cx| SidePanel::new(app_state.clone(), settings));
         let bottom_strip = cx.new(|_cx| BottomStrip);
         Self {
             focus_handle: cx.focus_handle(),
