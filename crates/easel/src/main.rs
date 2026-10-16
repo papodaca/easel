@@ -9,6 +9,7 @@ mod jobs;
 mod net;
 mod notifications;
 mod root;
+mod session;
 mod settings;
 mod side_panel;
 mod status_bar;

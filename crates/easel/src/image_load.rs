@@ -179,16 +179,26 @@ pub fn load_paths(
             .await;
         let result = match read {
             Ok(bytes) => {
-                cx.background_executor()
+                let origin = Some(easel_core::session::SourceRef {
+                    path: label.clone(),
+                    hash: easel_core::session::content_hash(&bytes),
+                    owned: false,
+                });
+                let decoded = cx
+                    .background_executor()
                     .spawn(async move { decode_image(&bytes, &label) })
-                    .await
+                    .await;
+                (decoded, origin)
             }
-            Err(err) => Err(ImageError::Decode {
-                label,
-                detail: err.to_string(),
-            }),
+            Err(err) => (
+                Err(ImageError::Decode {
+                    label,
+                    detail: err.to_string(),
+                }),
+                None,
+            ),
         };
-        cx.update(|cx| apply_load_result(&state, &notifications, result, target, cx));
+        cx.update(|cx| apply_load_result(&state, &notifications, result.0, target, result.1, cx));
     })
     .detach();
 }
@@ -248,7 +258,7 @@ impl DecodeJob {
                     detail: err.to_string(),
                 }),
             };
-            cx.update(|cx| apply_load_result(&state, &notifications, result, target, cx));
+            cx.update(|cx| apply_load_result(&state, &notifications, result, target, None, cx));
         })
         .detach();
     }
@@ -265,19 +275,25 @@ pub fn apply_load_result(
     notifications: &Entity<Notifications>,
     result: Result<DecodedImage, ImageError>,
     target: LoadTarget,
+    origin: Option<easel_core::session::SourceRef>,
     cx: &mut App,
 ) {
     match result {
         Ok(image) => {
             let width = image.size.w;
             let height = image.size.h;
-            state.update(cx, |state, cx| match target {
-                LoadTarget::ReplaceSource => state.set_image(Arc::new(image), cx),
-                LoadTarget::Paste if state.scene.source_image.is_none() => {
-                    state.set_image(Arc::new(image), cx);
+            state.update(cx, |state, cx| {
+                match target {
+                    LoadTarget::ReplaceSource => state.set_image(Arc::new(image), cx),
+                    LoadTarget::Paste if state.scene.source_image.is_none() => {
+                        state.set_image(Arc::new(image), cx);
+                    }
+                    LoadTarget::Paste => {
+                        let _ = state.add_extra(Arc::new(image), cx);
+                    }
                 }
-                LoadTarget::Paste => {
-                    let _ = state.add_extra(Arc::new(image), cx);
+                if let Some(origin) = origin.clone() {
+                    state.source_ref = Some(origin);
                 }
             });
             notifications.update(cx, |notes, cx| {
@@ -412,6 +428,7 @@ mod tests {
                 &notes,
                 Err(error),
                 super::LoadTarget::ReplaceSource,
+                None,
                 cx,
             )
         });

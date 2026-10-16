@@ -38,6 +38,7 @@ pub struct AppState {
     pub saved_src: Option<Rect>,
     pub saved_tgt: Option<Rect>,
     pub inspection: Option<crate::jobs::Inspection>,
+    pub source_ref: Option<easel_core::session::SourceRef>,
     retired_renders: Vec<Arc<RenderImage>>,
 }
 
@@ -58,6 +59,7 @@ impl AppState {
             saved_src: None,
             saved_tgt: None,
             inspection: None,
+            source_ref: None,
             retired_renders: Vec::new(),
         }
     }
@@ -67,6 +69,7 @@ impl AppState {
     }
 
     pub fn set_image(&mut self, image: Arc<DecodedImage>, cx: &mut Context<Self>) {
+        self.source_ref = None;
         self.scene
             .set_source(ImageRef::new("source", image.size.w, image.size.h));
         if let Some(previous) = self.image.replace(image) {

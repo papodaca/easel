@@ -29,6 +29,8 @@ pub struct Root {
     side_panel: gpui::Entity<SidePanel>,
     bottom_strip: gpui::Entity<BottomStrip>,
     status_bar: gpui::Entity<StatusBar>,
+    #[allow(dead_code)]
+    session: gpui::Entity<crate::session::Session>,
     hovered_edge: Option<ResizeEdge>,
 }
 
@@ -76,7 +78,7 @@ impl Root {
             )
         });
         let panel_runner = runner.clone();
-        let strip_runner = runner.clone();
+        let strip_runner = runner;
         let data_directory = crate::jobs::data_dir().display().to_string();
         settings.update(cx, |settings, cx| {
             settings.set_data_directory(data_directory, cx);
@@ -87,6 +89,14 @@ impl Root {
             cx.new(move |cx| SidePanel::new(panel_state, settings, keys, Some(panel_runner), cx));
         let bottom_strip =
             cx.new(move |cx| BottomStrip::new(strip_state, Some(strip_runner), strip_history, cx));
+        let session_path = crate::jobs::data_dir().join("session.json");
+        let image_dir = crate::jobs::data_dir().join("session");
+        let watched = app_state.clone();
+        let session = cx.new({
+            let session_path = session_path.clone();
+            move |cx| crate::session::Session::attach(watched, session_path, image_dir, cx)
+        });
+        crate::session::restore(app_state.clone(), session_path, cx);
         Self {
             focus_handle: cx.focus_handle(),
             app_state,
@@ -97,6 +107,7 @@ impl Root {
             side_panel,
             bottom_strip,
             status_bar,
+            session,
             hovered_edge: None,
         }
     }
