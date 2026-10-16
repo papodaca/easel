@@ -3,12 +3,12 @@ mod viewport;
 #[cfg(test)]
 mod box_tool;
 
-use easel_core::geometry::{Handle, Point, Rect, Size, ViewRect, Viewport, handle_at, hit_test};
+use easel_core::geometry::{Handle, Point, Rect, Size, ViewRect, Viewport, edge_at, hit_test};
 use easel_core::scene::{BoxId, BoxKind};
 use gpui::{
     App, BorderStyle, Bounds, Context, CursorStyle, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder, Pixels,
-    Render, ScrollDelta, ScrollWheelEvent, Styled, Window, canvas, div, img, point, prelude::*, px,
+    Render, ScrollDelta, ScrollWheelEvent, Styled, Window, canvas, div, point, prelude::*, px,
     quad, rgb, size,
 };
 
@@ -34,8 +34,14 @@ pub struct Canvas {
 
 enum Drag {
     Idle,
+    /// Press landed on a box. A short release selects it. A drag in the box tool starts a new box.
+    Pressed {
+        start_view: Point,
+        start_image: Point,
+    },
     Drawing {
         start: Point,
+        current: Point,
     },
     Moving {
         id: BoxId,
@@ -48,6 +54,7 @@ enum Drag {
     },
     DrawingTarget {
         start: Point,
+        current: Point,
     },
 }
 
@@ -114,20 +121,21 @@ impl Canvas {
         self.viewport = Viewport::fit(image.size, self.viewport.view_size);
     }
 
-    fn note_bounds(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
+    fn note_bounds(&mut self, bounds: Bounds<Pixels>) -> (Viewport, bool) {
         let view_size =
             viewport::size_from_pixels(bounds.size.width.as_f32(), bounds.size.height.as_f32());
         if self.bounds == bounds && self.viewport.view_size == view_size {
-            return;
+            return (self.viewport, false);
         }
         self.bounds = bounds;
         self.viewport.view_size = view_size;
         if self.user_zoomed {
             self.viewport.clamp();
-        } else {
-            self.refit(cx);
+        } else if self.viewport.image_size.w > 0 || self.viewport.image_size.h > 0 {
+            let image_size = self.viewport.image_size;
+            self.viewport = Viewport::fit(image_size, view_size);
         }
-        cx.notify();
+        (self.viewport, true)
     }
 
     fn sync_frame(&mut self, cx: &mut Context<Self>) {
@@ -207,98 +215,173 @@ impl Canvas {
             .collect()
     }
 
+    fn draft_rect(&self) -> Option<Rect> {
+        match self.drag {
+            Drag::Drawing { start, current } | Drag::DrawingTarget { start, current } => {
+                Some(rect_between(start, current))
+            }
+            _ => None,
+        }
+    }
+
     fn on_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         if event.button != MouseButton::Left || self.space_held {
             return;
         }
         let local = self.local_point(event.position);
         let image = self.viewport.view_to_image(local);
-        let drawing_target = self.app_state.read(cx).draw_target.clone();
-        if drawing_target.is_some() {
-            self.drag = Drag::DrawingTarget { start: image };
-            return;
-        }
-        if self.app_state.read(cx).tool == Tool::Box {
-            if self.app_state.read(cx).box_tool_enabled() {
-                self.drag = Drag::Drawing { start: image };
-            }
-            return;
-        }
-        let views = self.box_views(cx);
-        if let Some(selected) = self.app_state.read(cx).selected_box.clone()
-            && let Some((_, _, view)) = views.iter().find(|(id, _, _)| id == &selected)
-            && let Some(handle) = handle_at(local, *view)
-        {
-            self.drag = Drag::Resizing {
-                id: selected,
-                handle,
+        if self.app_state.read(cx).draw_target.is_some() {
+            self.drag = Drag::DrawingTarget {
+                start: image,
+                current: image,
             };
             return;
         }
-        let rects: Vec<ViewRect> = views.iter().map(|(_, _, view)| *view).collect();
-        if let Some(index) = hit_test(local, &rects) {
+        let views = self.box_views(cx);
+        if event.modifiers.alt
+            && let Some(index) = hit_test(
+                local,
+                &views.iter().map(|(_, _, view)| *view).collect::<Vec<_>>(),
+            )
+        {
             let (id, rect, _) = views[index].clone();
-            self.app_state.update(cx, |app, cx| {
-                app.selected_box = Some(id.clone());
-                cx.notify();
-            });
+            self.select_box(id.clone(), cx);
             self.drag = Drag::Moving {
                 id,
                 origin: rect,
                 grab: image,
             };
-        } else {
-            self.app_state.update(cx, |app, cx| {
-                app.selected_box = None;
-                cx.notify();
-            });
+            return;
         }
-    }
-
-    fn on_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        if !matches!(self.drag, Drag::Idle) {
-            let image = self
-                .viewport
-                .view_to_image(self.local_point(event.position));
-            match &self.drag {
-                Drag::Moving { id, origin, grab } => {
-                    let dx = (image.x - grab.x).round() as i32;
-                    let dy = (image.y - grab.y).round() as i32;
-                    let moved = Rect {
-                        x: origin.x + dx,
-                        y: origin.y + dy,
-                        w: origin.w,
-                        h: origin.h,
-                    };
-                    let id = id.clone();
-                    self.app_state.update(cx, |app, cx| {
-                        place_rect(&mut app.scene, &id, moved);
-                        cx.notify();
-                    });
-                }
-                Drag::Resizing { id, handle } => {
-                    let id = id.clone();
-                    let handle = *handle;
-                    self.app_state.update(cx, |app, cx| {
-                        if let Some(rect) = app
-                            .scene
-                            .boxes
-                            .iter()
-                            .find(|element| element.id == id)
-                            .and_then(|element| element.src.or(element.tgt))
-                        {
-                            let resized = easel_core::geometry::resize_rect(rect, handle, image);
-                            place_rect(&mut app.scene, &id, resized);
-                            cx.notify();
-                        }
-                    });
-                }
-                _ => {}
-            }
+        let selected = self.app_state.read(cx).selected_box.clone();
+        if let Some((id, handle)) = Self::edge_target(local, selected.as_ref(), &views) {
+            self.select_box(id.clone(), cx);
+            self.drag = Drag::Resizing { id, handle };
+            return;
+        }
+        let rects: Vec<ViewRect> = views.iter().map(|(_, _, view)| *view).collect();
+        if let Some(index) = hit_test(local, &rects) {
+            let (id, _, _) = views[index].clone();
+            self.select_box(id, cx);
+            self.drag = Drag::Pressed {
+                start_view: local,
+                start_image: image,
+            };
+            return;
+        }
+        if self.app_state.read(cx).tool == Tool::Box && self.app_state.read(cx).box_tool_enabled() {
+            self.drag = Drag::Drawing {
+                start: image,
+                current: image,
+            };
             cx.notify();
             return;
         }
-        self.pan_move(event, cx);
+        self.app_state.update(cx, |app, cx| {
+            app.selected_box = None;
+            cx.notify();
+        });
+    }
+
+    fn select_box(&mut self, id: BoxId, cx: &mut Context<Self>) {
+        self.app_state.update(cx, |app, cx| {
+            app.selected_box = Some(id);
+            cx.notify();
+        });
+    }
+
+    fn edge_target(
+        local: Point,
+        selected: Option<&BoxId>,
+        views: &[(BoxId, Rect, ViewRect)],
+    ) -> Option<(BoxId, Handle)> {
+        if let Some(selected) = selected
+            && let Some((id, _, view)) = views.iter().find(|(id, _, _)| id == selected)
+            && let Some(handle) = edge_at(local, *view)
+        {
+            return Some((id.clone(), handle));
+        }
+        views
+            .iter()
+            .rev()
+            .find_map(|(id, _, view)| edge_at(local, *view).map(|handle| (id.clone(), handle)))
+    }
+
+    fn on_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if matches!(self.drag, Drag::Idle) {
+            self.pan_move(event, cx);
+            return;
+        }
+        let local = self.local_point(event.position);
+        let image = self.viewport.view_to_image(local);
+        let drag = std::mem::replace(&mut self.drag, Drag::Idle);
+        match drag {
+            Drag::Pressed {
+                start_view,
+                start_image,
+            } => {
+                let moved = (local.x - start_view.x).abs() + (local.y - start_view.y).abs();
+                self.drag = if moved > 4.0
+                    && self.app_state.read(cx).tool == Tool::Box
+                    && self.app_state.read(cx).box_tool_enabled()
+                {
+                    Drag::Drawing {
+                        start: start_image,
+                        current: image,
+                    }
+                } else {
+                    Drag::Pressed {
+                        start_view,
+                        start_image,
+                    }
+                };
+            }
+            Drag::Drawing { start, .. } => {
+                self.drag = Drag::Drawing {
+                    start,
+                    current: image,
+                };
+            }
+            Drag::DrawingTarget { start, .. } => {
+                self.drag = Drag::DrawingTarget {
+                    start,
+                    current: image,
+                };
+            }
+            Drag::Moving { id, origin, grab } => {
+                let dx = (image.x - grab.x).round() as i32;
+                let dy = (image.y - grab.y).round() as i32;
+                let moved = Rect {
+                    x: origin.x + dx,
+                    y: origin.y + dy,
+                    w: origin.w,
+                    h: origin.h,
+                };
+                self.app_state.update(cx, |app, cx| {
+                    place_rect(&mut app.scene, &id, moved);
+                    cx.notify();
+                });
+                self.drag = Drag::Moving { id, origin, grab };
+            }
+            Drag::Resizing { id, handle } => {
+                self.app_state.update(cx, |app, cx| {
+                    if let Some(rect) = app
+                        .scene
+                        .boxes
+                        .iter()
+                        .find(|element| element.id == id)
+                        .and_then(|element| element.src.or(element.tgt))
+                    {
+                        let resized = easel_core::geometry::resize_rect(rect, handle, image);
+                        place_rect(&mut app.scene, &id, resized);
+                        cx.notify();
+                    }
+                });
+                self.drag = Drag::Resizing { id, handle };
+            }
+            Drag::Idle => {}
+        }
+        cx.notify();
     }
 
     fn on_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
@@ -310,8 +393,8 @@ impl Canvas {
             .view_to_image(self.local_point(event.position));
         let drag = std::mem::replace(&mut self.drag, Drag::Idle);
         match drag {
-            Drag::Drawing { start } => self.finish_box(start, image, false, cx),
-            Drag::DrawingTarget { start } => self.finish_box(start, image, true, cx),
+            Drag::Drawing { start, .. } => self.finish_box(start, image, false, cx),
+            Drag::DrawingTarget { start, .. } => self.finish_box(start, image, true, cx),
             _ => {}
         }
     }
@@ -421,6 +504,39 @@ fn paint_marks(
                 window,
             );
         }
+    }
+}
+
+fn paint_handles(
+    origin: gpui::Point<Pixels>,
+    viewport: &Viewport,
+    rect: Rect,
+    window: &mut Window,
+) {
+    let view = view_of(viewport, rect);
+    let anchors = [
+        (view.x, view.y),
+        (view.x + view.w / 2.0, view.y),
+        (view.x + view.w, view.y),
+        (view.x + view.w, view.y + view.h / 2.0),
+        (view.x + view.w, view.y + view.h),
+        (view.x + view.w / 2.0, view.y + view.h),
+        (view.x, view.y + view.h),
+        (view.x, view.y + view.h / 2.0),
+    ];
+    let fill = theme::color(theme::TEXT, 1.0);
+    for (x, y) in anchors {
+        window.paint_quad(quad(
+            Bounds {
+                origin: point(origin.x + px(x - 3.0), origin.y + px(y - 3.0)),
+                size: size(px(6.0), px(6.0)),
+            },
+            0.0,
+            fill,
+            0.0,
+            fill,
+            BorderStyle::Solid,
+        ));
     }
 }
 
@@ -563,17 +679,9 @@ impl Render for Canvas {
                 None => app.scene.boxes.clone(),
             }
         };
+        let render_image = image.as_ref().map(|image| image.render.clone());
         let image_layer = match &image {
-            Some(image) => {
-                let rect = self.viewport.image_rect_in_view();
-                img(image.render.clone())
-                    .absolute()
-                    .left(px(rect.x))
-                    .top(px(rect.y))
-                    .w(px(rect.w.max(0.0)))
-                    .h(px(rect.h.max(0.0)))
-                    .into_any_element()
-            }
+            Some(_) => div().into_any_element(),
             None if frame.is_some() => {
                 let rect = self.viewport.image_rect_in_view();
                 div()
@@ -598,7 +706,19 @@ impl Render for Canvas {
                 .into_any_element(),
         };
         let painted = boxes.clone();
-        let viewport = self.viewport;
+        let draft = self.draft_rect().map(|rect| {
+            let frame = self.app_state.read(cx).scene.frame();
+            frame.map(|frame| rect.clamp_to(frame)).unwrap_or(rect)
+        });
+        let selected_mark = {
+            let selected = self.app_state.read(cx).selected_box.clone();
+            boxes.iter().find_map(|element| {
+                if selected.as_ref() != Some(&element.id) {
+                    return None;
+                }
+                element.src.or(element.tgt)
+            })
+        };
         let overlays = boxes.into_iter().filter_map(|element| {
             let rect = if element.kind == BoxKind::Move {
                 element.tgt.or(element.src)
@@ -661,12 +781,56 @@ impl Render for Canvas {
             .child(image_layer)
             .child(
                 canvas(
-                    move |bounds, _window, cx| {
-                        bounds_entity.update(cx, |canvas, cx| canvas.note_bounds(bounds, cx));
-                        (viewport, painted)
+                    move |bounds, window, cx| {
+                        // A resize that arrives mid-draw (GNOME snap) cannot
+                        // schedule a frame with `notify`. Measure here and paint
+                        // this frame from the new size.
+                        let (viewport, changed) =
+                            bounds_entity.update(cx, |canvas, _| canvas.note_bounds(bounds));
+                        if changed {
+                            let again = bounds_entity.clone();
+                            window.on_next_frame(move |_window, cx| {
+                                again.update(cx, |_, cx| cx.notify());
+                            });
+                        }
+                        (viewport, painted, draft, selected_mark, render_image)
                     },
-                    |bounds, (viewport, painted), window, _cx| {
+                    |bounds, (viewport, painted, draft, selected, render_image), window, _cx| {
+                        if let Some(render_image) = render_image {
+                            let rect = viewport.image_rect_in_view();
+                            let image_bounds = Bounds {
+                                origin: point(
+                                    bounds.origin.x + px(rect.x),
+                                    bounds.origin.y + px(rect.y),
+                                ),
+                                size: size(px(rect.w.max(0.0)), px(rect.h.max(0.0))),
+                            };
+                            window
+                                .paint_image(
+                                    image_bounds,
+                                    image_bounds,
+                                    gpui::Corners::default(),
+                                    render_image,
+                                    0,
+                                    false,
+                                )
+                                .ok();
+                        }
                         paint_marks(bounds.origin, &viewport, &painted, window);
+                        if let Some(rect) = draft {
+                            paint_mark(
+                                bounds.origin,
+                                &viewport,
+                                rect,
+                                theme::color(theme::BOX_NEW, theme::BOX_FILL_ALPHA),
+                                theme::color(theme::BOX_NEW, 1.0),
+                                BorderStyle::Solid,
+                                window,
+                            );
+                        }
+                        if let Some(rect) = selected {
+                            paint_handles(bounds.origin, &viewport, rect, window);
+                        }
                     },
                 )
                 .absolute()

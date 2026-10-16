@@ -112,15 +112,47 @@ pub fn decode_image(bytes: &[u8], label: &str) -> Result<DecodedImage, ImageErro
         h: rgba.height(),
     };
     let rgba_for_export = Arc::new(DynamicImage::ImageRgba8(rgba.clone()));
-    for pixel in rgba.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
-    }
+    rgba_to_bgra(&mut rgba);
     let render = Arc::new(RenderImage::new([image::Frame::new(rgba)]));
     Ok(DecodedImage {
         size,
         render,
         rgba_for_export,
     })
+}
+
+fn rgba_to_bgra(pixels: &mut [u8]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("ssse3") {
+            // SAFETY: the CPU supports SSSE3, which this routine requires.
+            unsafe { swizzle_ssse3(pixels) }
+            return;
+        }
+    }
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn swizzle_ssse3(pixels: &mut [u8]) {
+    use std::arch::x86_64::{_mm_loadu_si128, _mm_setr_epi8, _mm_shuffle_epi8, _mm_storeu_si128};
+
+    let mask = _mm_setr_epi8(2, 1, 0, 3, 6, 5, 4, 7, 10, 9, 8, 11, 14, 13, 12, 15);
+    let (chunks, rest) = pixels.as_chunks_mut::<16>();
+    for chunk in chunks {
+        // Each chunk is 16 bytes. These are the unaligned load and store.
+        unsafe {
+            let loaded = _mm_loadu_si128(chunk.as_ptr().cast());
+            let swapped = _mm_shuffle_epi8(loaded, mask);
+            _mm_storeu_si128(chunk.as_mut_ptr().cast(), swapped);
+        }
+    }
+    for pixel in rest.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
 }
 
 fn over_limit(width: u32, height: u32) -> bool {
@@ -402,6 +434,18 @@ mod tests {
         assert!(matches!(gif, ImageError::Unsupported { .. }), "{gif:?}");
         let bmp = decode_image(&fixture("tiny.bmp"), "tiny.bmp").unwrap_err();
         assert!(matches!(bmp, ImageError::Unsupported { .. }), "{bmp:?}");
+    }
+
+    #[test]
+    fn swizzle_covers_a_simd_chunk_and_the_tail() {
+        let mut pixels: Vec<u8> = (0..17u8)
+            .flat_map(|i| [i, i.wrapping_add(1), i.wrapping_add(2), 255])
+            .collect();
+        let expected: Vec<u8> = (0..17u8)
+            .flat_map(|i| [i.wrapping_add(2), i.wrapping_add(1), i, 255])
+            .collect();
+        super::rgba_to_bgra(&mut pixels);
+        assert_eq!(pixels, expected);
     }
 
     #[test]

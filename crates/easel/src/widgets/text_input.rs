@@ -7,11 +7,12 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, IntoElement,
-    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point, ShapedLine, SharedString, Style, Subscription, TextRun, UTF16Selection,
-    UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative, rgb, size,
+    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    GlobalElementId, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style,
+    Subscription, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, point,
+    prelude::*, px, relative, rgb, size,
 };
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
@@ -81,6 +82,7 @@ pub struct TextInput {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    scroll: Pixels,
     is_selecting: bool,
     preferred_column: usize,
     on_change: Option<Box<dyn Fn(&Value, &mut Window, &mut App) + 'static>>,
@@ -113,6 +115,7 @@ impl TextInput {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            scroll: px(0.0),
             is_selecting: false,
             preferred_column: 0,
             on_change: None,
@@ -413,7 +416,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        line.closest_index_for_x(position.x - bounds.left() + self.scroll)
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -640,13 +643,14 @@ impl EntityInputHandler for TextInput {
     ) -> Option<Bounds<Pixels>> {
         let last_layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
+        let scroll = self.scroll;
         Some(Bounds::from_corners(
             point(
-                bounds.left() + last_layout.x_for_index(range.start),
+                bounds.left() + last_layout.x_for_index(range.start) - scroll,
                 bounds.top(),
             ),
             point(
-                bounds.left() + last_layout.x_for_index(range.end),
+                bounds.left() + last_layout.x_for_index(range.end) - scroll,
                 bounds.bottom(),
             ),
         ))
@@ -660,7 +664,7 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+        let utf8_index = last_layout.index_for_x(point.x - line_point.x + self.scroll)?;
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -673,6 +677,7 @@ struct PrepaintState {
     lines: Vec<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
+    scroll: Pixels,
 }
 
 impl IntoElement for TextElement {
@@ -730,6 +735,8 @@ impl Element for TextElement {
         };
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
+        let multiline = input.multiline;
+        let focused = input.focus_handle.is_focused(window);
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let color = style.color;
@@ -742,7 +749,7 @@ impl Element for TextElement {
         };
         let mut lines = Vec::new();
         let mut cursor_origin = None;
-        let mut selection = None;
+        let mut selection_bounds = None;
         for (start, text) in logical {
             let display: SharedString = if text.is_empty() {
                 " ".into()
@@ -784,18 +791,22 @@ impl Element for TextElement {
                 let local_start = selected_range.start.saturating_sub(start).min(text.len());
                 let local_end = selected_range.end.saturating_sub(start).min(text.len());
                 let y = bounds.top() + window.line_height() * lines.len() as f32;
-                selection = Some(fill(
-                    Bounds::from_corners(
-                        point(bounds.left() + shaped.x_for_index(local_start), y),
-                        point(
-                            bounds.left() + shaped.x_for_index(local_end),
-                            y + window.line_height(),
-                        ),
+                selection_bounds = Some(Bounds::from_corners(
+                    point(bounds.left() + shaped.x_for_index(local_start), y),
+                    point(
+                        bounds.left() + shaped.x_for_index(local_end),
+                        y + window.line_height(),
                     ),
-                    rgb(theme::SELECTION),
                 ));
             }
             lines.push(shaped);
+        }
+        let cursor_x = cursor_origin
+            .map(|origin| origin.x - bounds.left())
+            .unwrap_or(px(0.0));
+        let scroll = single_line_scroll(multiline, focused, bounds.size.width, &lines, cursor_x);
+        if let Some(origin) = cursor_origin.as_mut() {
+            origin.x -= scroll;
         }
         let cursor = cursor_origin.map(|origin| {
             fill(
@@ -803,10 +814,15 @@ impl Element for TextElement {
                 rgb(theme::TEXT),
             )
         });
+        let selection = selection_bounds.map(|mut area| {
+            area.origin.x -= scroll;
+            fill(area, rgb(theme::SELECTION))
+        });
         PrepaintState {
             lines,
             cursor,
             selection,
+            scroll,
         }
     }
 
@@ -826,26 +842,35 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection);
-        }
-        let line_height = window.line_height();
-        for (index, line) in prepaint.lines.drain(..).enumerate() {
-            let origin = point(bounds.left(), bounds.top() + line_height * index as f32);
-            line.paint(origin, line_height, gpui::TextAlign::Left, None, window, cx)
-                .ok();
-            if index == 0 {
-                self.input.update(cx, |input, _| {
-                    input.last_layout = Some(line);
-                    input.last_bounds = Some(bounds);
-                });
+        // Clip to the padded content box. The field's own mask stops at the
+        // border, so a long line otherwise runs into the outline.
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection);
             }
-        }
-        if focus_handle.is_focused(window)
-            && let Some(cursor) = prepaint.cursor.take()
-        {
-            window.paint_quad(cursor);
-        }
+            let line_height = window.line_height();
+            let scroll = prepaint.scroll;
+            for (index, line) in prepaint.lines.drain(..).enumerate() {
+                let origin = point(
+                    bounds.left() - scroll,
+                    bounds.top() + line_height * index as f32,
+                );
+                line.paint(origin, line_height, gpui::TextAlign::Left, None, window, cx)
+                    .ok();
+                if index == 0 {
+                    self.input.update(cx, |input, _| {
+                        input.last_layout = Some(line);
+                        input.last_bounds = Some(bounds);
+                        input.scroll = scroll;
+                    });
+                }
+            }
+            if focus_handle.is_focused(window)
+                && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
+            }
+        });
     }
 }
 
@@ -889,6 +914,8 @@ impl Render for TextInput {
                 .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                 .on_mouse_move(cx.listener(Self::on_mouse_move))
                 .w_full()
+                .min_w(px(0.0))
+                .overflow_hidden()
                 .bg(rgb(theme::FIELD))
                 .text_color(rgb(theme::TEXT))
                 .text_sm()
@@ -906,6 +933,26 @@ impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
+}
+
+fn single_line_scroll(
+    multiline: bool,
+    focused: bool,
+    visible: Pixels,
+    lines: &[ShapedLine],
+    cursor_x: Pixels,
+) -> Pixels {
+    if multiline || !focused {
+        return px(0.0);
+    }
+    let width = lines.first().map(|line| line.width()).unwrap_or(px(0.0));
+    let max_scroll = (width - visible).max(px(0.0));
+    let scroll = if cursor_x > visible - px(2.0) {
+        cursor_x - visible + px(2.0)
+    } else {
+        px(0.0)
+    };
+    scroll.min(max_scroll).max(px(0.0))
 }
 
 pub(crate) fn line_spans(content: &str) -> Vec<(usize, usize)> {

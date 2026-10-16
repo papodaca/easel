@@ -41,11 +41,10 @@ impl Render for StatusBar {
             .items_center()
             .justify_between()
             .w_full()
+            .relative()
             .h(px(theme::STATUS_BAR_HEIGHT))
             .px(px(12.))
             .bg(rgb(theme::TITLE_BAR))
-            .border_t_1()
-            .border_color(rgb(theme::BORDER))
             .text_xs()
             .text_color(rgb(theme::TEXT_MUTED))
             .when(chrome::is_client_decorated(window), |bar| {
@@ -57,6 +56,15 @@ impl Render for StatusBar {
                     },
                 )
             })
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(theme::WINDOW_BORDER)
+                    .bg(rgb(theme::BORDER)),
+            )
             .child(status)
             .children(image_size)
     }

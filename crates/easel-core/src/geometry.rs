@@ -237,6 +237,33 @@ pub fn hit_test(point: Point, boxes: &[ViewRect]) -> Option<usize> {
     boxes.iter().rposition(|rect| contains(*rect, point))
 }
 
+/// The whole edge, not only the midpoint handle. Corners win when the pointer is near both edges.
+#[must_use]
+pub fn edge_at(point: Point, rect: ViewRect) -> Option<Handle> {
+    const TOLERANCE: f32 = 6.0;
+    let left = rect.x;
+    let right = rect.x + rect.w;
+    let top = rect.y;
+    let bottom = rect.y + rect.h;
+    let near_x = point.x >= left - TOLERANCE && point.x <= right + TOLERANCE;
+    let near_y = point.y >= top - TOLERANCE && point.y <= bottom + TOLERANCE;
+    let on_left = (point.x - left).abs() <= TOLERANCE && near_y;
+    let on_right = (point.x - right).abs() <= TOLERANCE && near_y;
+    let on_top = (point.y - top).abs() <= TOLERANCE && near_x;
+    let on_bottom = (point.y - bottom).abs() <= TOLERANCE && near_x;
+    match (on_left, on_right, on_top, on_bottom) {
+        (true, _, true, _) => Some(Handle::NorthWest),
+        (_, true, true, _) => Some(Handle::NorthEast),
+        (true, _, _, true) => Some(Handle::SouthWest),
+        (_, true, _, true) => Some(Handle::SouthEast),
+        (_, _, true, _) => Some(Handle::North),
+        (_, _, _, true) => Some(Handle::South),
+        (true, _, _, _) => Some(Handle::West),
+        (_, true, _, _) => Some(Handle::East),
+        _ => None,
+    }
+}
+
 #[must_use]
 pub fn handle_at(point: Point, rect: ViewRect) -> Option<Handle> {
     const TOLERANCE: f32 = 8.0;
@@ -328,7 +355,8 @@ fn clamp_offset(offset: f32, displayed: f32, view: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        GridBox, Handle, Point, Rect, Size, ViewRect, Viewport, handle_at, hit_test, resize_rect,
+        GridBox, Handle, Point, Rect, Size, ViewRect, Viewport, edge_at, handle_at, hit_test,
+        resize_rect,
     };
 
     #[test]
@@ -507,6 +535,25 @@ mod tests {
         assert_eq!(hit_test(Point { x: 60.0, y: 60.0 }, &boxes), Some(1));
         assert_eq!(hit_test(Point { x: 10.0, y: 10.0 }, &boxes), Some(0));
         assert_eq!(hit_test(Point { x: 200.0, y: 10.0 }, &boxes), None);
+    }
+
+    #[test]
+    fn edge_at_hits_the_side_between_corners() {
+        let rect = ViewRect {
+            x: 100.0,
+            y: 100.0,
+            w: 80.0,
+            h: 40.0,
+        };
+        assert_eq!(
+            edge_at(Point { x: 140.0, y: 102.0 }, rect),
+            Some(Handle::North)
+        );
+        assert_eq!(
+            edge_at(Point { x: 178.0, y: 120.0 }, rect),
+            Some(Handle::East)
+        );
+        assert_eq!(edge_at(Point { x: 140.0, y: 120.0 }, rect), None);
     }
 
     #[test]

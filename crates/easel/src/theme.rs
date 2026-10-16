@@ -47,8 +47,8 @@ pub const TITLE_BAR_HEIGHT: f32 = 34.0;
 pub const PANE_HEADER_HEIGHT: f32 = 32.0;
 pub const STATUS_BAR_HEIGHT: f32 = 28.0;
 pub const SIDE_PANEL_WIDTH: f32 = 320.0;
-pub const STRIP_HEIGHT: f32 = 56.0;
-pub const WINDOW_ROUNDING: Pixels = gpui::px(10.0);
+pub const HISTORY_WIDTH: f32 = 260.0;
+pub const WINDOW_ROUNDING: Pixels = gpui::px(12.0);
 pub const WINDOW_SHADOW: Pixels = gpui::px(10.0);
 pub const WINDOW_BORDER: Pixels = gpui::px(1.0);
 

@@ -296,6 +296,9 @@ impl Render for Root {
             .text_sm()
             .bg(rgb(theme::EDITOR))
             .text_color(rgb(theme::TEXT))
+            .when(chrome::is_client_decorated(window), |root| {
+                chrome::round_client_corners(root, chrome::tiling(window))
+            })
             .child(self.title_bar.clone())
             .child(
                 div()
@@ -305,6 +308,7 @@ impl Render for Root {
                     .w_full()
                     .min_h(px(0.))
                     .overflow_hidden()
+                    .child(self.side_panel.clone())
                     .child(
                         div()
                             .flex()
@@ -315,9 +319,8 @@ impl Render for Root {
                             .child(self.toolbar.clone())
                             .child(self.canvas.clone()),
                     )
-                    .child(self.side_panel.clone()),
+                    .child(self.bottom_strip.clone()),
             )
-            .child(self.bottom_strip.clone())
             .child(self.status_bar.clone());
 
         let root = cx.entity();
@@ -326,8 +329,10 @@ impl Render for Root {
             self.hovered_edge,
             move |edge, _window, cx| {
                 root.update(cx, |root, cx| {
-                    root.hovered_edge = edge;
-                    cx.notify();
+                    if root.hovered_edge != edge {
+                        root.hovered_edge = edge;
+                        cx.notify();
+                    }
                 });
             },
             window,

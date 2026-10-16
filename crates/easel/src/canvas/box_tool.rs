@@ -3,7 +3,10 @@ use std::sync::Arc;
 use easel_core::geometry::Point;
 use easel_core::providers::bfl::flux3::compile_prompt;
 use easel_core::scene::BoxKind;
-use gpui::{Focusable as _, MouseButton, TestAppContext, VisualTestContext, point, prelude::*, px};
+use gpui::{
+    Focusable as _, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, prelude::*,
+    px,
+};
 
 use crate::actions::{self, BoxTool, DeleteBox};
 use crate::app_state::{AppState, Tool};
@@ -182,6 +185,43 @@ fn drag_creates_one_box_in_image_space(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_box_is_visible_before_the_mouse_comes_up(cx: &mut TestAppContext) {
+    let (window, mut cx) = open(cx);
+    let root = surface(&window, &mut cx);
+    root.update(&mut cx, |surface, cx| {
+        surface
+            .app_state
+            .update(cx, |app, cx| app.set_aspect_ratio("1:1", cx));
+    });
+    let canvas = root.read_with(&cx, |surface, _| surface.canvas.clone());
+    use_box_tool(&mut cx, &canvas);
+    let (start, mid) = canvas.read_with(&cx, |canvas, _| {
+        let bounds = canvas.content_bounds();
+        let image = canvas.viewport().image_rect_in_view();
+        (
+            point(
+                bounds.origin.x + px(image.x + 40.0),
+                bounds.origin.y + px(image.y + 30.0),
+            ),
+            point(
+                bounds.origin.x + px(image.x + 120.0),
+                bounds.origin.y + px(image.y + 90.0),
+            ),
+        )
+    });
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(mid, MouseButton::Left, Modifiers::default());
+    let (count, draft) = canvas.read_with(&cx, |canvas, cx| {
+        (
+            canvas.app_state().read(cx).scene.boxes.len(),
+            canvas.draft_rect().map(|rect| rect.w > 2 && rect.h > 2),
+        )
+    });
+    assert_eq!(count, 0);
+    assert_eq!(draft, Some(true));
+}
+
+#[gpui::test]
 fn source_image_makes_a_new_box_and_a_frame_makes_layout(cx: &mut TestAppContext) {
     let (window, mut cx) = open(cx);
     let root = surface(&window, &mut cx);
@@ -203,7 +243,7 @@ fn source_image_makes_a_new_box_and_a_frame_makes_layout(cx: &mut TestAppContext
             .app_state
             .update(cx, |app, cx| app.set_image(source_image(), cx));
     });
-    drag(&mut cx, &canvas, (40.0, 40.0), (140.0, 120.0));
+    drag(&mut cx, &canvas, (70.0, 70.0), (150.0, 130.0));
     let kinds = canvas.read_with(&cx, |canvas, cx| {
         canvas
             .app_state()

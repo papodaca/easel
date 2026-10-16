@@ -5,7 +5,8 @@ use gpui::{
 };
 
 use crate::app_state::AppState;
-use crate::ui::section_label;
+use crate::theme;
+use crate::ui::Button;
 use crate::widgets::{Select, TextInput};
 
 pub struct Inspector {
@@ -26,20 +27,26 @@ impl Inspector {
             input
         });
         let kind = cx.new(|cx| {
-            Select::new(
+            let mut select = Select::new(
                 ["Layout", "New", "Keep", "Move", "Remove"]
                     .into_iter()
                     .map(Into::into)
                     .collect(),
                 cx,
-            )
+            );
+            select.set_label("Kind", cx);
+            select
         });
         let desc = cx.new(|cx| {
             let mut input = TextInput::new(cx);
             input.set_label("Description", cx);
             input
         });
-        let from_image = cx.new(|cx| Select::new(vec!["none".into(), "ref_image_0".into()], cx));
+        let from_image = cx.new(|cx| {
+            let mut select = Select::new(vec!["none".into(), "ref_image_0".into()], cx);
+            select.set_label("From", cx);
+            select
+        });
         let observe_state = app_state.clone();
         let observe = cx.observe(&observe_state, |_, _, cx| cx.notify());
         let inspector = Self {
@@ -246,28 +253,40 @@ impl Render for Inspector {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync(window, cx);
         if self.bound.is_none() {
-            return div().child(section_label("No box selected"));
+            return div();
         }
-        let allowed = self.app_state.read(cx).scene.allowed_kinds();
-        let help = format!(
-            "Available: {}",
-            allowed
-                .iter()
-                .map(|kind| kind_name(*kind))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        let state = self.app_state.clone();
         div()
             .flex()
             .flex_col()
+            .flex_none()
             .gap(px(8.))
-            .child(section_label("Box"))
+            .p(px(8.))
+            .rounded_md()
+            .bg(gpui::rgb(theme::SURFACE))
+            .border_1()
+            .border_color(gpui::rgb(theme::BORDER))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_sm().child("Box"))
+                    .child(
+                        Button::ghost("box-remove", "Remove").on_click(move |_, _, cx| {
+                            state.update(cx, |app, cx| {
+                                if let Some(id) = app.selected_box.take() {
+                                    app.scene.remove_box(&id);
+                                    app.draw_target = None;
+                                    cx.notify();
+                                }
+                            });
+                        }),
+                    ),
+            )
             .child(self.id_input.clone())
-            .child(section_label("Kind"))
             .child(self.kind.clone())
-            .child(section_label(help))
             .child(self.desc.clone())
-            .child(section_label("From"))
             .child(self.from_image.clone())
     }
 }

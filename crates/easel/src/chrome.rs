@@ -6,6 +6,8 @@
 //! decorations, `window.window_decorations()` reports `Server` and everything
 //! here degrades to a plain title row.
 
+use std::rc::Rc;
+
 use gpui::{
     App, Bounds, Context, CursorStyle, Decorations, FontWeight, HitboxBehavior, Hsla, IntoElement,
     MouseButton, ParentElement, Pixels, Point, Render, ResizeEdge, Size, Styled, Tiling, Window,
@@ -36,6 +38,10 @@ pub fn client_side_decorations(
         Decorations::Server => window.set_client_inset(px(0.)),
     }
     let client = matches!(decorations, Decorations::Client { .. });
+    let on_edge_change: Rc<dyn Fn(Option<ResizeEdge>, &mut Window, &mut App)> =
+        Rc::new(on_edge_change);
+    let on_edge_move = Rc::clone(&on_edge_change);
+    let on_edge_clear = Rc::clone(&on_edge_change);
 
     div()
         .id("window-backdrop")
@@ -52,7 +58,7 @@ pub fn client_side_decorations(
                         let size = window.window_bounds().get_bounds().size;
                         let edge = resize_edge(event.position, theme::WINDOW_SHADOW, size, tiling);
                         if edge != hovered_edge {
-                            on_edge_change(edge, window, cx);
+                            on_edge_move(edge, window, cx);
                         }
                     })
                     .on_mouse_down(
@@ -76,7 +82,7 @@ pub fn client_side_decorations(
                 .when(client, |frame| {
                     frame
                         .border_color(rgb(theme::BORDER))
-                        .map(|frame| round_client_corners(frame, tiling))
+                        .map(|frame| round_frame_corners(frame, tiling))
                         .when(!tiling.top, |div| div.border_t(theme::WINDOW_BORDER))
                         .when(!tiling.bottom, |div| div.border_b(theme::WINDOW_BORDER))
                         .when(!tiling.left, |div| div.border_l(theme::WINDOW_BORDER))
@@ -97,7 +103,15 @@ pub fn client_side_decorations(
                             ])
                         })
                 })
-                .on_mouse_move(|_, _, cx| cx.stop_propagation())
+                .on_mouse_move(move |_, window, cx| {
+                    // The shadow's mouse-move does not see events in here. Without
+                    // this, a resize cursor picked up on the edge stays over the form
+                    // until the pointer leaves the window.
+                    if hovered_edge.is_some() {
+                        on_edge_clear(None, window, cx);
+                    }
+                    cx.stop_propagation();
+                })
                 .child(content),
         )
         .when(client && resizable, |backdrop| {
@@ -113,7 +127,10 @@ pub fn client_side_decorations(
                         )
                     },
                     move |_, hitbox, window, _| {
-                        let Some(edge) = hovered_edge else {
+                        let mouse = window.mouse_position();
+                        let size = window.window_bounds().get_bounds().size;
+                        let Some(edge) = resize_edge(mouse, theme::WINDOW_SHADOW, size, tiling)
+                        else {
                             return;
                         };
                         let cursor = match edge {
@@ -147,19 +164,34 @@ pub fn is_client_decorated(window: &Window) -> bool {
     matches!(window.window_decorations(), Decorations::Client { .. })
 }
 
+fn round_frame_corners<E: Styled>(element: E, tiling: Tiling) -> E {
+    round_corners(element, tiling, theme::WINDOW_ROUNDING)
+}
+
+/// gpui clips to a rectangle, not to the frame's curve. A surface that reaches
+/// a corner has to round itself, one border-width inside the frame, or its
+/// square fill shows outside the border arc.
 pub fn round_client_corners<E: Styled>(element: E, tiling: Tiling) -> E {
+    round_corners(
+        element,
+        tiling,
+        theme::WINDOW_ROUNDING - theme::WINDOW_BORDER,
+    )
+}
+
+fn round_corners<E: Styled>(element: E, tiling: Tiling, radius: Pixels) -> E {
     let mut element = element;
     if !(tiling.top || tiling.left) {
-        element = element.rounded_tl(theme::WINDOW_ROUNDING);
+        element = element.rounded_tl(radius);
     }
     if !(tiling.top || tiling.right) {
-        element = element.rounded_tr(theme::WINDOW_ROUNDING);
+        element = element.rounded_tr(radius);
     }
     if !(tiling.bottom || tiling.left) {
-        element = element.rounded_bl(theme::WINDOW_ROUNDING);
+        element = element.rounded_bl(radius);
     }
     if !(tiling.bottom || tiling.right) {
-        element = element.rounded_br(theme::WINDOW_ROUNDING);
+        element = element.rounded_br(radius);
     }
     element
 }
@@ -233,11 +265,10 @@ impl Render for TitleBar {
             .flex_row()
             .flex_none()
             .items_center()
+            .relative()
             .w_full()
             .h(px(theme::TITLE_BAR_HEIGHT))
             .bg(rgb(theme::TITLE_BAR))
-            .border_b_1()
-            .border_color(rgb(theme::BORDER))
             .text_sm()
             .text_color(rgb(theme::TEXT))
             .when(client, |bar| {
@@ -278,6 +309,15 @@ impl Render for TitleBar {
                     })
                 })
             })
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .h(theme::WINDOW_BORDER)
+                    .bg(rgb(theme::BORDER)),
+            )
             .children(left_controls)
             .when(
                 layout.is_none_or(|layout| layout.left[0].is_none()),

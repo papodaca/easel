@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use gpui::{
-    Anchor, App, Context, FocusHandle, Focusable, MouseButton, SharedString, Window, anchored,
-    deferred, div, prelude::*, px, rgb,
+    Anchor, App, Bounds, Context, FocusHandle, Focusable, MouseButton, Pixels, SharedString,
+    Window, anchored, canvas, deferred, div, prelude::*, px, rgb,
 };
 use serde_json::Value;
 
@@ -18,6 +18,7 @@ pub struct Select {
     label: Option<String>,
     help: Option<String>,
     enabled: bool,
+    bounds: Bounds<Pixels>,
     on_change: Option<Box<dyn Fn(&Value, &mut Window, &mut App) + 'static>>,
 }
 
@@ -32,8 +33,24 @@ impl Select {
             label: None,
             help: None,
             enabled: true,
+            bounds: Bounds::default(),
             on_change: None,
         }
+    }
+
+    pub fn set_label(&mut self, label: impl Into<String>, cx: &mut Context<Self>) {
+        self.label = Some(label.into());
+        cx.notify();
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn click_point(&self) -> gpui::Point<Pixels> {
+        self.bounds.center()
     }
 
     pub fn value(&self) -> &Value {
@@ -179,15 +196,17 @@ impl gpui::Render for Select {
                     ),
             )
         });
+        let bounds_entity = cx.entity();
         field_row(
             self.label.as_deref(),
             self.help.as_deref(),
             div()
-                .id("select")
+                .id(("select", cx.entity_id()))
                 .key_context("Select")
                 .track_focus(&self.focus_handle)
                 .relative()
                 .w_full()
+                .min_w(px(0.0))
                 .min_h(px(30.0))
                 .px(px(8.0))
                 .py(px(5.0))
@@ -196,8 +215,34 @@ impl gpui::Render for Select {
                 .text_color(rgb(theme::TEXT))
                 .border_1()
                 .border_color(rgb(border))
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        if !this.enabled {
+                            return;
+                        }
+                        this.focus_handle.focus(window, cx);
+                        if this.open {
+                            this.open = false;
+                            cx.notify();
+                        } else {
+                            this.open_menu(cx);
+                        }
+                    }),
+                )
                 .on_key_down(cx.listener(Self::on_key_down))
-                .child(current)
+                .child(
+                    canvas(
+                        move |bounds, _, cx| {
+                            bounds_entity.update(cx, |this, _| this.bounds = bounds);
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+                .child(div().overflow_hidden().w_full().child(current))
                 .children(menu),
         )
     }

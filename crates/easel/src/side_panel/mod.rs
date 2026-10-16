@@ -14,7 +14,10 @@ mod form_tests;
 #[cfg(test)]
 mod generate_tests;
 
-use gpui::{Context, IntoElement, ParentElement, Render, Styled, Window, div, prelude::*, px, rgb};
+use gpui::{
+    Bounds, Context, IntoElement, MouseButton, ParentElement, Pixels, Render, ScrollHandle, Styled,
+    Window, canvas, div, point, prelude::*, px, quad, rgb, size,
+};
 
 pub use inspector::Inspector;
 
@@ -33,6 +36,9 @@ pub struct SidePanel {
     form: gpui::Entity<SchemaForm>,
     validation: gpui::Entity<Validation>,
     runner: Option<gpui::Entity<crate::jobs::JobRunner<easel_core::providers::bfl::flux3::Flux3>>>,
+    scroll: ScrollHandle,
+    thumb: Bounds<Pixels>,
+    thumb_grab: Option<Pixels>,
 }
 
 impl SidePanel {
@@ -60,7 +66,32 @@ impl SidePanel {
             form,
             validation,
             runner,
+            scroll: ScrollHandle::new(),
+            thumb: Bounds::default(),
+            thumb_grab: None,
         }
+    }
+
+    fn scroll_by_thumb(&mut self, y: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(grab) = self.thumb_grab else {
+            return;
+        };
+        let track = self.scroll.bounds();
+        let max_y = self.scroll.max_offset().y;
+        if max_y <= px(0.) {
+            return;
+        }
+        let viewport = track.size.height;
+        let content = viewport + max_y;
+        let inset = px(2.);
+        let track_h = (viewport - inset * 2.).max(px(0.));
+        let thumb_h = (viewport / content * track_h).clamp(px(18.), track_h);
+        let travel = (track_h - thumb_h).max(px(1.));
+        let top = (y - track.top() - inset - grab).clamp(px(0.), travel);
+        let progress = top / travel;
+        self.scroll.set_offset(point(px(0.), -max_y * progress));
+        window.refresh();
+        cx.notify();
     }
 
     pub fn generate(&mut self, cx: &mut Context<Self>) {
@@ -151,20 +182,126 @@ impl Render for SidePanel {
             .w(px(theme::SIDE_PANEL_WIDTH))
             .h_full()
             .bg(rgb(theme::PANEL))
-            .border_l_1()
+            .border_r_1()
             .border_color(rgb(theme::BORDER))
             .text_color(rgb(theme::TEXT))
             .child(header)
-            .child(
+            .child({
+                let scroll = self.scroll.clone();
+                let panel = cx.entity();
                 div()
-                    .id("side-panel-body")
-                    .flex()
-                    .flex_col()
+                    .relative()
                     .flex_1()
                     .min_h(px(0.))
-                    .overflow_y_scroll()
-                    .p(px(12.))
-                    .child(body),
-            )
+                    .w_full()
+                    .child(
+                        div()
+                            .id("side-panel-body")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .scrollbar_width(px(10.))
+                            .track_scroll(&self.scroll)
+                            .p(px(12.))
+                            .child(body),
+                    )
+                    .child(
+                        div()
+                            .id("editor-scrollbar")
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .h_full()
+                            .w(px(10.))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                    if this.thumb.contains(&event.position) {
+                                        this.thumb_grab = Some(event.position.y - this.thumb.top());
+                                    } else if this.scroll.max_offset().y > px(0.) {
+                                        this.thumb_grab = Some(this.thumb.size.height / 2.);
+                                        this.scroll_by_thumb(event.position.y, window, cx);
+                                    }
+                                }),
+                            )
+                            .on_mouse_move(cx.listener(
+                                |this, event: &gpui::MouseMoveEvent, window, cx| {
+                                    this.scroll_by_thumb(event.position.y, window, cx);
+                                },
+                            ))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.thumb_grab = None;
+                                    cx.notify();
+                                }),
+                            )
+                            .on_mouse_up_out(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.thumb_grab = None;
+                                    cx.notify();
+                                }),
+                            )
+                            .child({
+                                let paint_scroll = scroll.clone();
+                                canvas(
+                                    move |_bounds, _, cx| {
+                                        let thumb = editor_thumb(&scroll);
+                                        panel.update(cx, |panel, _| {
+                                            panel.thumb = thumb.unwrap_or_default();
+                                        });
+                                    },
+                                    move |_bounds, _, window, _| {
+                                        let Some(thumb) = editor_thumb(&paint_scroll) else {
+                                            return;
+                                        };
+                                        let track = paint_scroll.bounds();
+                                        window.paint_quad(quad(
+                                            Bounds {
+                                                origin: point(track.right() - px(10.), track.top()),
+                                                size: size(px(10.), track.size.height),
+                                            },
+                                            px(0.),
+                                            theme::color(theme::PANEL, 1.),
+                                            px(0.),
+                                            theme::color(theme::PANEL, 0.),
+                                            gpui::BorderStyle::Solid,
+                                        ));
+                                        window.paint_quad(quad(
+                                            thumb,
+                                            px(3.),
+                                            theme::color(theme::TEXT, 0.55),
+                                            px(0.),
+                                            theme::color(theme::TEXT, 0.),
+                                            gpui::BorderStyle::Solid,
+                                        ));
+                                    },
+                                )
+                                .size_full()
+                            }),
+                    )
+            })
     }
+}
+
+fn editor_thumb(scroll: &ScrollHandle) -> Option<Bounds<Pixels>> {
+    let track = scroll.bounds();
+    let max_y = scroll.max_offset().y;
+    if max_y <= px(1.) || track.size.height <= px(1.) {
+        return None;
+    }
+    let viewport = track.size.height;
+    let content = viewport + max_y;
+    let inset = px(3.);
+    let track_h = (viewport - inset * 2.).max(px(0.));
+    let thumb_h = (viewport / content * track_h).clamp(px(28.), track_h);
+    let travel = (track_h - thumb_h).max(px(0.));
+    let progress = (-scroll.offset().y / max_y).clamp(0., 1.);
+    Some(Bounds {
+        origin: point(
+            track.right() - px(8.),
+            track.top() + inset + travel * progress,
+        ),
+        size: size(px(6.), thumb_h),
+    })
 }

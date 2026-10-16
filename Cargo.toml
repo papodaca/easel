@@ -43,6 +43,9 @@ syn = { opt-level = 3 }
 quote = { opt-level = 3 }
 proc-macro2 = { opt-level = 3 }
 image = { opt-level = 3 }
+# JPEG bytes are decoded in these crates, not in `image`.
+zune-jpeg = { opt-level = 3 }
+zune-core = { opt-level = 3 }
 
 [profile.release]
 lto = "thin"

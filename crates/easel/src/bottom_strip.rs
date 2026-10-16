@@ -16,7 +16,7 @@ use crate::app_state::AppState;
 use crate::image_load::decode_image;
 use crate::jobs::{JobRunner, LiveJob, inspection_from, promote};
 use crate::theme;
-use crate::ui::Button;
+use crate::ui::{Button, pane_header};
 
 const CARD_LIMIT: usize = 2 * 1024;
 const DETAIL_LIMIT: usize = 16 * 1024;
@@ -418,7 +418,7 @@ impl Render for BottomStrip {
                     .flex_row()
                     .items_center()
                     .gap(px(6.))
-                    .w(px(160.))
+                    .w_full()
                     .h(px(48.))
                     .px(px(6.))
                     .border_1()
@@ -473,22 +473,25 @@ impl Render for BottomStrip {
             .flex()
             .flex_col()
             .flex_none()
-            .w_full()
+            .w(px(theme::HISTORY_WIDTH))
+            .h_full()
+            .min_h(px(0.))
             .bg(rgb(theme::PANEL))
-            .border_t_1()
+            .border_l_1()
             .border_color(rgb(theme::BORDER))
             .text_color(rgb(theme::TEXT))
+            .child(pane_header("History"))
             .child(
                 div()
                     .id("bottom-strip")
                     .flex()
-                    .flex_row()
-                    .items_center()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.))
                     .gap(px(8.))
                     .w_full()
-                    .h(px(theme::STRIP_HEIGHT))
-                    .px(px(12.))
-                    .overflow_x_scroll()
+                    .p(px(8.))
+                    .overflow_y_scroll()
                     .children(entries),
             )
             .when(selected.is_some(), |strip| {
@@ -496,10 +499,12 @@ impl Render for BottomStrip {
                     div()
                         .flex()
                         .flex_row()
+                        .flex_wrap()
                         .items_center()
                         .gap(px(6.))
-                        .h(px(theme::PANE_HEADER_HEIGHT))
-                        .px(px(12.))
+                        .w_full()
+                        .px(px(8.))
+                        .py(px(6.))
                         .border_t_1()
                         .border_color(rgb(theme::BORDER))
                         .when(pending, |row| {

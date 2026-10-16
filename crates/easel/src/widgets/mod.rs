@@ -34,6 +34,7 @@ pub fn field_row(
         .flex_col()
         .gap(px(4.0))
         .w_full()
+        .min_w(px(0.0))
         .text_color(rgb(theme::TEXT));
     if let Some(label) = label {
         column = column.child(
@@ -218,6 +219,25 @@ mod tests {
             json!("blue")
         );
         assert_eq!(seen.lock().expect("changes").len(), before);
+    }
+
+    #[gpui::test]
+    fn select_click_opens_the_menu(cx: &mut TestAppContext) {
+        let (window, mut cx) = open(cx, |_, cx| {
+            Select::new(vec!["red".into(), "green".into(), "blue".into()], cx)
+        });
+        let select = window.root(&mut cx).unwrap();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let point = select.read_with(&cx, |select, _| select.click_point());
+        cx.simulate_click(point, Modifiers::default());
+        assert!(select.read_with(&cx, |select, _| select.is_open()));
+        cx.simulate_keystrokes("down down enter");
+        assert_eq!(
+            select.read_with(&cx, |select, _| select.value().clone()),
+            json!("blue")
+        );
     }
 
     #[gpui::test]
