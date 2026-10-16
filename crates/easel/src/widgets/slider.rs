@@ -136,7 +136,6 @@ impl gpui::Render for Slider {
                 .relative()
                 .w_full()
                 .h(px(28.0))
-                .bg(rgb(theme::FIELD))
                 .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                 .on_mouse_move(cx.listener(Self::on_mouse_move))
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -155,18 +154,33 @@ impl gpui::Render for Slider {
                     div()
                         .absolute()
                         .left(px(0.0))
-                        .top(px(10.0))
-                        .h(px(8.0))
-                        .w(gpui::relative(fraction as f32))
-                        .bg(rgb(theme::BUTTON_HOVER)),
+                        .top(px(12.0))
+                        .h(px(4.0))
+                        .w_full()
+                        .rounded_full()
+                        .bg(rgb(theme::ELEMENT)),
                 )
                 .child(
                     div()
                         .absolute()
-                        .top(px(4.0))
+                        .left(px(0.0))
+                        .top(px(12.0))
+                        .h(px(4.0))
+                        .w(gpui::relative(fraction as f32))
+                        .rounded_full()
+                        .bg(rgb(theme::ACCENT)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(7.0))
                         .left(gpui::relative(fraction as f32))
-                        .size(px(16.0))
-                        .bg(rgb(theme::TEXT)),
+                        .ml(px(-7.0))
+                        .size(px(14.0))
+                        .rounded_full()
+                        .bg(rgb(theme::TEXT))
+                        .border_1()
+                        .border_color(rgb(theme::BORDER)),
                 ),
         )
     }

@@ -7,14 +7,14 @@ use std::sync::{Arc, Mutex};
 use easel_core::http::{Body, HttpRequest, Method};
 use easel_core::model_spec::ProviderId;
 use gpui::{
-    App, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, prelude::*, px,
-    rgb,
+    Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, prelude::*, px, rgb,
 };
 use zeroize::Zeroizing;
 
 use crate::net::{HttpTransport, KeyResolver};
 use crate::notifications::{Notifications, Toast, ToastLevel};
 use crate::theme;
+use crate::ui::{Button, muted_text, section_label};
 use crate::widgets::TextInput;
 
 const TEST_URL: &str = "https://api.bfl.ai/v1/get_result?id=nonexistent";
@@ -397,21 +397,21 @@ impl Render for SettingsPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let note = self.note.clone();
         let field_message = self.field_message.clone();
+        let reveal_label = if self.revealed { "Hide" } else { "Reveal" };
         div()
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(px(10.0))
             .w_full()
-            .bg(rgb(theme::SIDE_PANEL))
             .text_color(rgb(theme::TEXT))
-            .child("BFL")
+            .child(section_label("Black Forest Labs"))
             .child(self.draft.clone())
-            .child(div().text_sm().text_color(rgb(theme::MUTED)).child(note))
-            .when(!field_message.is_empty(), |row| {
-                row.child(
+            .child(muted_text(note))
+            .when(!field_message.is_empty(), |column| {
+                column.child(
                     div()
                         .text_sm()
-                        .text_color(rgb(theme::TOAST_ERROR))
+                        .text_color(rgb(theme::ERROR))
                         .child(field_message),
                 )
             })
@@ -419,39 +419,28 @@ impl Render for SettingsPanel {
                 div()
                     .flex()
                     .flex_row()
-                    .gap(px(8.0))
-                    .child(button(
-                        "Reveal",
-                        cx.listener(|this, _, _, cx| this.reveal(cx)),
-                    ))
-                    .child(button("Save", cx.listener(|this, _, _, cx| this.save(cx))))
-                    .child(button(
-                        "Clear",
-                        cx.listener(|this, _, _, cx| this.clear(cx)),
-                    ))
-                    .child(button(
-                        "Test",
-                        cx.listener(|this, _, _, cx| {
-                            this.test_key(cx).detach();
-                        }),
-                    )),
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        Button::filled("settings-save", "Save")
+                            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+                    )
+                    .child(
+                        Button::filled("settings-test", "Test").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.test_key(cx).detach();
+                            },
+                        )),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::ghost("settings-reveal", reveal_label)
+                            .on_click(cx.listener(|this, _, _, cx| this.reveal(cx))),
+                    )
+                    .child(
+                        Button::ghost("settings-clear", "Clear")
+                            .on_click(cx.listener(|this, _, _, cx| this.clear(cx))),
+                    ),
             )
     }
-}
-
-fn button(
-    label: &'static str,
-    handler: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(label)
-        .flex()
-        .items_center()
-        .h(px(28.0))
-        .px(px(10.0))
-        .bg(rgb(theme::BUTTON))
-        .text_color(rgb(theme::TEXT))
-        .cursor_pointer()
-        .on_click(handler)
-        .child(label)
 }

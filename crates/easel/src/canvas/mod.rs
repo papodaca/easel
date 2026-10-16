@@ -170,9 +170,13 @@ impl Render for Canvas {
             }
             None => div()
                 .size_full()
-                .p(px(12.))
-                .text_color(rgb(theme::TEXT))
-                .child("Canvas")
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .italic()
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child("Open an image, drop one here, or paste to start.")
                 .into_any_element(),
         };
         let bounds_entity = cx.entity();
@@ -183,10 +187,10 @@ impl Render for Canvas {
             .on_action(cx.listener(|this, _: &ActualSize, _, cx| this.actual_size(cx)))
             .relative()
             .flex_1()
-            .h_full()
-            .min_w(px(0.))
+            .size_full()
+            .min_h(px(0.))
             .overflow_hidden()
-            .bg(rgb(theme::CANVAS))
+            .bg(rgb(theme::EDITOR))
             .text_color(rgb(theme::TEXT))
             .child(image_layer)
             .child(

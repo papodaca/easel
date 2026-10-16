@@ -38,8 +38,8 @@ pub fn field_row(
     if let Some(label) = label {
         column = column.child(
             gpui::div()
-                .text_sm()
-                .text_color(rgb(theme::TEXT))
+                .text_xs()
+                .text_color(rgb(theme::TEXT_MUTED))
                 .child(label.to_owned()),
         );
     }
@@ -47,8 +47,8 @@ pub fn field_row(
     if let Some(help) = help {
         column = column.child(
             gpui::div()
-                .text_sm()
-                .text_color(rgb(theme::MUTED))
+                .text_xs()
+                .text_color(rgb(theme::TEXT_MUTED))
                 .child(help.to_owned()),
         );
     }

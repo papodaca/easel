@@ -130,9 +130,9 @@ impl gpui::Render for Select {
             .unwrap_or_else(|| "Select".to_owned());
         let focused = self.focus_handle.is_focused(window);
         let border = if focused {
-            theme::BUTTON_HOVER
+            theme::BORDER_FOCUSED
         } else {
-            theme::MUTED
+            theme::BORDER
         };
         let menu = self.open.then(|| {
             let highlight = self.highlight;
@@ -144,10 +144,13 @@ impl gpui::Render for Select {
                     .child(
                         div()
                             .w(px(220.0))
-                            .bg(rgb(theme::SIDE_PANEL))
+                            .py(px(4.0))
+                            .rounded_md()
+                            .shadow_md()
+                            .bg(rgb(theme::SURFACE))
                             .text_color(rgb(theme::TEXT))
                             .border_1()
-                            .border_color(rgb(theme::BUTTON_HOVER))
+                            .border_color(rgb(theme::BORDER))
                             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                                 this.open = false;
                                 cx.notify();
@@ -155,12 +158,14 @@ impl gpui::Render for Select {
                             .children(options.into_iter().enumerate().map(|(index, option)| {
                                 let selected = index == highlight;
                                 div()
+                                    .mx(px(4.0))
                                     .px(px(8.0))
-                                    .py(px(6.0))
+                                    .py(px(4.0))
+                                    .rounded_sm()
                                     .bg(rgb(if selected {
-                                        theme::BUTTON
+                                        theme::ELEMENT_HOVER
                                     } else {
-                                        theme::SIDE_PANEL
+                                        theme::SURFACE
                                     }))
                                     .child(option.to_string())
                                     .on_mouse_down(
@@ -183,9 +188,10 @@ impl gpui::Render for Select {
                 .track_focus(&self.focus_handle)
                 .relative()
                 .w_full()
-                .min_h(px(36.0))
+                .min_h(px(30.0))
                 .px(px(8.0))
-                .py(px(6.0))
+                .py(px(5.0))
+                .rounded_sm()
                 .bg(rgb(theme::FIELD))
                 .text_color(rgb(theme::TEXT))
                 .border_1()

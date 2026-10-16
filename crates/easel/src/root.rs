@@ -1,17 +1,20 @@
 use gpui::{
     App, Context, ExternalPaths, FocusHandle, Focusable, IntoElement, ParentElement,
-    PathPromptOptions, Render, Styled, Window, div, prelude::*, px, rgb,
+    PathPromptOptions, Render, ResizeEdge, Styled, Window, div, prelude::*, px, rgb,
 };
 
 use crate::actions::{ActualSize, Fit, Open, Paste, Quit, SaveAs, Settings};
 use crate::app_state::AppState;
+use crate::assets;
 use crate::bottom_strip::BottomStrip;
 use crate::canvas::Canvas;
+use crate::chrome::{self, TitleBar};
 use crate::image_load::{self, prompt_failure_text};
 use crate::net::{HttpTransport, ReqwestTransport};
 use crate::notifications::Notifications;
 use crate::settings::{Resolver, SettingsPanel, SharedKeys};
 use crate::side_panel::SidePanel;
+use crate::status_bar::StatusBar;
 use crate::theme;
 use crate::toolbar::Toolbar;
 
@@ -19,17 +22,22 @@ pub struct Root {
     focus_handle: FocusHandle,
     pub app_state: gpui::Entity<AppState>,
     notifications: gpui::Entity<Notifications>,
+    title_bar: gpui::Entity<TitleBar>,
     toolbar: gpui::Entity<Toolbar>,
     canvas: gpui::Entity<Canvas>,
     side_panel: gpui::Entity<SidePanel>,
     bottom_strip: gpui::Entity<BottomStrip>,
+    status_bar: gpui::Entity<StatusBar>,
+    hovered_edge: Option<ResizeEdge>,
 }
 
 impl Root {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let app_state = cx.new(|_cx| AppState::new());
         let notifications = cx.new(|_cx| Notifications::new());
-        let toolbar = cx.new(|_cx| Toolbar::new(notifications.clone()));
+        let title_bar = cx.new(|_cx| TitleBar::new());
+        let toolbar = cx.new(|_cx| Toolbar);
+        let status_bar = cx.new(|_cx| StatusBar::new(notifications.clone(), app_state.clone()));
         let canvas = cx.new(|cx| Canvas::new(app_state.clone(), notifications.clone(), cx));
         let keys = std::sync::Arc::new(SharedKeys::default());
         let transport: std::sync::Arc<dyn HttpTransport> = std::sync::Arc::new(
@@ -43,10 +51,13 @@ impl Root {
             focus_handle: cx.focus_handle(),
             app_state,
             notifications,
+            title_bar,
             toolbar,
             canvas,
             side_panel,
             bottom_strip,
+            status_bar,
+            hovered_edge: None,
         }
     }
 
@@ -197,7 +208,7 @@ impl Render for Root {
         {
             window.drop_image(image).ok();
         }
-        div()
+        let content = div()
             .id("root")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::open))
@@ -216,14 +227,16 @@ impl Render for Root {
                 );
             }))
             .drag_over::<ExternalPaths>(|style, _, _, _| {
-                style.border_2().border_color(rgb(theme::BUTTON_HOVER))
+                style.border_2().border_color(rgb(theme::ACCENT))
             })
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(theme::WINDOW))
+            .font_family(assets::UI_FONT)
+            .text_sm()
+            .bg(rgb(theme::EDITOR))
             .text_color(rgb(theme::TEXT))
-            .child(self.toolbar.clone())
+            .child(self.title_bar.clone())
             .child(
                 div()
                     .flex()
@@ -232,10 +245,33 @@ impl Render for Root {
                     .w_full()
                     .min_h(px(0.))
                     .overflow_hidden()
-                    .child(self.canvas.clone())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .h_full()
+                            .child(self.toolbar.clone())
+                            .child(self.canvas.clone()),
+                    )
                     .child(self.side_panel.clone()),
             )
             .child(self.bottom_strip.clone())
+            .child(self.status_bar.clone());
+
+        let root = cx.entity();
+        chrome::client_side_decorations(
+            content,
+            self.hovered_edge,
+            move |edge, _window, cx| {
+                root.update(cx, |root, cx| {
+                    root.hovered_edge = edge;
+                    cx.notify();
+                });
+            },
+            window,
+        )
     }
 }
 

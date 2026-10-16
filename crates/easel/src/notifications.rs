@@ -6,6 +6,7 @@ use gpui::{
 };
 
 use crate::theme;
+use crate::ui::Button;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToastLevel {
@@ -109,50 +110,50 @@ impl Render for Notifications {
             .collect::<Vec<_>>();
         div()
             .absolute()
-            .top(px(8.))
-            .right(px(8.))
+            .bottom(px(12.))
+            .right(px(12.))
             .flex()
             .flex_col()
-            .gap(px(6.))
+            .gap(px(8.))
             .children(toasts)
     }
 }
 
 fn toast_view(toast: &LiveToast, cx: &mut Context<Notifications>) -> gpui::AnyElement {
     let id = toast.id;
-    let background = match toast.level {
-        ToastLevel::Info => theme::TOAST_INFO,
-        ToastLevel::Error => theme::TOAST_ERROR,
+    let (marker, marker_color) = match toast.level {
+        ToastLevel::Info => ("Info", theme::ACCENT),
+        ToastLevel::Error => ("Error", theme::ERROR),
     };
     let mut body = div()
         .id(("toast", id))
         .flex()
         .flex_col()
-        .gap(px(6.))
-        .w(px(280.))
-        .p(px(8.))
-        .bg(rgb(background))
+        .gap(px(8.))
+        .w(px(300.))
+        .p(px(12.))
+        .rounded_md()
+        .bg(rgb(theme::SURFACE))
+        .border_1()
+        .border_color(rgb(theme::BORDER))
+        .shadow_md()
+        .text_sm()
         .text_color(rgb(theme::TEXT))
         .cursor_pointer()
         .on_click(cx.listener(move |this, _, _, cx| this.dismiss(id, cx)))
+        .child(div().text_xs().text_color(rgb(marker_color)).child(marker))
         .child(toast.text.clone());
     if let Some((label, action)) = &toast.action {
         let action = action.boxed_clone();
-        body = body.child(
-            div()
-                .id(("toast-action", id))
-                .px(px(8.))
-                .py(px(4.))
-                .bg(rgb(theme::BUTTON))
-                .text_color(rgb(theme::TEXT))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, window, cx| {
+        body = body.child(div().flex().flex_row().justify_end().child(
+            Button::filled(("toast-action", id), label.clone()).on_click(cx.listener(
+                move |this, _, window, cx| {
                     window.dispatch_action(action.boxed_clone(), cx);
                     this.dismiss(id, cx);
                     cx.stop_propagation();
-                }))
-                .child(label.clone()),
-        );
+                },
+            )),
+        ));
     }
     body.into_any_element()
 }

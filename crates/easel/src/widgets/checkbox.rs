@@ -100,9 +100,9 @@ impl gpui::Render for Checkbox {
         let focused = self.focus_handle.is_focused(window);
         let mark = if self.checked { "✓" } else { "" };
         let border = if focused {
-            theme::BUTTON_HOVER
+            theme::BORDER_FOCUSED
         } else {
-            theme::MUTED
+            theme::BORDER
         };
         field_row(
             self.label.as_deref(),
@@ -111,10 +111,16 @@ impl gpui::Render for Checkbox {
                 .id("checkbox")
                 .track_focus(&self.focus_handle)
                 .relative()
-                .size(px(28.0))
-                .bg(rgb(theme::FIELD))
+                .size(px(20.0))
+                .rounded_sm()
+                .bg(rgb(if self.checked {
+                    theme::ELEMENT_HOVER
+                } else {
+                    theme::FIELD
+                }))
                 .text_color(rgb(theme::TEXT))
-                .border_2()
+                .text_xs()
+                .border_1()
                 .border_color(rgb(border))
                 .flex()
                 .items_center()

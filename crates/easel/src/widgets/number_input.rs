@@ -164,10 +164,15 @@ impl gpui::Render for NumberInput {
                     div()
                         .id("number-step-up")
                         .relative()
-                        .w(px(32.0))
-                        .h(px(32.0))
+                        .w(px(28.0))
+                        .h(px(28.0))
                         .flex_none()
-                        .bg(rgb(theme::BUTTON))
+                        .rounded_sm()
+                        .bg(rgb(theme::ELEMENT))
+                        .border_1()
+                        .border_color(rgb(theme::BORDER))
+                        .hover(|style| style.bg(rgb(theme::ELEMENT_HOVER)))
+                        .cursor_pointer()
                         .text_color(rgb(theme::TEXT))
                         .child(
                             canvas(

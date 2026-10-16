@@ -1,81 +1,37 @@
-use gpui::{Context, IntoElement, ParentElement, Render, Styled, Window, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, ParentElement, Render, Styled, Window, div, px, rgb};
 
-use crate::notifications::Notifications;
+use crate::actions::{ActualSize, Fit, Open, Paste, Settings};
 use crate::theme;
+use crate::ui::Button;
 
-pub struct Toolbar {
-    notifications: gpui::Entity<Notifications>,
-}
-
-impl Toolbar {
-    pub fn new(notifications: gpui::Entity<Notifications>) -> Self {
-        Self { notifications }
-    }
-}
+/// The row above the canvas. Same height as the side panel header so the
+/// 1 px lines meet across the split.
+pub struct Toolbar;
 
 impl Render for Toolbar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = self.notifications.read(cx).status().clone();
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
-            .flex_col()
-            .flex_shrink_0()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap(px(2.))
             .w_full()
-            .h(px(theme::TOOLBAR_HEIGHT))
-            .bg(rgb(theme::TOOLBAR))
-            .text_color(rgb(theme::TEXT))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.))
-                    .h(px(44.))
-                    .px(px(8.))
-                    .child(tool_button("open", "Open", |window, cx| {
-                        window.dispatch_action(Box::new(crate::actions::Open), cx);
-                    }))
-                    .child(tool_button("paste", "Paste", |window, cx| {
-                        window.dispatch_action(Box::new(crate::actions::Paste), cx);
-                    }))
-                    .child(tool_button("fit", "Fit", |window, cx| {
-                        window.dispatch_action(Box::new(crate::actions::Fit), cx);
-                    }))
-                    .child(tool_button("actual-size", "100%", |window, cx| {
-                        window.dispatch_action(Box::new(crate::actions::ActualSize), cx);
-                    }))
-                    .child(tool_button("settings", "Settings", |window, cx| {
-                        window.dispatch_action(Box::new(crate::actions::Settings), cx);
-                    })),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .h(px(28.))
-                    .px(px(8.))
-                    .text_sm()
-                    .text_color(rgb(theme::MUTED))
-                    .child(status),
-            )
+            .h(px(theme::PANE_HEADER_HEIGHT))
+            .px(px(6.))
+            .bg(rgb(theme::PANEL))
+            .border_b_1()
+            .border_color(rgb(theme::BORDER))
+            .child(Button::ghost("open", "Open").action(Open))
+            .child(Button::ghost("paste", "Paste").action(Paste))
+            .child(divider())
+            .child(Button::ghost("fit", "Fit").action(Fit))
+            .child(Button::ghost("actual-size", "100%").action(ActualSize))
+            .child(div().flex_1())
+            .child(Button::ghost("settings", "Settings").action(Settings))
     }
 }
 
-fn tool_button(
-    id: &'static str,
-    label: &'static str,
-    action: impl Fn(&mut Window, &mut gpui::App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .h(px(28.))
-        .px(px(10.))
-        .bg(rgb(theme::BUTTON))
-        .hover(|style| style.bg(rgb(theme::BUTTON_HOVER)))
-        .text_color(rgb(theme::TEXT))
-        .cursor_pointer()
-        .on_click(move |_, window, cx| action(window, cx))
-        .child(label)
+fn divider() -> gpui::Div {
+    div().w(px(1.)).h(px(16.)).mx(px(4.)).bg(rgb(theme::BORDER))
 }

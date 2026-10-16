@@ -764,7 +764,7 @@ impl Element for TextElement {
                             y + window.line_height(),
                         ),
                     ),
-                    rgb(0x4c5b78),
+                    rgb(theme::SELECTION),
                 ));
             }
             lines.push(shaped);
@@ -829,9 +829,9 @@ impl Render for TextInput {
         }
         let focused = self.focus_handle.is_focused(window);
         let border = if focused {
-            theme::BUTTON_HOVER
+            theme::BORDER_FOCUSED
         } else {
-            theme::MUTED
+            theme::BORDER
         };
         field_row(
             self.label.as_deref(),
@@ -865,7 +865,8 @@ impl Render for TextInput {
                 .text_color(rgb(theme::TEXT))
                 .text_sm()
                 .px(px(8.0))
-                .py(px(6.0))
+                .py(px(5.0))
+                .rounded_sm()
                 .border_1()
                 .border_color(rgb(border))
                 .child(TextElement { input: cx.entity() }),
