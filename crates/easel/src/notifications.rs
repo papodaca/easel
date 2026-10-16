@@ -8,13 +8,11 @@ use gpui::{
 use crate::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ToastLevel {
     Info,
     Error,
 }
 
-#[allow(dead_code)]
 pub struct Toast {
     pub level: ToastLevel,
     pub text: SharedString,
@@ -31,7 +29,6 @@ struct LiveToast {
 
 pub struct Notifications {
     toasts: Vec<LiveToast>,
-    #[allow(dead_code)]
     next_id: u64,
     status: SharedString,
 }
@@ -49,9 +46,16 @@ impl Notifications {
         &self.status
     }
 
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn toast_count(&self) -> usize {
         self.toasts.len()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn last_toast_is_error(&self) -> bool {
+        self.toasts
+            .last()
+            .is_some_and(|toast| toast.level == ToastLevel::Error)
     }
 
     pub fn set_status(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -59,7 +63,6 @@ impl Notifications {
         cx.notify();
     }
 
-    #[allow(dead_code)]
     pub fn push(&mut self, toast: Toast, cx: &mut Context<Self>) {
         let id = self.next_id;
         self.next_id += 1;

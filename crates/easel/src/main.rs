@@ -1,6 +1,7 @@
 mod actions;
 mod app_state;
 mod bottom_strip;
+mod image_load;
 mod notifications;
 mod root;
 mod side_panel;

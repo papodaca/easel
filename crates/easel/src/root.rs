@@ -1,11 +1,12 @@
 use gpui::{
-    App, Context, FocusHandle, Focusable, IntoElement, ParentElement, Render, Styled, Window, div,
-    prelude::*, px, rgb,
+    App, Context, ExternalPaths, FocusHandle, Focusable, IntoElement, ParentElement,
+    PathPromptOptions, Render, Styled, Window, div, prelude::*, px, rgb,
 };
 
 use crate::actions::{ActualSize, Fit, Open, Paste, Quit, SaveAs, Settings};
 use crate::app_state::AppState;
 use crate::bottom_strip::BottomStrip;
+use crate::image_load::{self, prompt_failure_text};
 use crate::notifications::Notifications;
 use crate::side_panel::SidePanel;
 use crate::theme;
@@ -43,11 +44,98 @@ impl Root {
     }
 
     fn open(&mut self, _: &Open, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_status("Open", cx);
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        let state = self.app_state.clone();
+        let notes = self.notifications.clone();
+        cx.spawn(async move |_root, cx| {
+            let picked = receiver.await;
+            cx.update(|cx| match picked {
+                Ok(Ok(Some(paths))) => image_load::load_paths(state, notes, paths, cx),
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => {
+                    notes.update(cx, |notes, cx| {
+                        notes.push(
+                            crate::notifications::Toast {
+                                level: crate::notifications::ToastLevel::Error,
+                                text: prompt_failure_text(&error).into(),
+                                ttl: std::time::Duration::from_secs(6),
+                                action: None,
+                            },
+                            cx,
+                        );
+                    });
+                }
+                Err(_) => {}
+            });
+        })
+        .detach();
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_status("Paste", cx);
+        let Some(item) = cx.read_from_clipboard() else {
+            self.info_toast("Clipboard has no image", cx);
+            return;
+        };
+        let mut image_bytes = None;
+        let mut paths = Vec::new();
+        for entry in item.entries() {
+            match entry {
+                gpui::ClipboardEntry::Image(image) => {
+                    image_bytes = Some(image.bytes.clone());
+                }
+                gpui::ClipboardEntry::ExternalPaths(external) => {
+                    paths.extend(external.0.iter().cloned());
+                }
+                gpui::ClipboardEntry::String(text) => {
+                    for line in text.text.lines() {
+                        let candidate = std::path::PathBuf::from(line.trim());
+                        if candidate.is_file() {
+                            paths.push(candidate);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(bytes) = image_bytes {
+            image_load::load_bytes(
+                self.app_state.clone(),
+                self.notifications.clone(),
+                bytes,
+                "clipboard".into(),
+                cx,
+            );
+            return;
+        }
+        if paths.is_empty() {
+            self.info_toast("Clipboard has no image", cx);
+            return;
+        }
+        image_load::load_paths(
+            self.app_state.clone(),
+            self.notifications.clone(),
+            paths,
+            cx,
+        );
+    }
+
+    fn info_toast(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.notifications.update(cx, |notes, cx| {
+            notes.push(
+                crate::notifications::Toast {
+                    level: crate::notifications::ToastLevel::Info,
+                    text: text.to_owned().into(),
+                    ttl: std::time::Duration::from_secs(4),
+                    action: None,
+                },
+                cx,
+            );
+            notes.set_status("Ready", cx);
+        });
     }
 
     fn save_as(&mut self, _: &SaveAs, _: &mut Window, cx: &mut Context<Self>) {
@@ -88,7 +176,13 @@ impl Focusable for Root {
 }
 
 impl Render for Root {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        for image in self
+            .app_state
+            .update(cx, |state, _cx| state.take_retired_renders())
+        {
+            window.drop_image(image).ok();
+        }
         div()
             .id("root")
             .track_focus(&self.focus_handle)
@@ -99,6 +193,17 @@ impl Render for Root {
             .on_action(cx.listener(Self::actual_size))
             .on_action(cx.listener(Self::settings))
             .on_action(cx.listener(Self::quit))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                image_load::load_paths(
+                    this.app_state.clone(),
+                    this.notifications.clone(),
+                    paths.0.iter().cloned().collect(),
+                    cx,
+                );
+            }))
+            .drag_over::<ExternalPaths>(|style, _, _, _| {
+                style.border_2().border_color(rgb(theme::BUTTON_HOVER))
+            })
             .flex()
             .flex_col()
             .size_full()
