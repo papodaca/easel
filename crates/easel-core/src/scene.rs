@@ -184,6 +184,31 @@ impl Scene {
         self.boxes.len() != before
     }
 
+    pub fn rescale_boxes_to_frame(
+        &mut self,
+        from: crate::geometry::Size,
+        to: crate::geometry::Size,
+    ) {
+        for element in &mut self.boxes {
+            if let Some(rect) = element.src {
+                element.src = Some(crate::geometry::Rect::from_grid(rect.to_grid(from), to));
+            }
+            if let Some(rect) = element.tgt {
+                element.tgt = Some(crate::geometry::Rect::from_grid(rect.to_grid(from), to));
+            }
+        }
+    }
+
+    pub fn collapse_move_boxes(&mut self) {
+        for element in &mut self.boxes {
+            if element.kind == BoxKind::Move
+                && let Some(tgt) = element.tgt
+            {
+                element.src = Some(tgt);
+            }
+        }
+    }
+
     pub fn rename_box(&mut self, id: &BoxId, new_raw: &str) -> Result<(), String> {
         let new_id = BoxId::parse(new_raw)?;
         if self
@@ -348,7 +373,7 @@ fn retarget_boxes(boxes: &mut [BoxElement], change: RefChange) {
 #[cfg(test)]
 mod tests {
     use super::{BoxElement, BoxId, BoxKind, ImageRef, Scene};
-    use crate::geometry::Rect;
+    use crate::geometry::{Rect, Size};
 
     fn element(id: &str) -> BoxElement {
         BoxElement {
@@ -538,5 +563,39 @@ mod tests {
         let json = serde_json::to_value(&scene).unwrap();
         let back: Scene = serde_json::from_value(json).unwrap();
         assert_eq!(scene, back);
+    }
+
+    #[test]
+    fn promote_doubles_a_move_box_and_collapses_it() {
+        let mut scene = Scene::empty();
+        scene.boxes.push(BoxElement {
+            id: BoxId::parse("box_1").unwrap(),
+            kind: BoxKind::Move,
+            desc: String::new(),
+            src: Some(Rect {
+                x: 100,
+                y: 100,
+                w: 200,
+                h: 200,
+            }),
+            tgt: Some(Rect {
+                x: 500,
+                y: 500,
+                w: 200,
+                h: 200,
+            }),
+            from_image: Some(0),
+        });
+        scene.rescale_boxes_to_frame(Size { w: 1000, h: 1000 }, Size { w: 2000, h: 2000 });
+        scene.collapse_move_boxes();
+        let element = &scene.boxes[0];
+        let expected = Rect {
+            x: 1000,
+            y: 1000,
+            w: 400,
+            h: 400,
+        };
+        assert_eq!(element.src, Some(expected));
+        assert_eq!(element.tgt, Some(expected));
     }
 }
