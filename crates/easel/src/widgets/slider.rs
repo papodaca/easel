@@ -42,6 +42,17 @@ impl Slider {
         json!(self.value)
     }
 
+    pub fn set_range(&mut self, min: f64, max: f64, cx: &mut Context<Self>) {
+        self.min = min;
+        self.max = max;
+        self.value = self.value.clamp(self.min, self.max);
+        cx.notify();
+    }
+
+    pub fn max_value(&self) -> f64 {
+        self.max
+    }
+
     pub fn set_value(&mut self, value: &Value, cx: &mut Context<Self>) {
         if let Some(number) = value.as_f64() {
             self.value = number.clamp(self.min, self.max);

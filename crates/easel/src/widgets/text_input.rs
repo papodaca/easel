@@ -141,6 +141,27 @@ impl TextInput {
         }
     }
 
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn set_cursor(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = offset.min(self.content.len());
+        self.selected_range = offset..offset;
+        cx.notify();
+    }
+
+    pub fn insert_at_cursor(&mut self, text: &str, cx: &mut Context<Self>) {
+        let start = self.selected_range.start.min(self.content.len());
+        let end = self.selected_range.end.min(self.content.len());
+        let mut content = self.content.to_string();
+        content.replace_range(start..end, text);
+        let cursor = start + text.len();
+        self.content = content.into();
+        self.selected_range = cursor..cursor;
+        cx.notify();
+    }
+
     pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
         let end = self.content.len();
         self.selected_range = 0..end;

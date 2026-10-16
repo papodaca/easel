@@ -72,6 +72,22 @@ impl AppState {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
+    pub fn add_extra(
+        &mut self,
+        image: Arc<DecodedImage>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        let count = usize::from(self.scene.source_image.is_some()) + self.scene.references.len();
+        if count >= 10 {
+            return Err("FLUX 3 accepts at most 10 images");
+        }
+        self.scene
+            .add_reference(ImageRef::new("reference", image.size.w, image.size.h));
+        cx.notify();
+        Ok(())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_aspect_ratio(&mut self, ratio: &str, cx: &mut Context<Self>) {
         self.scene.aspect_ratio = Some(ratio.to_string());
         self.values

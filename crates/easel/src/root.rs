@@ -44,8 +44,10 @@ impl Root {
             ReqwestTransport::new(Resolver(std::sync::Arc::clone(&keys))),
         );
         let settings_notes = notifications.clone();
-        let settings = cx.new(move |cx| SettingsPanel::open(settings_notes, transport, keys, cx));
-        let side_panel = cx.new(|cx| SidePanel::new(app_state.clone(), settings, cx));
+        let settings_keys = std::sync::Arc::clone(&keys);
+        let settings =
+            cx.new(move |cx| SettingsPanel::open(settings_notes, transport, settings_keys, cx));
+        let side_panel = cx.new(|cx| SidePanel::new(app_state.clone(), settings, keys, cx));
         let bottom_strip = cx.new(|_cx| BottomStrip);
         Self {
             focus_handle: cx.focus_handle(),
@@ -78,7 +80,13 @@ impl Root {
         cx.spawn(async move |_root, cx| {
             let picked = receiver.await;
             cx.update(|cx| match picked {
-                Ok(Ok(Some(paths))) => image_load::load_paths(state, notes, paths, cx),
+                Ok(Ok(Some(paths))) => image_load::load_paths(
+                    state,
+                    notes,
+                    paths,
+                    image_load::LoadTarget::ReplaceSource,
+                    cx,
+                ),
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
                     notes.update(cx, |notes, cx| {
@@ -130,6 +138,7 @@ impl Root {
                 self.notifications.clone(),
                 bytes,
                 "clipboard".into(),
+                image_load::LoadTarget::Paste,
                 cx,
             );
             return;
@@ -142,6 +151,7 @@ impl Root {
             self.app_state.clone(),
             self.notifications.clone(),
             paths,
+            image_load::LoadTarget::Paste,
             cx,
         );
     }
@@ -223,6 +233,7 @@ impl Render for Root {
                     this.app_state.clone(),
                     this.notifications.clone(),
                     paths.0.iter().cloned().collect(),
+                    image_load::LoadTarget::ReplaceSource,
                     cx,
                 );
             }))

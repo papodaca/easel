@@ -60,10 +60,9 @@ fn open(cx: &mut TestAppContext) -> (gpui::WindowHandle<Surface>, VisualTestCont
             let canvas = cx.new(|cx| Canvas::new(app_state.clone(), notes.clone(), cx));
             let transport: Arc<dyn crate::net::HttpTransport> =
                 Arc::new(FakeTransport::scripted(Vec::new()));
-            let settings = cx.new(|cx| {
-                SettingsPanel::open(notes, transport, Arc::new(SharedKeys::default()), cx)
-            });
-            let side_panel = cx.new(|cx| SidePanel::new(app_state.clone(), settings, cx));
+            let keys = Arc::new(SharedKeys::default());
+            let settings = cx.new(|cx| SettingsPanel::open(notes, transport, keys.clone(), cx));
+            let side_panel = cx.new(|cx| SidePanel::new(app_state.clone(), settings, keys, cx));
             let surface = cx.new(|_| Surface {
                 app_state,
                 toolbar,

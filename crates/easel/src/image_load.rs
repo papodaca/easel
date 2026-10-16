@@ -153,6 +153,7 @@ pub fn load_paths(
     state: Entity<AppState>,
     notifications: Entity<Notifications>,
     paths: Vec<PathBuf>,
+    target: LoadTarget,
     cx: &mut App,
 ) {
     let mut paths = paths.into_iter();
@@ -187,7 +188,7 @@ pub fn load_paths(
                 detail: err.to_string(),
             }),
         };
-        cx.update(|cx| apply_load_result(&state, &notifications, result, cx));
+        cx.update(|cx| apply_load_result(&state, &notifications, result, target, cx));
     })
     .detach();
 }
@@ -197,20 +198,30 @@ pub fn load_bytes(
     notifications: Entity<Notifications>,
     bytes: Vec<u8>,
     label: String,
+    target: LoadTarget,
     cx: &mut App,
 ) {
     notifications.update(cx, |notes, cx| notes.set_status("Loading…", cx));
     let read: Result<Vec<u8>, std::io::Error> = Ok(bytes);
-    decode_task(read, label).detach_and_report(state, notifications, cx);
+    decode_task(read, label, target).detach_and_report(state, notifications, cx);
 }
 
-fn decode_task(read: Result<Vec<u8>, std::io::Error>, label: String) -> DecodeJob {
-    DecodeJob { read, label }
+fn decode_task(
+    read: Result<Vec<u8>, std::io::Error>,
+    label: String,
+    target: LoadTarget,
+) -> DecodeJob {
+    DecodeJob {
+        read,
+        label,
+        target,
+    }
 }
 
 struct DecodeJob {
     read: Result<Vec<u8>, std::io::Error>,
     label: String,
+    target: LoadTarget,
 }
 
 impl DecodeJob {
@@ -220,7 +231,11 @@ impl DecodeJob {
         notifications: Entity<Notifications>,
         cx: &mut App,
     ) {
-        let DecodeJob { read, label } = self;
+        let DecodeJob {
+            read,
+            label,
+            target,
+        } = self;
         cx.spawn(async move |cx| {
             let result = match read {
                 Ok(bytes) => {
@@ -233,23 +248,38 @@ impl DecodeJob {
                     detail: err.to_string(),
                 }),
             };
-            cx.update(|cx| apply_load_result(&state, &notifications, result, cx));
+            cx.update(|cx| apply_load_result(&state, &notifications, result, target, cx));
         })
         .detach();
     }
+}
+
+#[derive(Clone, Copy)]
+pub enum LoadTarget {
+    ReplaceSource,
+    Paste,
 }
 
 pub fn apply_load_result(
     state: &Entity<AppState>,
     notifications: &Entity<Notifications>,
     result: Result<DecodedImage, ImageError>,
+    target: LoadTarget,
     cx: &mut App,
 ) {
     match result {
         Ok(image) => {
             let width = image.size.w;
             let height = image.size.h;
-            state.update(cx, |state, cx| state.set_image(Arc::new(image), cx));
+            state.update(cx, |state, cx| match target {
+                LoadTarget::ReplaceSource => state.set_image(Arc::new(image), cx),
+                LoadTarget::Paste if state.scene.source_image.is_none() => {
+                    state.set_image(Arc::new(image), cx);
+                }
+                LoadTarget::Paste => {
+                    let _ = state.add_extra(Arc::new(image), cx);
+                }
+            });
             notifications.update(cx, |notes, cx| {
                 notes.set_status(format!("{width}x{height}"), cx);
             });
@@ -376,7 +406,15 @@ mod tests {
         });
 
         let error = decode_image(b"not an image", "notes.txt").unwrap_err();
-        cx.update(|cx| apply_load_result(&state, &notes, Err(error), cx));
+        cx.update(|cx| {
+            apply_load_result(
+                &state,
+                &notes,
+                Err(error),
+                super::LoadTarget::ReplaceSource,
+                cx,
+            )
+        });
 
         let unchanged = state.read_with(cx, |state, _| {
             state
