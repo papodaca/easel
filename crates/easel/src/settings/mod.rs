@@ -135,6 +135,10 @@ impl SharedKeys {
     fn lock_session(&self) -> std::sync::MutexGuard<'_, SessionKeys> {
         self.session.lock().expect("session keys")
     }
+
+    pub fn set_session(&self, provider: ProviderId, key: impl Into<String>) {
+        self.lock_session().set(provider, key);
+    }
 }
 
 pub struct Resolver(pub Arc<SharedKeys>);

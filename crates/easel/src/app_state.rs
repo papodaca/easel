@@ -26,6 +26,7 @@ pub struct AppState {
     pub side_mode: SideMode,
     pub quit_requested: bool,
     pub image: Option<Arc<DecodedImage>>,
+    pub extras: Vec<Arc<DecodedImage>>,
     pub scene: Scene,
     #[cfg_attr(not(test), allow(dead_code))]
     pub values: BTreeMap<String, Value>,
@@ -45,6 +46,7 @@ impl AppState {
             side_mode: SideMode::Editor,
             quit_requested: false,
             image: None,
+            extras: Vec::new(),
             scene: Scene::empty(),
             values: Flux3.spec().schema.defaults(),
             tool: Tool::Select,
@@ -83,8 +85,39 @@ impl AppState {
         }
         self.scene
             .add_reference(ImageRef::new("reference", image.size.w, image.size.h));
+        self.extras.push(image);
         cx.notify();
         Ok(())
+    }
+
+    pub fn remove_reference_slot(&mut self, index: usize, cx: &mut Context<Self>) {
+        let mut pixels = Vec::new();
+        if self.scene.source_image.is_some() {
+            pixels.push(self.image.clone());
+        }
+        pixels.extend(self.extras.iter().cloned().map(Some));
+        let removed = if index < pixels.len() {
+            pixels.remove(index)
+        } else {
+            None
+        };
+        self.retire(removed);
+        self.scene.remove_reference(index);
+        let mut pixels = pixels.into_iter();
+        if self.scene.source_image.is_some() {
+            self.image = pixels.next().flatten();
+        } else {
+            let previous = self.image.take();
+            self.retire(previous);
+        }
+        self.extras = pixels.flatten().collect();
+        cx.notify();
+    }
+
+    fn retire(&mut self, image: Option<Arc<DecodedImage>>) {
+        if let Some(image) = image {
+            self.retired_renders.push(Arc::clone(&image.render));
+        }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

@@ -10,6 +10,7 @@ use crate::bottom_strip::BottomStrip;
 use crate::canvas::Canvas;
 use crate::chrome::{self, TitleBar};
 use crate::image_load::{self, prompt_failure_text};
+use crate::jobs::JobRunner;
 use crate::net::{HttpTransport, ReqwestTransport};
 use crate::notifications::Notifications;
 use crate::settings::{Resolver, SettingsPanel, SharedKeys};
@@ -45,9 +46,37 @@ impl Root {
         );
         let settings_notes = notifications.clone();
         let settings_keys = std::sync::Arc::clone(&keys);
-        let settings =
-            cx.new(move |cx| SettingsPanel::open(settings_notes, transport, settings_keys, cx));
-        let side_panel = cx.new(|cx| SidePanel::new(app_state.clone(), settings, keys, cx));
+        let settings_transport = std::sync::Arc::clone(&transport);
+        let settings = cx.new(move |cx| {
+            SettingsPanel::open(settings_notes, settings_transport, settings_keys, cx)
+        });
+        let history = match easel_core::history::HistoryStore::open(
+            crate::jobs::data_dir().join("history"),
+        ) {
+            Ok(store) => std::sync::Arc::new(store),
+            Err(error) => {
+                log::warn!("history store: {error}");
+                std::sync::Arc::new(
+                    easel_core::history::HistoryStore::open(
+                        std::env::temp_dir().join("easel-history"),
+                    )
+                    .expect("temporary history store"),
+                )
+            }
+        };
+        let runner_transport = transport;
+        let runner_keys = std::sync::Arc::new(Resolver(std::sync::Arc::clone(&keys)));
+        let runner = cx.new(move |_| {
+            JobRunner::new(
+                easel_core::providers::bfl::flux3::Flux3,
+                runner_transport,
+                runner_keys,
+                history,
+            )
+        });
+        let panel_state = app_state.clone();
+        let side_panel =
+            cx.new(move |cx| SidePanel::new(panel_state, settings, keys, Some(runner), cx));
         let bottom_strip = cx.new(|_cx| BottomStrip);
         Self {
             focus_handle: cx.focus_handle(),

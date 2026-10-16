@@ -11,6 +11,8 @@ pub use validation::Validation;
 
 #[cfg(test)]
 mod form_tests;
+#[cfg(test)]
+mod generate_tests;
 
 use gpui::{Context, IntoElement, ParentElement, Render, Styled, Window, div, prelude::*, px, rgb};
 
@@ -30,6 +32,7 @@ pub struct SidePanel {
     references: gpui::Entity<References>,
     form: gpui::Entity<SchemaForm>,
     validation: gpui::Entity<Validation>,
+    runner: Option<gpui::Entity<crate::jobs::JobRunner<easel_core::providers::bfl::flux3::Flux3>>>,
 }
 
 impl SidePanel {
@@ -37,6 +40,9 @@ impl SidePanel {
         app_state: gpui::Entity<AppState>,
         settings: gpui::Entity<SettingsPanel>,
         keys: std::sync::Arc<SharedKeys>,
+        runner: Option<
+            gpui::Entity<crate::jobs::JobRunner<easel_core::providers::bfl::flux3::Flux3>>,
+        >,
         cx: &mut Context<Self>,
     ) -> Self {
         let inspector = cx.new(|cx| Inspector::new(app_state.clone(), cx));
@@ -53,7 +59,25 @@ impl SidePanel {
             references,
             form,
             validation,
+            runner,
         }
+    }
+
+    pub fn generate(&mut self, cx: &mut Context<Self>) {
+        let Some(runner) = self.runner.clone() else {
+            return;
+        };
+        if !self.validation.read(cx).generate_enabled(cx) {
+            return;
+        }
+        let request = match crate::jobs::build_request(&self.app_state.read(cx)) {
+            Ok(request) => request,
+            Err(message) => {
+                log::warn!("generate refused: {message}");
+                return;
+            }
+        };
+        runner.update(cx, |runner, cx| runner.submit(request, cx));
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -79,7 +103,12 @@ impl Render for SidePanel {
                     .child(self.validation.clone())
                     .child({
                         let enabled = self.validation.read(cx).generate_enabled(cx);
-                        Button::filled("generate", "Generate").disabled(!enabled)
+                        let panel = cx.entity();
+                        Button::filled("generate", "Generate")
+                            .disabled(!enabled)
+                            .on_click(move |_, _, cx| {
+                                panel.update(cx, |panel, cx| panel.generate(cx));
+                            })
                     }),
             ),
             SideMode::Settings => (

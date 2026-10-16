@@ -30,10 +30,8 @@ impl References {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn remove_slot(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.app_state.update(cx, |app, cx| {
-            app.scene.remove_reference(index);
-            cx.notify();
-        });
+        self.app_state
+            .update(cx, |app, cx| app.remove_reference_slot(index, cx));
         self.refusal = None;
         cx.notify();
     }
