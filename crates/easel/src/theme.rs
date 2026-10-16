@@ -5,6 +5,8 @@ pub const TOOLBAR: u32 = 0x2e3a4f;
 pub const CANVAS: u32 = 0x1b1e27;
 pub const SIDE_PANEL: u32 = 0x3c314c;
 pub const STRIP: u32 = 0x243028;
+#[cfg_attr(not(test), allow(dead_code))]
+pub const FIELD: u32 = 0x232838;
 pub const BUTTON: u32 = 0x4c5b78;
 pub const BUTTON_HOVER: u32 = 0x5d6e90;
 pub const TEXT: u32 = 0xe7e5e4;

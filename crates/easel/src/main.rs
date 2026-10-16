@@ -9,6 +9,7 @@ mod root;
 mod side_panel;
 mod theme;
 mod toolbar;
+mod widgets;
 
 use gpui::{
     App, Bounds, Focusable as _, TitlebarOptions, WindowBounds, WindowOptions, WindowingModes,
@@ -42,6 +43,7 @@ fn main() {
     linux(WindowingModes::WAYLAND | WindowingModes::X11).run(|cx: &mut App| {
         gpui_tokio::init(cx);
         actions::bind_keys(cx);
+        widgets::bind_keys(cx);
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
         cx.open_window(
             WindowOptions {
