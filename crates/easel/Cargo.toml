@@ -13,3 +13,6 @@ anyhow.workspace = true
 easel-core = { path = "../easel-core" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "fb69067729cb16a7f6135e2c1600c26a28c59659" } # v1.24.2
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "fb69067729cb16a7f6135e2c1600c26a28c59659", features = ["wayland", "x11"] } # v1.24.2
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "fb69067729cb16a7f6135e2c1600c26a28c59659", features = ["test-support"] } # v1.24.2
