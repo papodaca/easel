@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            pkg-config \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libxcb1-dev \
+            libx11-xcb-dev \
+            libfontconfig1-dev \
+            libvulkan-dev \
+            libssl-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install nextest and cargo-deny
+        uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.9.4
+        with:
+          tool: nextest,cargo-deny
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo deny
+        run: cargo deny check
+
+      - name: Test
+        run: cargo nextest run --workspace
+
+      - name: Build easel
+        run: cargo build -p easel
+
+      - name: Reject fixture secrets
+        run: |
+          set +e
+          git grep -n -E 'x-key|Bearer |krea\.ai/[^[:space:]]*\?' -- ':(glob)**/tests/fixtures/**' ':(glob)**/snapshots/**'
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "fixture or snapshot contains a credential or a signed krea.ai URL"
+            exit 1
+          elif [ "$status" -gt 1 ]; then
+            echo "git grep failed"
+            exit "$status"
+          fi
