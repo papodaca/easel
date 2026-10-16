@@ -151,6 +151,13 @@ fn unpremultiply(pixels: &mut [u8]) {
     }
 }
 
+pub fn load_fonts(cx: &App) {
+    let fonts = FONTS.iter().map(|bytes| Cow::Borrowed(*bytes)).collect();
+    if let Err(error) = cx.text_system().add_fonts(fonts) {
+        log::warn!("could not load the bundled UI font: {error:#}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,12 +168,5 @@ mod tests {
         assert_eq!(icon.width(), 128);
         assert_eq!(icon.height(), 128);
         assert!(icon.pixels().any(|pixel| pixel.0[3] > 0));
-    }
-}
-
-pub fn load_fonts(cx: &App) {
-    let fonts = FONTS.iter().map(|bytes| Cow::Borrowed(*bytes)).collect();
-    if let Err(error) = cx.text_system().add_fonts(fonts) {
-        log::warn!("could not load the bundled UI font: {error:#}");
     }
 }
