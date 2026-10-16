@@ -8,8 +8,8 @@ use easel_core::scene::{BoxId, BoxKind};
 use gpui::{
     App, BorderStyle, Bounds, Context, CursorStyle, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder, Pixels,
-    Render, ScrollDelta, ScrollWheelEvent, Styled, Window, canvas, div, point, prelude::*, px,
-    quad, rgb, size,
+    Render, ScrollDelta, ScrollWheelEvent, SharedString, Styled, TextAlign, TextRun, Window,
+    canvas, div, font, point, prelude::*, px, quad, rems, rgb, size,
 };
 
 use crate::actions::{ActualSize, BoxTool, DeleteBox, Fit, SelectTool};
@@ -507,6 +507,53 @@ fn paint_marks(
     }
 }
 
+fn label_rect(element: &easel_core::scene::BoxElement) -> Option<Rect> {
+    if element.kind == BoxKind::Move {
+        element.tgt.or(element.src)
+    } else {
+        element.src.or(element.tgt)
+    }
+}
+
+fn paint_labels(
+    origin: gpui::Point<Pixels>,
+    viewport: &Viewport,
+    boxes: &[easel_core::scene::BoxElement],
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let font_size = rems(0.75).to_pixels(window.rem_size());
+    let line_height = px(16.0);
+    let face = font(crate::assets::UI_FONT);
+    for element in boxes {
+        let Some(rect) = label_rect(element) else {
+            continue;
+        };
+        let view = view_of(viewport, rect);
+        let text = SharedString::from(element.id.as_str().to_string());
+        let run = TextRun {
+            len: text.len(),
+            font: face.clone(),
+            color: theme::color(kind_color(element.kind), 1.0).into(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let shaped =
+            window
+                .text_system()
+                .shape_line(text, font_size, std::slice::from_ref(&run), None);
+        let _ = shaped.paint(
+            point(origin.x + px(view.x), origin.y + px(view.y) - line_height),
+            line_height,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    }
+}
+
 fn paint_handles(
     origin: gpui::Point<Pixels>,
     viewport: &Viewport,
@@ -719,23 +766,6 @@ impl Render for Canvas {
                 element.src.or(element.tgt)
             })
         };
-        let overlays = boxes.into_iter().filter_map(|element| {
-            let rect = if element.kind == BoxKind::Move {
-                element.tgt.or(element.src)
-            } else {
-                element.src.or(element.tgt)
-            }?;
-            let view = view_of(&self.viewport, rect);
-            Some(
-                div()
-                    .absolute()
-                    .left(px(view.x))
-                    .top(px(view.y - 16.0))
-                    .text_xs()
-                    .text_color(rgb(kind_color(element.kind)))
-                    .child(element.id.as_str().to_string()),
-            )
-        });
         let bounds_entity = cx.entity();
         div()
             .id("canvas")
@@ -795,7 +825,7 @@ impl Render for Canvas {
                         }
                         (viewport, painted, draft, selected_mark, render_image)
                     },
-                    |bounds, (viewport, painted, draft, selected, render_image), window, _cx| {
+                    |bounds, (viewport, painted, draft, selected, render_image), window, cx| {
                         if let Some(render_image) = render_image {
                             let rect = viewport.image_rect_in_view();
                             let image_bounds = Bounds {
@@ -817,6 +847,7 @@ impl Render for Canvas {
                                 .ok();
                         }
                         paint_marks(bounds.origin, &viewport, &painted, window);
+                        paint_labels(bounds.origin, &viewport, &painted, window, cx);
                         if let Some(rect) = draft {
                             paint_mark(
                                 bounds.origin,
@@ -836,7 +867,6 @@ impl Render for Canvas {
                 .absolute()
                 .size_full(),
             )
-            .children(overlays)
             .child(
                 div()
                     .id("canvas-hit")
