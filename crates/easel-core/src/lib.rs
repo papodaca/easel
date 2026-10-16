@@ -3,6 +3,7 @@
 pub mod error;
 pub mod geometry;
 pub mod http;
+pub mod image_prep;
 pub mod job;
 pub mod model_spec;
 pub mod prose;

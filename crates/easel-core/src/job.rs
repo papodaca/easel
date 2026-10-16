@@ -107,6 +107,12 @@ fn poll_transition(attempt: u32, progress: Option<f32>, outcome: PollOutcome) ->
 pub struct EncodedImage {
     pub media_type: String,
     pub bytes: Vec<u8>,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub content_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -175,6 +181,9 @@ mod tests {
             images: vec![EncodedImage {
                 media_type: "image/png".into(),
                 bytes: vec![1, 2, 3],
+                width: 1,
+                height: 1,
+                content_hash: "abc".into(),
             }],
             box_snapshot: vec![BoxElement {
                 id: BoxId::parse("animal_1").unwrap(),
