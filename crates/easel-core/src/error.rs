@@ -22,8 +22,12 @@ pub enum ProviderError {
         #[serde(with = "duration_option")]
         retry_after: Option<Duration>,
     },
-    #[error("validation failed")]
-    Validation { field_errors: Vec<FieldError> },
+    #[error("{message}")]
+    Validation {
+        #[serde(default)]
+        message: String,
+        field_errors: Vec<FieldError>,
+    },
     #[error("moderated")]
     Moderated { reasons: Vec<String> },
     #[error("gone")]
@@ -68,6 +72,7 @@ mod tests {
     #[test]
     fn provider_error_round_trip() {
         let error = ProviderError::Validation {
+            message: "too high".into(),
             field_errors: vec![FieldError {
                 key: "safety_tolerance".into(),
                 message: "too high".into(),
