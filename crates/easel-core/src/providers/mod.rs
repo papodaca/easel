@@ -66,3 +66,115 @@ pub enum PollOutcome {
     Failed(ProviderError),
     Cancelled,
 }
+
+use crate::error::FieldError;
+use crate::geometry::Size;
+use crate::http::{Body, HttpRequest, HttpResponse, Method};
+use crate::job::{EncodedImage, JobRequest, PollPolicy};
+use crate::model_spec::ModelSpec;
+use crate::scene::Scene;
+
+use self::bfl::flux3::CompiledPrompt;
+
+pub enum ImageInput {
+    RawBase64(String),
+    Url(String),
+}
+
+pub enum ReferenceStep {
+    Inline(ImageInput),
+    Upload {
+        request: HttpRequest,
+        content_hash: String,
+    },
+}
+
+pub trait Provider {
+    fn spec(&self) -> &ModelSpec;
+
+    fn compile_prompt(&self, scene: &Scene, _frame: Size) -> CompiledPrompt {
+        let found = crate::prose::tags(&scene.prose);
+        if found.is_empty() {
+            return CompiledPrompt {
+                text: scene.prose.clone(),
+                rows_json: String::new(),
+                warnings: Vec::new(),
+            };
+        }
+        let mut text = String::new();
+        let mut cursor = 0;
+        let mut warnings = Vec::new();
+        for tag in &found {
+            text.push_str(&scene.prose[cursor..tag.span.0]);
+            warnings.push(format!("removed <{}>", tag.name));
+            cursor = tag.span.1;
+        }
+        text.push_str(&scene.prose[cursor..]);
+        CompiledPrompt {
+            text: collapse_whitespace(&text),
+            rows_json: String::new(),
+            warnings,
+        }
+    }
+
+    fn validate_for_submit(
+        &self,
+        scene: &Scene,
+        values: &std::collections::BTreeMap<String, serde_json::Value>,
+        image_count: usize,
+    ) -> Vec<FieldError>;
+
+    fn reference_steps(&self, images: &[EncodedImage]) -> Vec<ReferenceStep>;
+
+    fn parse_upload(&self, _response: &HttpResponse) -> Result<ImageInput, ProviderError> {
+        Err(ProviderError::Protocol("provider does not upload".into()))
+    }
+
+    fn build_submit(&self, request: &JobRequest, images: &[ImageInput]) -> HttpRequest;
+
+    fn poll_request(&self, submitted: &Submitted) -> HttpRequest;
+
+    fn parse_submit(&self, response: &HttpResponse) -> Result<Submitted, ProviderError>;
+
+    fn parse_poll(&self, response: &HttpResponse) -> PollOutcome;
+
+    fn cancel_request(
+        &self,
+        _submitted: &Submitted,
+        _last: Option<&PollOutcome>,
+    ) -> Option<HttpRequest> {
+        None
+    }
+
+    fn poll_policy(&self) -> PollPolicy {
+        PollPolicy::default_bfl()
+    }
+
+    fn download_request(&self, url: &url::Url) -> HttpRequest {
+        HttpRequest {
+            method: Method::Get,
+            url: url.to_string(),
+            headers: Vec::new(),
+            auth: None,
+            body: Body::Empty,
+            max_body_bytes: 100 * 1024 * 1024,
+        }
+    }
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    let mut collapsed = String::new();
+    let mut pending_space = false;
+    for character in text.chars() {
+        if character.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space && !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        pending_space = false;
+        collapsed.push(character);
+    }
+    collapsed
+}

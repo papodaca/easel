@@ -162,6 +162,308 @@ fn mentions_ratio(prose: &str) -> bool {
     false
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Flux3;
+
+impl crate::providers::Provider for Flux3 {
+    fn spec(&self) -> &crate::model_spec::ModelSpec {
+        &SPEC
+    }
+
+    fn compile_prompt(
+        &self,
+        scene: &crate::scene::Scene,
+        frame: crate::geometry::Size,
+    ) -> CompiledPrompt {
+        compile_prompt(scene, frame)
+    }
+
+    fn validate_for_submit(
+        &self,
+        scene: &crate::scene::Scene,
+        values: &std::collections::BTreeMap<String, serde_json::Value>,
+        image_count: usize,
+    ) -> Vec<crate::error::FieldError> {
+        validate_scene(scene, values, image_count)
+    }
+
+    fn reference_steps(
+        &self,
+        images: &[crate::job::EncodedImage],
+    ) -> Vec<crate::providers::ReferenceStep> {
+        images
+            .iter()
+            .map(|image| {
+                crate::providers::ReferenceStep::Inline(crate::providers::ImageInput::RawBase64(
+                    image.base64(),
+                ))
+            })
+            .collect()
+    }
+
+    fn build_submit(
+        &self,
+        request: &crate::job::JobRequest,
+        images: &[crate::providers::ImageInput],
+    ) -> crate::http::HttpRequest {
+        build_submit(request, images)
+    }
+
+    fn poll_request(&self, submitted: &crate::providers::Submitted) -> crate::http::HttpRequest {
+        crate::http::HttpRequest {
+            method: crate::http::Method::Get,
+            url: submitted.poll_url.to_string(),
+            headers: Vec::new(),
+            auth: Some(crate::model_spec::ProviderId::Bfl),
+            body: crate::http::Body::Empty,
+            max_body_bytes: 2 * 1024 * 1024,
+        }
+    }
+
+    fn parse_submit(
+        &self,
+        response: &crate::http::HttpResponse,
+    ) -> Result<crate::providers::Submitted, crate::error::ProviderError> {
+        crate::providers::bfl::protocol::parse_submit(response)
+    }
+
+    fn parse_poll(&self, response: &crate::http::HttpResponse) -> crate::providers::PollOutcome {
+        crate::providers::bfl::protocol::parse_poll(response)
+    }
+}
+
+static SPEC: std::sync::LazyLock<crate::model_spec::ModelSpec> = std::sync::LazyLock::new(spec);
+
+fn spec() -> crate::model_spec::ModelSpec {
+    use crate::model_spec::{
+        AuthScheme, Capabilities, ImageSlots, ModelSpec, ProviderId, SizeControl,
+    };
+    use crate::schema::{FieldDef, FieldKind, LockRule, ParamSchema};
+    use serde_json::json;
+
+    let aspects = [
+        "21:9", "2:1", "16:9", "3:2", "7:5", "4:3", "5:4", "1:1", "4:5", "3:4", "5:7", "2:3",
+        "9:16", "1:2", "9:21", "auto",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    ModelSpec {
+        id: "flux-3-image".into(),
+        display_name: "FLUX 3".into(),
+        provider: ProviderId::Bfl,
+        auth: AuthScheme::HeaderKey {
+            header: "x-key".into(),
+        },
+        endpoint: "https://api.bfl.ai/v1/flux-3-image".into(),
+        beta: false,
+        capabilities: Capabilities {
+            supports_boxes: true,
+            image_slots: ImageSlots::List { max: 10 },
+            size_control: SizeControl::AspectRatioAndResolution,
+        },
+        schema: ParamSchema {
+            fields: vec![
+                FieldDef {
+                    key: "aspect_ratio".into(),
+                    label: "Aspect ratio".into(),
+                    help: Some(
+                        "keeps the source framing unless the prompt asks for a ratio".into(),
+                    ),
+                    kind: FieldKind::Select { options: aspects },
+                    required: true,
+                    default: Some(json!("auto")),
+                    locked_when: Some(LockRule::WhenSourceImageAndBoxes {
+                        value: json!("auto"),
+                    }),
+                },
+                FieldDef {
+                    key: "resolution".into(),
+                    label: "Resolution".into(),
+                    help: None,
+                    kind: FieldKind::Select {
+                        options: ["768sq", "1k", "1.5k", "2k", "4k"]
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect(),
+                    },
+                    required: true,
+                    default: Some(json!("1k")),
+                    locked_when: None,
+                },
+                FieldDef {
+                    key: "safety_tolerance".into(),
+                    label: "Safety tolerance".into(),
+                    help: Some("0 is strictest. The account may reject higher levels.".into()),
+                    kind: FieldKind::Int {
+                        min: 0,
+                        max: 7,
+                        step: 1,
+                    },
+                    required: true,
+                    default: Some(json!(2)),
+                    locked_when: None,
+                },
+                FieldDef {
+                    key: "grounding".into(),
+                    label: "Grounding".into(),
+                    help: Some(
+                        "When on, the prompt may be grounded with web search and image search."
+                            .into(),
+                    ),
+                    kind: FieldKind::Bool,
+                    required: true,
+                    default: Some(json!(true)),
+                    locked_when: None,
+                },
+                FieldDef {
+                    key: "version".into(),
+                    label: "Version".into(),
+                    help: None,
+                    kind: FieldKind::ReadOnly,
+                    required: true,
+                    default: Some(json!("latest")),
+                    locked_when: Some(LockRule::Always {
+                        value: json!("latest"),
+                    }),
+                },
+            ],
+            cross_rules: Vec::new(),
+        },
+    }
+}
+
+fn validate_scene(
+    scene: &crate::scene::Scene,
+    values: &std::collections::BTreeMap<String, serde_json::Value>,
+    image_count: usize,
+) -> Vec<crate::error::FieldError> {
+    use crate::error::FieldError;
+    use crate::providers::Provider;
+    use crate::scene::BoxKind;
+    use crate::schema::RuleContext;
+
+    let spec = Flux3.spec();
+    let ctx = RuleContext {
+        has_source_image: scene.source_image.is_some(),
+        image_count,
+        box_count: scene.boxes.len(),
+    };
+    let mut effective = values.clone();
+    for field in &spec.schema.fields {
+        if let Some(locked) = spec.schema.locked_value(field, &ctx) {
+            effective.insert(field.key.clone(), locked);
+        }
+    }
+    let mut errors = spec.schema.validate(&effective, &ctx);
+    if let Some(error) = spec.capabilities.validate_image_count(image_count) {
+        errors.push(error);
+    }
+    if scene.prose.trim().is_empty() {
+        errors.push(FieldError {
+            key: "prompt".into(),
+            message: "Prompt is empty".into(),
+            approved_max: None,
+        });
+    }
+    let unmatched = crate::prose::unmatched(&scene.prose, scene);
+    if let Some(tag) = unmatched.tags_without_box.first() {
+        errors.push(FieldError {
+            key: "prompt".into(),
+            message: format!("<{tag}> has no matching box"),
+            approved_max: None,
+        });
+    }
+    let ratio = effective
+        .get("aspect_ratio")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("auto");
+    if scene.source_image.is_none() && !scene.boxes.is_empty() && ratio == "auto" {
+        errors.push(FieldError {
+            key: "aspect_ratio".into(),
+            message: "Boxes need a fixed aspect ratio".into(),
+            approved_max: None,
+        });
+    }
+    let allowed = scene.allowed_kinds();
+    for element in &scene.boxes {
+        if !allowed.contains(&element.kind) {
+            errors.push(FieldError {
+                key: "boxes".into(),
+                message: format!("{} cannot be used in this scene", kind_name(element.kind)),
+                approved_max: None,
+            });
+        }
+        if element.kind == BoxKind::Move && element.tgt.is_none() {
+            errors.push(FieldError {
+                key: "boxes".into(),
+                message: format!("{} needs a target box", element.id.as_str()),
+                approved_max: None,
+            });
+        }
+    }
+    errors
+}
+
+fn kind_name(kind: crate::scene::BoxKind) -> &'static str {
+    match kind {
+        crate::scene::BoxKind::Layout => "Layout",
+        crate::scene::BoxKind::New => "New",
+        crate::scene::BoxKind::Keep => "Keep",
+        crate::scene::BoxKind::Move => "Move",
+        crate::scene::BoxKind::Remove => "Remove",
+    }
+}
+
+fn build_submit(
+    request: &crate::job::JobRequest,
+    images: &[crate::providers::ImageInput],
+) -> crate::http::HttpRequest {
+    use crate::http::{Body, HttpHeader, HttpRequest, Method};
+    use crate::model_spec::ProviderId;
+    use crate::providers::ImageInput;
+
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "prompt".into(),
+        serde_json::Value::String(request.compiled_prompt.clone()),
+    );
+    for key in [
+        "aspect_ratio",
+        "resolution",
+        "safety_tolerance",
+        "grounding",
+        "version",
+    ] {
+        if let Some(value) = request.params.get(key) {
+            body.insert(key.into(), value.clone());
+        }
+    }
+    if !images.is_empty() {
+        let encoded = images
+            .iter()
+            .map(|image| match image {
+                ImageInput::RawBase64(text) | ImageInput::Url(text) => {
+                    serde_json::Value::String(text.clone())
+                }
+            })
+            .collect();
+        body.insert("images".into(), serde_json::Value::Array(encoded));
+    }
+    HttpRequest {
+        method: Method::Post,
+        url: SPEC.endpoint.clone(),
+        headers: vec![HttpHeader {
+            name: "Content-Type".into(),
+            value: "application/json".into(),
+            sensitive: false,
+        }],
+        auth: Some(ProviderId::Bfl),
+        body: Body::Json(serde_json::Value::Object(body)),
+        max_body_bytes: 100 * 1024 * 1024,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::compile_prompt;
@@ -372,5 +674,258 @@ mod tests {
                 .iter()
                 .any(|warning| warning.to_ascii_lowercase().contains("ratio"))
         );
+    }
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::Flux3;
+    use crate::error::ProviderError;
+    use crate::http::{Body, Method};
+    use crate::job::{EncodedImage, JobRequest};
+    use crate::model_spec::ProviderId;
+    use crate::providers::{ImageInput, PollOutcome, Provider, ReferenceStep};
+    use crate::scene::{BoxKind, ImageRef, Scene};
+    use serde_json::{Value, json};
+    use std::collections::BTreeMap;
+
+    fn encoded(bytes: &[u8]) -> EncodedImage {
+        EncodedImage {
+            media_type: "image/jpeg".into(),
+            bytes: bytes.to_vec(),
+            width: 300,
+            height: 300,
+            content_hash: "h".into(),
+        }
+    }
+
+    fn values() -> BTreeMap<String, Value> {
+        Flux3.spec().schema.defaults()
+    }
+
+    fn request(prompt: &str, params: BTreeMap<String, Value>) -> JobRequest {
+        JobRequest {
+            model_id: "flux-3-image".into(),
+            compiled_prompt: prompt.into(),
+            params,
+            images: Vec::new(),
+            box_snapshot: Vec::new(),
+            created_at: "2026-10-15T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn submit_body_lists_only_schema_keys_and_omits_empty_images() {
+        let body = Flux3.build_submit(&request("a harbor", values()), &[]);
+        assert_eq!(body.method, Method::Post);
+        assert_eq!(body.auth, Some(ProviderId::Bfl));
+        assert!(body.headers.iter().any(|header| {
+            header.name.eq_ignore_ascii_case("content-type") && header.value == "application/json"
+        }));
+        let Body::Json(json) = &body.body else {
+            panic!("expected json");
+        };
+        let keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(
+            keys,
+            vec![
+                "aspect_ratio".to_string(),
+                "grounding".to_string(),
+                "prompt".to_string(),
+                "resolution".to_string(),
+                "safety_tolerance".to_string(),
+                "version".to_string(),
+            ]
+        );
+        assert!(json.get("images").is_none());
+    }
+
+    #[test]
+    fn images_are_raw_base64_in_reference_order() {
+        let inputs = [
+            ImageInput::RawBase64("YQ==".into()),
+            ImageInput::RawBase64("Yg==".into()),
+        ];
+        let body = Flux3.build_submit(&request("edit", values()), &inputs);
+        let Body::Json(json) = body.body else {
+            panic!("json");
+        };
+        assert_eq!(json["images"], json!(["YQ==", "Yg=="]));
+        assert!(!json.to_string().contains("data:"));
+    }
+
+    #[test]
+    fn validation_covers_ratio_images_prompt_tags_and_box_shape() {
+        let mut scene = Scene::empty();
+        scene.aspect_ratio = Some("auto".into());
+        scene.add_box(
+            crate::geometry::Rect {
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+            },
+            BoxKind::Layout,
+        );
+        let mut params = values();
+        params.insert("aspect_ratio".into(), json!("auto"));
+        let errors = Flux3.validate_for_submit(&scene, &params, 0);
+        assert!(errors.iter().any(|error| {
+            error.key == "aspect_ratio" && error.message.contains("Boxes need a fixed aspect ratio")
+        }));
+
+        scene.set_source(ImageRef::new("src.png", 1000, 1000));
+        scene.prose.clear();
+        let errors = Flux3.validate_for_submit(&scene, &values(), 0);
+        assert!(errors.iter().any(|error| error.key == "prompt"));
+        assert!(errors.iter().any(|error| error.key == "boxes"));
+
+        scene.boxes.clear();
+        scene.prose = "a fox".into();
+        assert!(Flux3.validate_for_submit(&scene, &values(), 0).is_empty());
+
+        scene.prose = "see <dog_1>".into();
+        let errors = Flux3.validate_for_submit(&scene, &values(), 11);
+        assert!(errors.iter().any(|error| error.key == "images"));
+        assert!(errors.iter().any(|error| error.key == "prompt"));
+
+        scene.prose = "move <box_1>".into();
+        scene.boxes.clear();
+        scene.add_box(
+            crate::geometry::Rect {
+                x: 0,
+                y: 0,
+                w: 40,
+                h: 40,
+            },
+            BoxKind::Move,
+        );
+        let errors = Flux3.validate_for_submit(&scene, &values(), 1);
+        assert!(errors.iter().any(|error| error.key == "boxes"));
+    }
+
+    #[test]
+    fn reference_steps_are_inline_and_cancel_is_absent() {
+        let steps = Flux3.reference_steps(&[encoded(b"a"), encoded(b"b"), encoded(b"c")]);
+        assert_eq!(steps.len(), 3);
+        assert!(
+            steps
+                .iter()
+                .all(|step| matches!(step, ReferenceStep::Inline(ImageInput::RawBase64(_))))
+        );
+        assert!(
+            Flux3
+                .cancel_request(
+                    &crate::providers::Submitted {
+                        job_id: crate::providers::JobId::parse("abc").unwrap(),
+                        poll_url: "https://api.bfl.ai/v1/get_result?id=abc".parse().unwrap(),
+                        quote: None,
+                    },
+                    None,
+                )
+                .is_none()
+        );
+        assert_eq!(Flux3.poll_policy(), crate::job::PollPolicy::default_bfl());
+    }
+
+    #[test]
+    fn poll_uses_the_url_verbatim_and_download_is_anonymous() {
+        let submitted = crate::providers::Submitted {
+            job_id: crate::providers::JobId::parse("abc").unwrap(),
+            poll_url: "https://api.eu.bfl.ai/v1/get_result?id=abc"
+                .parse()
+                .unwrap(),
+            quote: None,
+        };
+        let poll = Flux3.poll_request(&submitted);
+        assert_eq!(poll.auth, Some(ProviderId::Bfl));
+        assert_eq!(poll.url, submitted.poll_url.as_str());
+        let download = Flux3.download_request(&"https://delivery.bfl.ai/x.png".parse().unwrap());
+        assert_eq!(download.auth, None);
+        assert_eq!(download.method, Method::Get);
+    }
+
+    #[test]
+    fn f1_body_snapshot_has_no_credential() {
+        let mut params = values();
+        params.insert("aspect_ratio".into(), json!("auto"));
+        let body = Flux3.build_submit(
+            &request("In <ref_image_0>, change <animal_1> to pink. []", params),
+            &[ImageInput::RawBase64("aGVsbG8=".into())],
+        );
+        let Body::Json(json) = &body.body else {
+            panic!("json");
+        };
+        insta::assert_json_snapshot!(json);
+        let rendered = serde_json::to_string(json).unwrap();
+        assert!(!rendered.contains("x-key"));
+        assert!(!format!("{body:?}").contains("aGVsbG8="));
+    }
+
+    #[test]
+    fn default_provider_strips_tags() {
+        let provider = Plain;
+        let mut scene = Scene::empty();
+        scene.prose = "In <ref_image_0>, change <animal_1> to pink.".into();
+        let compiled = provider.compile_prompt(&scene, crate::geometry::Size { w: 1000, h: 1000 });
+        assert!(!compiled.text.contains('<'));
+        assert!(!compiled.text.contains("  "));
+        assert!(
+            compiled
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("ref_image_0"))
+        );
+        assert!(
+            compiled
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("animal_1"))
+        );
+
+        scene.prose = "a quiet harbor".into();
+        let compiled = provider.compile_prompt(&scene, crate::geometry::Size { w: 1000, h: 1000 });
+        assert_eq!(compiled.text, "a quiet harbor");
+        assert!(compiled.warnings.is_empty());
+    }
+
+    struct Plain;
+
+    impl Provider for Plain {
+        fn spec(&self) -> &crate::model_spec::ModelSpec {
+            Flux3.spec()
+        }
+
+        fn validate_for_submit(
+            &self,
+            _: &Scene,
+            _: &BTreeMap<String, Value>,
+            _: usize,
+        ) -> Vec<crate::error::FieldError> {
+            Vec::new()
+        }
+
+        fn reference_steps(&self, _: &[EncodedImage]) -> Vec<ReferenceStep> {
+            Vec::new()
+        }
+
+        fn build_submit(&self, _: &JobRequest, _: &[ImageInput]) -> crate::http::HttpRequest {
+            unreachable!()
+        }
+
+        fn poll_request(&self, _: &crate::providers::Submitted) -> crate::http::HttpRequest {
+            unreachable!()
+        }
+
+        fn parse_submit(
+            &self,
+            _: &crate::http::HttpResponse,
+        ) -> Result<crate::providers::Submitted, ProviderError> {
+            Err(ProviderError::Protocol("no".into()))
+        }
+
+        fn parse_poll(&self, _: &crate::http::HttpResponse) -> PollOutcome {
+            PollOutcome::Cancelled
+        }
     }
 }

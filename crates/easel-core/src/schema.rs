@@ -34,6 +34,7 @@ pub enum FieldKind {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LockRule {
     Always { value: Value },
+    WhenSourceImageAndBoxes { value: Value },
 }
 
 /// Step 1 stand-in. Later steps add numeric cross-field rules.
@@ -104,16 +105,17 @@ impl ParamSchema {
 
     #[must_use]
     pub fn locked_value(&self, field: &FieldDef, ctx: &RuleContext) -> Option<Value> {
-        let _ = ctx;
         let field = self
             .fields
             .iter()
             .find(|candidate| candidate.key == field.key)
             .unwrap_or(field);
-        field
-            .locked_when
-            .as_ref()
-            .map(|LockRule::Always { value }| value.clone())
+        match field.locked_when.as_ref()? {
+            LockRule::Always { value } => Some(value.clone()),
+            LockRule::WhenSourceImageAndBoxes { value } => {
+                (ctx.has_source_image && ctx.box_count > 0).then(|| value.clone())
+            }
+        }
     }
 }
 
