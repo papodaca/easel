@@ -30,7 +30,9 @@ pub const TEXT_DISABLED: u32 = 0x6c7086;
 pub const ACCENT: u32 = 0x89b4fa;
 pub const ERROR: u32 = 0xf38ba8;
 
-// Box outlines. Fills use the same hue at low alpha.
+// Box outlines. Fills use the same hue at `BOX_FILL_ALPHA`.
+pub const BOX_FILL_ALPHA: f32 = 0.15;
+pub const BOX_OUTLINE_WIDTH: f32 = 2.0;
 pub const BOX_LAYOUT: u32 = 0x89b4fa;
 pub const BOX_NEW: u32 = 0xa6e3a1;
 pub const BOX_KEEP: u32 = 0xf9e2af;
@@ -49,3 +51,12 @@ pub const STRIP_HEIGHT: f32 = 56.0;
 pub const WINDOW_ROUNDING: Pixels = gpui::px(10.0);
 pub const WINDOW_SHADOW: Pixels = gpui::px(10.0);
 pub const WINDOW_BORDER: Pixels = gpui::px(1.0);
+
+pub fn color(packed: u32, alpha: f32) -> gpui::Rgba {
+    gpui::Rgba {
+        r: ((packed >> 16) & 0xff) as f32 / 255.0,
+        g: ((packed >> 8) & 0xff) as f32 / 255.0,
+        b: (packed & 0xff) as f32 / 255.0,
+        a: alpha,
+    }
+}

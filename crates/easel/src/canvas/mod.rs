@@ -6,9 +6,10 @@ mod box_tool;
 use easel_core::geometry::{Handle, Point, Rect, Size, ViewRect, Viewport, handle_at, hit_test};
 use easel_core::scene::{BoxId, BoxKind};
 use gpui::{
-    App, Bounds, Context, CursorStyle, FocusHandle, Focusable, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ScrollDelta,
-    ScrollWheelEvent, Styled, Window, canvas, div, img, prelude::*, px, rgb,
+    App, BorderStyle, Bounds, Context, CursorStyle, FocusHandle, Focusable, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder, Pixels,
+    Render, ScrollDelta, ScrollWheelEvent, Styled, Window, canvas, div, img, point, prelude::*, px,
+    quad, rgb, size,
 };
 
 use crate::actions::{ActualSize, BoxTool, DeleteBox, Fit, SelectTool};
@@ -373,6 +374,120 @@ impl Canvas {
     }
 }
 
+fn paint_marks(
+    origin: gpui::Point<Pixels>,
+    viewport: &Viewport,
+    boxes: &[easel_core::scene::BoxElement],
+    window: &mut Window,
+) {
+    for element in boxes {
+        let packed = kind_color(element.kind);
+        let fill = theme::color(packed, theme::BOX_FILL_ALPHA);
+        let outline = theme::color(packed, 1.0);
+        if element.kind == BoxKind::Move {
+            if let Some(rect) = element.src {
+                paint_mark(
+                    origin,
+                    viewport,
+                    rect,
+                    fill,
+                    outline,
+                    BorderStyle::Dashed,
+                    window,
+                );
+            }
+            if let Some(rect) = element.tgt {
+                paint_mark(
+                    origin,
+                    viewport,
+                    rect,
+                    fill,
+                    outline,
+                    BorderStyle::Solid,
+                    window,
+                );
+            }
+            if let (Some(src), Some(tgt)) = (element.src, element.tgt) {
+                paint_arrow(origin, viewport, src, tgt, outline, window);
+            }
+        } else if let Some(rect) = element.src.or(element.tgt) {
+            paint_mark(
+                origin,
+                viewport,
+                rect,
+                fill,
+                outline,
+                BorderStyle::Solid,
+                window,
+            );
+        }
+    }
+}
+
+fn paint_mark(
+    origin: gpui::Point<Pixels>,
+    viewport: &Viewport,
+    rect: Rect,
+    fill: gpui::Rgba,
+    outline: gpui::Rgba,
+    style: BorderStyle,
+    window: &mut Window,
+) {
+    let view = view_of(viewport, rect);
+    window.paint_quad(quad(
+        Bounds {
+            origin: point(origin.x + px(view.x), origin.y + px(view.y)),
+            size: size(px(view.w.max(0.0)), px(view.h.max(0.0))),
+        },
+        0.0,
+        fill,
+        theme::BOX_OUTLINE_WIDTH,
+        outline,
+        style,
+    ));
+}
+
+fn paint_arrow(
+    origin: gpui::Point<Pixels>,
+    viewport: &Viewport,
+    src: Rect,
+    tgt: Rect,
+    color: gpui::Rgba,
+    window: &mut Window,
+) {
+    let src = view_of(viewport, src);
+    let tgt = view_of(viewport, tgt);
+    let from = point(
+        origin.x + px(src.x + src.w / 2.0),
+        origin.y + px(src.y + src.h / 2.0),
+    );
+    let to = point(
+        origin.x + px(tgt.x + tgt.w / 2.0),
+        origin.y + px(tgt.y + tgt.h / 2.0),
+    );
+    let mut path = PathBuilder::stroke(px(theme::BOX_OUTLINE_WIDTH));
+    path.move_to(from);
+    path.line_to(to);
+    let dx = (to.x - from.x).as_f32();
+    let dy = (to.y - from.y).as_f32();
+    let len = (dx * dx + dy * dy).sqrt();
+    if len > 1.0 {
+        let ux = dx / len;
+        let uy = dy / len;
+        let head = 12.0;
+        let wing = 5.0;
+        let base_x = to.x.as_f32() - ux * head;
+        let base_y = to.y.as_f32() - uy * head;
+        path.move_to(to);
+        path.line_to(point(px(base_x - uy * wing), px(base_y + ux * wing)));
+        path.move_to(to);
+        path.line_to(point(px(base_x + uy * wing), px(base_y - ux * wing)));
+    }
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
+}
+
 fn view_of(viewport: &Viewport, rect: Rect) -> ViewRect {
     let origin = viewport.image_to_view(Point {
         x: rect.x as f32,
@@ -482,26 +597,23 @@ impl Render for Canvas {
                 .child("Open, drop, or paste an image, or pick an aspect ratio to draw boxes")
                 .into_any_element(),
         };
+        let painted = boxes.clone();
+        let viewport = self.viewport;
         let overlays = boxes.into_iter().filter_map(|element| {
-            let rect = element.src.or(element.tgt)?;
+            let rect = if element.kind == BoxKind::Move {
+                element.tgt.or(element.src)
+            } else {
+                element.src.or(element.tgt)
+            }?;
             let view = view_of(&self.viewport, rect);
             Some(
                 div()
                     .absolute()
                     .left(px(view.x))
-                    .top(px(view.y))
-                    .w(px(view.w.max(0.0)))
-                    .h(px(view.h.max(0.0)))
-                    .border_1()
-                    .border_color(rgb(kind_color(element.kind)))
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(-16.))
-                            .text_xs()
-                            .text_color(rgb(kind_color(element.kind)))
-                            .child(element.id.as_str().to_string()),
-                    ),
+                    .top(px(view.y - 16.0))
+                    .text_xs()
+                    .text_color(rgb(kind_color(element.kind)))
+                    .child(element.id.as_str().to_string()),
             )
         });
         let bounds_entity = cx.entity();
@@ -547,17 +659,20 @@ impl Render for Canvas {
             .bg(rgb(theme::EDITOR))
             .text_color(rgb(theme::TEXT))
             .child(image_layer)
-            .children(overlays)
             .child(
                 canvas(
                     move |bounds, _window, cx| {
                         bounds_entity.update(cx, |canvas, cx| canvas.note_bounds(bounds, cx));
+                        (viewport, painted)
                     },
-                    |_bounds, (), _window, _cx| {},
+                    |bounds, (viewport, painted), window, _cx| {
+                        paint_marks(bounds.origin, &viewport, &painted, window);
+                    },
                 )
                 .absolute()
                 .size_full(),
             )
+            .children(overlays)
             .child(
                 div()
                     .id("canvas-hit")
