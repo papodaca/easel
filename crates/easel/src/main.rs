@@ -53,6 +53,7 @@ fn main() {
         .run(|cx: &mut App| {
             gpui_tokio::init(cx);
             assets::load_fonts(cx);
+            assets::install_shell_icon();
             actions::bind_keys(cx);
             widgets::bind_keys(cx);
             let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
@@ -65,6 +66,8 @@ fn main() {
                     }),
                     window_decorations: Some(WindowDecorations::Client),
                     window_min_size: Some(size(px(720.0), px(480.0))),
+                    app_id: Some(assets::app_id().to_owned()),
+                    icon: assets::window_icon(),
                     ..Default::default()
                 },
                 |window, cx| {

@@ -1420,6 +1420,7 @@ dependencies = [
  "log",
  "mockito",
  "reqwest",
+ "resvg",
  "rustls",
  "serde_json",
  "tokio",

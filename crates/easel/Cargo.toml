@@ -14,6 +14,7 @@ directories = "6"
 easel-core = { path = "../easel-core" }
 bytes = "1"
 image = { workspace = true, features = ["jpeg", "png", "webp"] }
+resvg = "0.46"
 log = "0.4"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "fb69067729cb16a7f6135e2c1600c26a28c59659" } # v1.24.2
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "fb69067729cb16a7f6135e2c1600c26a28c59659", features = ["wayland", "x11"] } # v1.24.2
