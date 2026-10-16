@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod geometry;
+pub mod history;
 pub mod http;
 pub mod image_prep;
 pub mod job;
