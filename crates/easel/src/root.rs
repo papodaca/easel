@@ -6,6 +6,7 @@ use gpui::{
 use crate::actions::{ActualSize, Fit, Open, Paste, Quit, SaveAs, Settings};
 use crate::app_state::AppState;
 use crate::bottom_strip::BottomStrip;
+use crate::canvas::Canvas;
 use crate::image_load::{self, prompt_failure_text};
 use crate::notifications::Notifications;
 use crate::side_panel::SidePanel;
@@ -17,6 +18,7 @@ pub struct Root {
     pub app_state: gpui::Entity<AppState>,
     notifications: gpui::Entity<Notifications>,
     toolbar: gpui::Entity<Toolbar>,
+    canvas: gpui::Entity<Canvas>,
     side_panel: gpui::Entity<SidePanel>,
     bottom_strip: gpui::Entity<BottomStrip>,
 }
@@ -26,6 +28,7 @@ impl Root {
         let app_state = cx.new(|_cx| AppState::new());
         let notifications = cx.new(|_cx| Notifications::new());
         let toolbar = cx.new(|_cx| Toolbar::new(notifications.clone()));
+        let canvas = cx.new(|cx| Canvas::new(app_state.clone(), notifications.clone(), cx));
         let side_panel = cx.new(|_cx| SidePanel::new(app_state.clone()));
         let bottom_strip = cx.new(|_cx| BottomStrip);
         Self {
@@ -33,6 +36,7 @@ impl Root {
             app_state,
             notifications,
             toolbar,
+            canvas,
             side_panel,
             bottom_strip,
         }
@@ -143,10 +147,12 @@ impl Root {
     }
 
     fn fit(&mut self, _: &Fit, _: &mut Window, cx: &mut Context<Self>) {
+        self.canvas.update(cx, |canvas, cx| canvas.fit(cx));
         self.set_status("Fit", cx);
     }
 
     fn actual_size(&mut self, _: &ActualSize, _: &mut Window, cx: &mut Context<Self>) {
+        self.canvas.update(cx, |canvas, cx| canvas.actual_size(cx));
         self.set_status("Actual size", cx);
     }
 
@@ -218,17 +224,7 @@ impl Render for Root {
                     .w_full()
                     .min_h(px(0.))
                     .overflow_hidden()
-                    .child(
-                        div()
-                            .relative()
-                            .flex_1()
-                            .h_full()
-                            .min_w(px(0.))
-                            .bg(rgb(theme::CANVAS))
-                            .text_color(rgb(theme::TEXT))
-                            .child(div().size_full().p(px(12.)).child("Canvas"))
-                            .child(self.notifications.clone()),
-                    )
+                    .child(self.canvas.clone())
                     .child(self.side_panel.clone()),
             )
             .child(self.bottom_strip.clone())
