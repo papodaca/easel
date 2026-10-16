@@ -247,11 +247,11 @@ fn open_runner(
 ) {
     let root = temp_dir(name);
     let history = Arc::new(HistoryStore::open(root.join("history")).unwrap());
-    let transport = Arc::new(crate::net::FakeTransport::scripted(script));
+    let transport: Arc<dyn crate::net::HttpTransport> =
+        Arc::new(crate::net::FakeTransport::scripted(script));
     let keys = Arc::new(crate::settings::SharedKeys::default());
     keys.set_session(easel_core::model_spec::ProviderId::Bfl, "test-key");
     let runner = cx.update({
-        let transport = transport.clone() as Arc<dyn crate::net::HttpTransport>;
         let history = Arc::clone(&history);
         let keys = Arc::clone(&keys);
         move |cx| {

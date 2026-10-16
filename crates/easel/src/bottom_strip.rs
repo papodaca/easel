@@ -26,6 +26,7 @@ struct Row {
     id: Option<JobId>,
     state: JobState,
     line: String,
+    #[cfg_attr(not(test), allow(dead_code))]
     detail: String,
     cost: Option<f64>,
     bytes: Option<Vec<u8>>,
@@ -70,23 +71,28 @@ impl BottomStrip {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn app_state(&self) -> gpui::Entity<AppState> {
         self.app_state.clone()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.rebuild(cx);
         cx.notify();
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn lines(&self) -> Vec<String> {
         self.rows.iter().map(|row| row.line.clone()).collect()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn costs(&self) -> Vec<Option<f64>> {
         self.rows.iter().map(|row| row.cost).collect()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn detail(&self) -> String {
         self.selected
             .and_then(|index| self.rows.get(index))
@@ -107,10 +113,12 @@ impl BottomStrip {
             .collect()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn confirm_visible(&self) -> bool {
         self.pending_discard
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn entry_point(&self, index: usize) -> Point<Pixels> {
         let bounds = self.bounds.get(index).copied().unwrap_or_default();
         point(

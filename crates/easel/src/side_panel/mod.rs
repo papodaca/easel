@@ -70,7 +70,7 @@ impl SidePanel {
         if !self.validation.read(cx).generate_enabled(cx) {
             return;
         }
-        let request = match crate::jobs::build_request(&self.app_state.read(cx)) {
+        let request = match crate::jobs::build_request(self.app_state.read(cx)) {
             Ok(request) => request,
             Err(message) => {
                 log::warn!("generate refused: {message}");

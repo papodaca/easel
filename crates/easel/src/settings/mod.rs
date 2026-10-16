@@ -136,6 +136,7 @@ impl SharedKeys {
         self.session.lock().expect("session keys")
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_session(&self, provider: ProviderId, key: impl Into<String>) {
         self.lock_session().set(provider, key);
     }
