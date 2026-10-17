@@ -239,6 +239,8 @@ mod tests {
             serde_json::json!("krea")
         );
         assert!(ProviderId::Bfl.allows_url("https://delivery-eu.bfl.ai/x"));
+        assert!(ProviderId::Krea.allows_url("https://api.krea.ai/assets/fixed"));
+        assert!(ProviderId::Krea.allows_url("https://cdn.krea.ai/r.png"));
         assert!(!ProviderId::Bfl.allows_url("https://bfl.ai.evil.example/x"));
         assert!(!ProviderId::Bfl.allows_url("http://api.bfl.ai/x"));
         assert!(!ProviderId::Bfl.allows_url("https://api.krea.ai/x"));

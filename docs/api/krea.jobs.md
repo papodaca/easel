@@ -26,3 +26,5 @@ A deprecated model sends `Deprecation: true` and `Sunset` (an RFC 1123 date) on 
 `replacement` and `migration_url` are present when Krea has a replacement. `error` is the stable switch. A 410 is terminal.
 
 `GET /jobs/{id}` documents 404, not 401, when the id is missing or the caller cannot see it. A valid key against a random UUID is therefore not a 401. That is the cheap key check, parallel to BFL's `Task not found`.
+
+Result downloads in the fixtures use `https://cdn.krea.ai/`, which is already allowed by the `.krea.ai` suffix. No other result host was recorded, because this landing did not run a paid live job. FLUX.2 [pro] `safety_tolerance` is capped at 5 in the app even though the OpenAPI maximum is 7. Krea 3 `resolution` is sent as `1K`/`2K`.
