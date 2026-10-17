@@ -725,7 +725,8 @@ mod provider_tests {
         let Body::Json(json) = &body.body else {
             panic!("expected json");
         };
-        let keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
         assert_eq!(
             keys,
             vec![
