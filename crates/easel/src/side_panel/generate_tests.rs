@@ -8,8 +8,7 @@ use gpui::{TestAppContext, prelude::*};
 use crate::app_state::AppState;
 use crate::jobs::JobRunner;
 use crate::net::{FakeTransport, HttpTransport};
-use crate::notifications::Notifications;
-use crate::settings::{Resolver, SettingsPanel, SharedKeys};
+use crate::settings::{Resolver, SharedKeys};
 use crate::side_panel::SidePanel;
 
 fn temp_dir() -> std::path::PathBuf {
@@ -40,16 +39,10 @@ fn generate_submits_the_scene_to_the_runner(cx: &mut TestAppContext) {
     });
     let (state, panel) = cx.update(|cx| {
         let state = cx.new(|_| AppState::new());
-        let notes = cx.new(|_| Notifications::new());
-        let settings = cx.new({
-            let transport = Arc::clone(&transport);
-            let keys = Arc::clone(&keys);
-            move |cx| SettingsPanel::open(notes, transport, keys, cx)
-        });
         let panel = cx.new({
             let state = state.clone();
             let runner = runner.clone();
-            move |cx| SidePanel::new(state, settings, keys, Some(runner), cx)
+            move |cx| SidePanel::new(state, keys, Some(runner), cx)
         });
         (state, panel)
     });

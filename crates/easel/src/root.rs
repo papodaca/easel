@@ -1,11 +1,11 @@
 use gpui::{
-    App, Context, ExternalPaths, FocusHandle, Focusable, IntoElement, ParentElement,
+    App, Context, ExternalPaths, FocusHandle, Focusable, IntoElement, MouseButton, ParentElement,
     PathPromptOptions, Render, ResizeEdge, Styled, Window, div, prelude::*, px, rgb,
 };
 
 use easel_core::providers::Provider;
 
-use crate::actions::{ActualSize, Fit, Open, Paste, Quit, SaveAs, Settings};
+use crate::actions::{ActualSize, CloseSettings, Fit, Open, Paste, Quit, SaveAs, Settings};
 use crate::app_state::AppState;
 use crate::assets;
 use crate::bottom_strip::BottomStrip;
@@ -20,6 +20,7 @@ use crate::side_panel::SidePanel;
 use crate::status_bar::StatusBar;
 use crate::theme;
 use crate::toolbar::Toolbar;
+use crate::ui::{Button, pane_header};
 
 pub struct Root {
     focus_handle: FocusHandle,
@@ -29,6 +30,7 @@ pub struct Root {
     toolbar: gpui::Entity<Toolbar>,
     canvas: gpui::Entity<Canvas>,
     side_panel: gpui::Entity<SidePanel>,
+    settings: gpui::Entity<SettingsPanel>,
     bottom_strip: gpui::Entity<BottomStrip>,
     status_bar: gpui::Entity<StatusBar>,
     #[allow(dead_code)]
@@ -105,8 +107,9 @@ impl Root {
         });
         let panel_state = app_state.clone();
         let strip_state = app_state.clone();
+        let settings_view = settings.clone();
         let side_panel =
-            cx.new(move |cx| SidePanel::new(panel_state, settings, keys, Some(panel_runner), cx));
+            cx.new(move |cx| SidePanel::new(panel_state, keys, Some(panel_runner), cx));
         let bottom_strip =
             cx.new(move |cx| BottomStrip::new(strip_state, Some(strip_runner), strip_history, cx));
         let session_path = crate::jobs::data_dir().join("session.json");
@@ -125,11 +128,61 @@ impl Root {
             toolbar,
             canvas,
             side_panel,
+            settings: settings_view,
             bottom_strip,
             status_bar,
             session,
             hovered_edge: None,
         }
+    }
+
+    fn settings_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("settings-scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme::color(0x11111b, 0.72))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.app_state
+                        .update(cx, |state, cx| state.set_settings_open(false, cx));
+                    this.set_status("Ready", cx);
+                }),
+            )
+            .child(
+                div()
+                    .id("settings-dialog")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .flex()
+                    .flex_col()
+                    .w(px(440.))
+                    .max_h(px(560.))
+                    .bg(rgb(theme::PANEL))
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .rounded_md()
+                    .overflow_hidden()
+                    .text_color(rgb(theme::TEXT))
+                    .child(
+                        pane_header("Settings")
+                            .child(Button::ghost("settings-close", "Close").action(CloseSettings)),
+                    )
+                    .child(
+                        div()
+                            .id("settings-body")
+                            .flex_1()
+                            .min_h(px(0.))
+                            .overflow_y_scroll()
+                            .p(px(16.))
+                            .child(self.settings.clone()),
+                    ),
+            )
     }
 
     fn set_status(&mut self, text: &'static str, cx: &mut Context<Self>) {
@@ -256,13 +309,22 @@ impl Root {
 
     fn settings(&mut self, _: &Settings, _: &mut Window, cx: &mut Context<Self>) {
         self.app_state
-            .update(cx, |state, cx| state.toggle_side_mode(cx));
-        let mode = self.app_state.read(cx).side_mode;
-        let label = match mode {
-            crate::app_state::SideMode::Settings => "Settings",
-            crate::app_state::SideMode::Editor => "Editor",
+            .update(cx, |state, cx| state.toggle_settings(cx));
+        let label = if self.app_state.read(cx).settings_open {
+            "Settings"
+        } else {
+            "Ready"
         };
         self.set_status(label, cx);
+    }
+
+    fn close_settings(&mut self, _: &CloseSettings, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.app_state.read(cx).settings_open {
+            return;
+        }
+        self.app_state
+            .update(cx, |state, cx| state.set_settings_open(false, cx));
+        self.set_status("Ready", cx);
     }
 
     fn quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
@@ -296,6 +358,7 @@ impl Render for Root {
             .on_action(cx.listener(Self::fit))
             .on_action(cx.listener(Self::actual_size))
             .on_action(cx.listener(Self::settings))
+            .on_action(cx.listener(Self::close_settings))
             .on_action(cx.listener(Self::quit))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
                 image_load::load_paths(
@@ -309,6 +372,7 @@ impl Render for Root {
             .drag_over::<ExternalPaths>(|style, _, _, _| {
                 style.border_2().border_color(rgb(theme::ACCENT))
             })
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -341,7 +405,10 @@ impl Render for Root {
                     )
                     .child(self.bottom_strip.clone()),
             )
-            .child(self.status_bar.clone());
+            .child(self.status_bar.clone())
+            .when(self.app_state.read(cx).settings_open, |root| {
+                root.child(self.settings_modal(cx))
+            });
 
         let root = cx.entity();
         chrome::client_side_decorations(
@@ -385,5 +452,28 @@ mod tests {
         });
         let quit = root.read_with(&cx, |root, cx| root.app_state.read(cx).quit_requested);
         assert!(quit);
+    }
+
+    #[gpui::test]
+    fn settings_opens_a_modal_and_escape_closes_it(cx: &mut TestAppContext) {
+        let window = cx.update(|cx| {
+            crate::actions::bind_keys(cx);
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let root = cx.new(Root::new);
+                root.focus_handle(cx).focus(window, cx);
+                root
+            })
+            .unwrap()
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let root = window.root(&mut cx).unwrap();
+        cx.update(|window, cx| {
+            window.dispatch_action(Box::new(crate::actions::Settings), cx);
+        });
+        assert!(root.read_with(&cx, |root, cx| root.app_state.read(cx).settings_open));
+        cx.update(|window, cx| {
+            window.dispatch_action(Box::new(crate::actions::CloseSettings), cx);
+        });
+        assert!(!root.read_with(&cx, |root, cx| root.app_state.read(cx).settings_open));
     }
 }

@@ -23,16 +23,14 @@ use gpui::{
 
 pub use inspector::Inspector;
 
-use crate::actions::Settings;
-use crate::app_state::{AppState, SideMode};
-use crate::settings::{SettingsPanel, SharedKeys};
+use crate::app_state::AppState;
+use crate::settings::SharedKeys;
 use crate::theme;
 use crate::ui::{Button, pane_header};
 use crate::widgets::Select;
 
 pub struct SidePanel {
     app_state: gpui::Entity<AppState>,
-    settings: gpui::Entity<SettingsPanel>,
     inspector: gpui::Entity<Inspector>,
     prompt: gpui::Entity<PromptEditor>,
     references: gpui::Entity<References>,
@@ -48,7 +46,6 @@ pub struct SidePanel {
 impl SidePanel {
     pub fn new(
         app_state: gpui::Entity<AppState>,
-        settings: gpui::Entity<SettingsPanel>,
         keys: std::sync::Arc<SharedKeys>,
         runner: Option<
             gpui::Entity<crate::jobs::JobRunner<easel_core::providers::bfl::flux3::Flux3>>,
@@ -101,7 +98,6 @@ impl SidePanel {
         .detach();
         Self {
             app_state,
-            settings,
             inspector,
             prompt,
             references,
@@ -162,36 +158,34 @@ impl SidePanel {
 
 impl Render for SidePanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mode = self.app_state.read(cx).side_mode;
         let inspection = self.app_state.read(cx).inspection.clone();
-        let (header, body) = match mode {
-            SideMode::Editor if let Some(inspection) = inspection => {
-                let state = self.app_state.clone();
-                (
-                    pane_header("Compare").child(
-                        Button::ghost("compare-return", "Return").on_click(move |_, _, cx| {
-                            state.update(cx, |app, cx| {
-                                app.inspection = None;
-                                cx.notify();
-                            });
-                        }),
-                    ),
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.))
-                        .child(div().text_sm().child(inspection.prompt.clone()))
-                        .children(inspection.rows.iter().map(|(key, value)| {
-                            div().flex().flex_col().gap(px(2.)).child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme::TEXT_MUTED))
-                                    .child(format!("{key}: {value}")),
-                            )
-                        })),
-                )
-            }
-            SideMode::Editor => (
+        let (header, body) = if let Some(inspection) = inspection {
+            let state = self.app_state.clone();
+            (
+                pane_header("Compare").child(Button::ghost("compare-return", "Return").on_click(
+                    move |_, _, cx| {
+                        state.update(cx, |app, cx| {
+                            app.inspection = None;
+                            cx.notify();
+                        });
+                    },
+                )),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(div().text_sm().child(inspection.prompt.clone()))
+                    .children(inspection.rows.iter().map(|(key, value)| {
+                        div().flex().flex_col().gap(px(2.)).child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(theme::TEXT_MUTED))
+                                .child(format!("{key}: {value}")),
+                        )
+                    })),
+            )
+        } else {
+            (
                 pane_header("Editor").child(self.model.clone()),
                 div()
                     .flex()
@@ -211,12 +205,7 @@ impl Render for SidePanel {
                                 panel.update(cx, |panel, cx| panel.generate(cx));
                             })
                     }),
-            ),
-            SideMode::Settings => (
-                pane_header("Settings")
-                    .child(Button::ghost("settings-back", "Back").action(Settings)),
-                div().child(self.settings.clone()),
-            ),
+            )
         };
         div()
             .flex()

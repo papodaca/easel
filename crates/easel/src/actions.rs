@@ -3,7 +3,17 @@ use gpui::{App, KeyBinding, actions};
 actions!(
     easel,
     [
-        Open, Paste, SaveAs, Fit, ActualSize, Settings, Quit, SelectTool, BoxTool, DeleteBox
+        Open,
+        Paste,
+        SaveAs,
+        Fit,
+        ActualSize,
+        Settings,
+        CloseSettings,
+        Quit,
+        SelectTool,
+        BoxTool,
+        DeleteBox
     ]
 );
 
@@ -15,6 +25,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-0", Fit, None),
         KeyBinding::new("ctrl-1", ActualSize, None),
         KeyBinding::new("ctrl-,", Settings, None),
+        KeyBinding::new("escape", CloseSettings, None),
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("v", SelectTool, Some("Canvas")),
         KeyBinding::new("b", BoxTool, Some("Canvas")),

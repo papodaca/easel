@@ -12,19 +12,13 @@ use crate::image_load::DecodedImage;
 use crate::notifications::{Notifications, Toast, ToastLevel};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SideMode {
-    Editor,
-    Settings,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     Select,
     Box,
 }
 
 pub struct AppState {
-    pub side_mode: SideMode,
+    pub settings_open: bool,
     pub quit_requested: bool,
     pub image: Option<Arc<DecodedImage>>,
     pub extras: Vec<Arc<DecodedImage>>,
@@ -48,7 +42,7 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            side_mode: SideMode::Editor,
+            settings_open: false,
             quit_requested: false,
             image: None,
             extras: Vec::new(),
@@ -277,12 +271,16 @@ impl AppState {
         std::mem::take(&mut self.retired_renders)
     }
 
-    pub fn toggle_side_mode(&mut self, cx: &mut Context<Self>) {
-        self.side_mode = match self.side_mode {
-            SideMode::Editor => SideMode::Settings,
-            SideMode::Settings => SideMode::Editor,
-        };
+    pub fn set_settings_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.settings_open == open {
+            return;
+        }
+        self.settings_open = open;
         cx.notify();
+    }
+
+    pub fn toggle_settings(&mut self, cx: &mut Context<Self>) {
+        self.set_settings_open(!self.settings_open, cx);
     }
 
     pub fn request_quit(&mut self, cx: &mut Context<Self>) {
