@@ -96,19 +96,29 @@ pub enum AuthScheme {
     Bearer,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ImageSlots {
-    List { max: usize },
-    Numbered { max: usize },
+    List {
+        max: usize,
+        #[serde(default = "default_image_key")]
+        key: String,
+    },
+    Numbered {
+        max: usize,
+    },
     Single,
+}
+
+fn default_image_key() -> String {
+    "images".into()
 }
 
 impl ImageSlots {
     #[must_use]
-    pub fn max(self) -> usize {
+    pub fn max(&self) -> usize {
         match self {
-            Self::List { max } | Self::Numbered { max } => max,
+            Self::List { max, .. } | Self::Numbered { max } => *max,
             Self::Single => 1,
         }
     }
@@ -175,7 +185,10 @@ mod tests {
             beta: false,
             capabilities: Capabilities {
                 supports_boxes: true,
-                image_slots: ImageSlots::List { max: 10 },
+                image_slots: ImageSlots::List {
+                    max: 10,
+                    key: "images".into(),
+                },
                 size_control: SizeControl::AspectRatioAndResolution,
             },
             schema: ParamSchema {
@@ -199,7 +212,10 @@ mod tests {
     fn image_count_honors_the_slot_maximum() {
         let capabilities = Capabilities {
             supports_boxes: true,
-            image_slots: ImageSlots::List { max: 10 },
+            image_slots: ImageSlots::List {
+                max: 10,
+                key: "images".into(),
+            },
             size_control: SizeControl::AspectRatioAndResolution,
         };
         assert!(capabilities.validate_image_count(10).is_none());

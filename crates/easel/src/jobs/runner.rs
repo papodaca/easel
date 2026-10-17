@@ -375,8 +375,42 @@ impl<P: Provider + 'static> JobRunner<P> {
                 cx.notify();
                 self.schedule_poll(token, cx);
             }
-            Err(error) => self.fail(token, error, cx),
+            Err(error) => {
+                if self.provider.spec().beta && matches!(error, ProviderError::Auth) {
+                    self.probe_beta(token, cx);
+                } else {
+                    self.fail(token, error, cx);
+                }
+            }
         }
+    }
+
+    fn probe_beta(&mut self, token: u64, cx: &mut Context<Self>) {
+        let request = crate::settings::key_probe(self.provider.spec().provider);
+        let message = format!(
+            "{} is in beta; your workspace needs access",
+            self.provider.spec().display_name
+        );
+        let task = self.transport.request(request, cx);
+        cx.spawn(async move |this, cx| {
+            let response = task.await;
+            this.update(cx, |runner, cx| {
+                if runner.dead(token) {
+                    return;
+                }
+                let rejected = matches!(
+                    &response,
+                    Ok(response) if response.status == 401 || response.status == 403
+                );
+                if rejected {
+                    runner.fail(token, ProviderError::Auth, cx);
+                } else {
+                    runner.fail(token, ProviderError::Protocol(message), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn schedule_poll(&mut self, token: u64, cx: &mut Context<Self>) {

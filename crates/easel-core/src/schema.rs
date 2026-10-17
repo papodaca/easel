@@ -59,6 +59,11 @@ pub enum CrossRule {
         h: String,
         max: i64,
     },
+    /// When `key` is true, at least `min` images must be attached.
+    RequiresImagesWhen {
+        key: String,
+        min: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,7 +118,7 @@ impl ParamSchema {
             }
         }
         for rule in &self.cross_rules {
-            errors.extend(eval_cross(rule, values));
+            errors.extend(eval_cross(rule, values, ctx));
         }
         errors
     }
@@ -134,7 +139,11 @@ impl ParamSchema {
     }
 }
 
-fn eval_cross(rule: &CrossRule, values: &BTreeMap<String, Value>) -> Vec<FieldError> {
+fn eval_cross(
+    rule: &CrossRule,
+    values: &BTreeMap<String, Value>,
+    ctx: &RuleContext,
+) -> Vec<FieldError> {
     match rule {
         CrossRule::Never => Vec::new(),
         CrossRule::MultipleOf {
@@ -182,6 +191,18 @@ fn eval_cross(rule: &CrossRule, values: &BTreeMap<String, Value>) -> Vec<FieldEr
             };
             if area > *max {
                 vec![area_error(w), area_error(h)]
+            } else {
+                Vec::new()
+            }
+        }
+        CrossRule::RequiresImagesWhen { key, min } => {
+            let enabled = values.get(key).and_then(Value::as_bool).unwrap_or(false);
+            if enabled && ctx.image_count < *min {
+                vec![FieldError {
+                    key: key.clone(),
+                    message: "Regional edit needs a reference image".into(),
+                    approved_max: None,
+                }]
             } else {
                 Vec::new()
             }

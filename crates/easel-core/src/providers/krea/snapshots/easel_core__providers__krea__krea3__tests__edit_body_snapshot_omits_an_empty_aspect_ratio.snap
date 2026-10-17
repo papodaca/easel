@@ -1,0 +1,15 @@
+---
+source: crates/easel-core/src/providers/krea/krea3.rs
+expression: json
+---
+{
+  "image_urls": [
+    "https://api.krea.ai/assets/a",
+    "https://api.krea.ai/assets/b"
+  ],
+  "prompt": "a moonlit lake",
+  "regional_edit": true,
+  "resolution": "2K",
+  "seed": 7,
+  "thinking_mode": "high"
+}

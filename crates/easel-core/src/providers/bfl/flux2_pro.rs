@@ -92,7 +92,7 @@ impl Provider for Flux2Pro {
                 body.insert(key.into(), value.clone());
             }
         }
-        for (key, value) in map_images(SPEC.capabilities.image_slots, images) {
+        for (key, value) in map_images(&SPEC.capabilities.image_slots, images) {
             body.insert(key, value);
         }
         HttpRequest {
@@ -307,13 +307,13 @@ mod tests {
             .into_iter()
             .map(|text| ImageInput::RawBase64(text.into()))
             .collect::<Vec<_>>();
-        let mapped = map_images(ImageSlots::Numbered { max: 8 }, &inputs);
+        let mapped = map_images(&ImageSlots::Numbered { max: 8 }, &inputs);
         assert_eq!(mapped["input_image"], json!("YQ=="));
         assert_eq!(mapped["input_image_2"], json!("Yg=="));
         assert_eq!(mapped["input_image_3"], json!("Yw=="));
         assert!(!mapped.contains_key("input_image_4"));
 
-        let slots = Flux2Pro.spec().capabilities.image_slots;
+        let slots = &Flux2Pro.spec().capabilities.image_slots;
         let error = Flux2Pro
             .spec()
             .capabilities

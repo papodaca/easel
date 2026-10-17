@@ -264,7 +264,10 @@ fn spec() -> crate::model_spec::ModelSpec {
         beta: false,
         capabilities: Capabilities {
             supports_boxes: true,
-            image_slots: ImageSlots::List { max: 10 },
+            image_slots: ImageSlots::List {
+                max: 10,
+                key: "images".into(),
+            },
             size_control: SizeControl::AspectRatioAndResolution,
         },
         schema: ParamSchema {

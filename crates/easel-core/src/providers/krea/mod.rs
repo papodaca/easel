@@ -1,4 +1,5 @@
 mod assets;
+pub mod krea3;
 pub mod protocol;
 
 use std::collections::BTreeMap;
@@ -29,7 +30,10 @@ static SPEC: std::sync::LazyLock<ModelSpec> = std::sync::LazyLock::new(|| ModelS
     beta: false,
     capabilities: Capabilities {
         supports_boxes: false,
-        image_slots: ImageSlots::List { max: 8 },
+        image_slots: ImageSlots::List {
+            max: 8,
+            key: "image_urls".into(),
+        },
         size_control: SizeControl::AspectRatioAndResolution,
     },
     schema: ParamSchema {

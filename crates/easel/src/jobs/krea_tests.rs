@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use easel_core::error::ProviderError;
 use easel_core::history::HistoryStore;
 use easel_core::http::{HttpResponse, Method};
 use easel_core::job::{EncodedImage, JobRequest, JobState};
@@ -8,6 +9,7 @@ use easel_core::model_spec::ProviderId;
 use easel_core::providers::Provider;
 use easel_core::providers::bfl::flux3::Flux3;
 use easel_core::providers::krea::Krea;
+use easel_core::providers::krea::krea3::Krea3;
 use gpui::{TestAppContext, prelude::*};
 
 use crate::jobs::JobRunner;
@@ -39,7 +41,13 @@ fn image() -> EncodedImage {
     }
 }
 
-fn request() -> JobRequest {
+fn bare_request() -> JobRequest {
+    let mut request = request_with_image();
+    request.images.clear();
+    request
+}
+
+fn request_with_image() -> JobRequest {
     JobRequest {
         model_id: "krea".into(),
         compiled_prompt: "a red square".into(),
@@ -120,7 +128,7 @@ fn upload_then_poll_then_a_cached_second_job(cx: &mut TestAppContext) {
     let harness = open(cx, Krea, script);
     harness
         .runner
-        .update(cx, |runner, cx| runner.submit(request(), cx));
+        .update(cx, |runner, cx| runner.submit(request_with_image(), cx));
     cx.run_until_parked();
     assert_eq!(harness.transport.seen().len(), 2);
     cx.executor().advance_clock(Duration::from_secs(2));
@@ -146,7 +154,7 @@ fn upload_then_poll_then_a_cached_second_job(cx: &mut TestAppContext) {
         .count();
     harness
         .runner
-        .update(cx, |runner, cx| runner.submit(request(), cx));
+        .update(cx, |runner, cx| runner.submit(request_with_image(), cx));
     cx.run_until_parked();
     cx.executor().advance_clock(Duration::from_secs(2));
     cx.run_until_parked();
@@ -186,7 +194,7 @@ fn dismiss_during_processing_deletes_once(cx: &mut TestAppContext) {
     );
     harness
         .runner
-        .update(cx, |runner, cx| runner.submit(request(), cx));
+        .update(cx, |runner, cx| runner.submit(request_with_image(), cx));
     cx.run_until_parked();
     cx.executor().advance_clock(Duration::from_secs(2));
     cx.run_until_parked();
@@ -214,7 +222,7 @@ fn dismiss_after_completed_sends_no_delete(cx: &mut TestAppContext) {
     let harness = open(cx, Krea, completed_script());
     harness
         .runner
-        .update(cx, |runner, cx| runner.submit(request(), cx));
+        .update(cx, |runner, cx| runner.submit(request_with_image(), cx));
     cx.run_until_parked();
     cx.executor().advance_clock(Duration::from_secs(2));
     cx.run_until_parked();
@@ -254,7 +262,7 @@ fn krea_deadline_is_ten_minutes(cx: &mut TestAppContext) {
     let harness = open(cx, Krea, script);
     harness
         .runner
-        .update(cx, |runner, cx| runner.submit(request(), cx));
+        .update(cx, |runner, cx| runner.submit(request_with_image(), cx));
     cx.run_until_parked();
     cx.executor().advance_clock(Duration::from_secs(5 * 60));
     cx.run_until_parked();
@@ -271,4 +279,49 @@ fn krea_deadline_is_ten_minutes(cx: &mut TestAppContext) {
         "{error}"
     );
     let _ = Flux3.poll_policy();
+}
+
+#[gpui::test]
+fn a_beta_401_is_access_when_the_key_works_elsewhere(cx: &mut TestAppContext) {
+    let harness = open(
+        cx,
+        Krea3,
+        vec![Ok(http(401, "no")), Ok(http(404, "missing"))],
+    );
+    harness
+        .runner
+        .update(cx, |runner, cx| runner.submit(bare_request(), cx));
+    cx.run_until_parked();
+    let states = harness.runner.read_with(cx, |runner, _| runner.states());
+    match &states[0] {
+        JobState::Failed {
+            error: ProviderError::Protocol(text),
+        } => assert!(text.contains("beta"), "{text}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        harness
+            .transport
+            .seen()
+            .iter()
+            .any(|request| request.url.starts_with("https://api.krea.ai/jobs/"))
+    );
+
+    let harness = open(cx, Krea3, vec![Ok(http(401, "no")), Ok(http(401, "no"))]);
+    harness
+        .runner
+        .update(cx, |runner, cx| runner.submit(bare_request(), cx));
+    cx.run_until_parked();
+    let states = harness.runner.read_with(cx, |runner, _| runner.states());
+    assert!(
+        matches!(
+            states[0],
+            JobState::Failed {
+                error: ProviderError::Auth
+            }
+        ),
+        "{states:?}"
+    );
+    let text = format!("{states:?}");
+    assert!(!text.contains("beta"), "{text}");
 }

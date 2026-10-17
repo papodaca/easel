@@ -14,7 +14,13 @@ impl ModelRegistry {
     pub fn specs() -> &'static [&'static ModelSpec] {
         static SPECS: OnceLock<Vec<&'static ModelSpec>> = OnceLock::new();
         SPECS
-            .get_or_init(|| vec![bfl::flux3::model_spec(), bfl::flux2_pro::model_spec()])
+            .get_or_init(|| {
+                vec![
+                    bfl::flux3::model_spec(),
+                    bfl::flux2_pro::model_spec(),
+                    krea::krea3::model_spec(),
+                ]
+            })
             .as_slice()
     }
 
@@ -120,24 +126,25 @@ impl ImageInput {
 /// Place prepared images into the request fields the slot kind names.
 #[must_use]
 pub fn map_images(
-    slots: crate::model_spec::ImageSlots,
+    slots: &crate::model_spec::ImageSlots,
     inputs: &[ImageInput],
 ) -> std::collections::BTreeMap<String, serde_json::Value> {
     use crate::model_spec::ImageSlots;
     let mut fields = std::collections::BTreeMap::new();
     match slots {
-        ImageSlots::List { max } => {
+        ImageSlots::List { max, key } => {
+            let key = key.clone();
             let values = inputs
                 .iter()
-                .take(max)
+                .take(*max)
                 .map(|input| serde_json::Value::String(input.as_str().to_owned()))
                 .collect();
             if !inputs.is_empty() {
-                fields.insert("images".into(), serde_json::Value::Array(values));
+                fields.insert(key, serde_json::Value::Array(values));
             }
         }
         ImageSlots::Numbered { max } => {
-            for (index, input) in inputs.iter().take(max).enumerate() {
+            for (index, input) in inputs.iter().take(*max).enumerate() {
                 let key = if index == 0 {
                     "input_image".to_owned()
                 } else {
