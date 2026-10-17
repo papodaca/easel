@@ -123,6 +123,15 @@ impl Slider {
     fn on_mouse_up(&mut self, _: &gpui::MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.dragging = false;
     }
+
+    fn readout(&self) -> String {
+        let rounded = self.value.round();
+        if (self.value - rounded).abs() < 0.05 {
+            format!("{}", rounded as i64)
+        } else {
+            format!("{:.1}", self.value)
+        }
+    }
 }
 
 impl Focusable for Slider {
@@ -138,60 +147,81 @@ impl gpui::Render for Slider {
             let span = (self.max - self.min).max(f64::EPSILON);
             ((self.value - self.min) / span).clamp(0.0, 1.0)
         };
+        let readout = self.readout();
         field_row(
             self.label.as_deref(),
             self.help.as_deref(),
             div()
-                .id("slider")
-                .track_focus(&self.focus_handle)
-                .relative()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
                 .w_full()
-                .h(px(28.0))
-                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                .on_mouse_move(cx.listener(Self::on_mouse_move))
-                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                 .child(
-                    canvas(
-                        move |bounds, _, cx| {
-                            bounds_entity.update(cx, |this, _| this.track_bounds = bounds);
-                        },
-                        |_, _, _, _| {},
-                    )
-                    .absolute()
-                    .size_full(),
+                    div()
+                        .id("slider")
+                        .track_focus(&self.focus_handle)
+                        .relative()
+                        .flex_1()
+                        .h(px(28.0))
+                        .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                        .on_mouse_move(cx.listener(Self::on_mouse_move))
+                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                        .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                        .child(
+                            canvas(
+                                move |bounds, _, cx| {
+                                    bounds_entity.update(cx, |this, _| this.track_bounds = bounds);
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .size_full(),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(0.0))
+                                .top(px(12.0))
+                                .h(px(4.0))
+                                .w_full()
+                                .rounded_full()
+                                .bg(rgb(theme::ELEMENT)),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(0.0))
+                                .top(px(12.0))
+                                .h(px(4.0))
+                                .w(gpui::relative(fraction as f32))
+                                .rounded_full()
+                                .bg(rgb(theme::ACCENT)),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(7.0))
+                                .left(gpui::relative(fraction as f32))
+                                .ml(px(-7.0))
+                                .size(px(14.0))
+                                .rounded_full()
+                                .bg(rgb(theme::TEXT))
+                                .border_1()
+                                .border_color(rgb(theme::BORDER)),
+                        ),
                 )
                 .child(
                     div()
-                        .absolute()
-                        .left(px(0.0))
-                        .top(px(12.0))
-                        .h(px(4.0))
-                        .w_full()
-                        .rounded_full()
-                        .bg(rgb(theme::ELEMENT)),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(0.0))
-                        .top(px(12.0))
-                        .h(px(4.0))
-                        .w(gpui::relative(fraction as f32))
-                        .rounded_full()
-                        .bg(rgb(theme::ACCENT)),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(7.0))
-                        .left(gpui::relative(fraction as f32))
-                        .ml(px(-7.0))
-                        .size(px(14.0))
-                        .rounded_full()
-                        .bg(rgb(theme::TEXT))
-                        .border_1()
-                        .border_color(rgb(theme::BORDER)),
+                        .w(px(32.0))
+                        .text_right()
+                        .text_sm()
+                        .text_color(rgb(if self.enabled {
+                            theme::TEXT
+                        } else {
+                            theme::TEXT_DISABLED
+                        }))
+                        .child(readout),
                 ),
         )
     }
