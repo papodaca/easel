@@ -9,15 +9,18 @@ private = { ignore = true }
 unused-allowed-license = "allow"
 confidence-threshold = 0.8
 # Every license not listed here is rejected. GPL-* and AGPL-* are left off
-# so a Zed GPL crate cannot enter the graph.
+# so a Zed GPL crate cannot enter the graph. CDLA-Permissive-2.0 is the
+# Mozilla CA bundle. NCSA is the extra term on libfuzzer-sys.
 allow = [
     "Apache-2.0",
     "MIT",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "CC0-1.0",
+    "CDLA-Permissive-2.0",
     "ISC",
     "MPL-2.0",
+    "NCSA",
     "Unicode-3.0",
     "Zlib",
 ]
@@ -29,4 +32,5 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
 
 [sources.allow-org]
-github = ["zed-industries"]
+# gpui pulls proptest from git. Zed itself is the other git source.
+github = ["proptest-rs", "zed-industries"]

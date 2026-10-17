@@ -39,7 +39,9 @@ jobs:
       - name: Install nextest and cargo-deny
         uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.9.4
         with:
-          tool: nextest,cargo-deny
+          # cargo-deny@latest still resolves to 0.13.9, which rejects
+          # `unmaintained = "workspace"`.
+          tool: nextest,cargo-deny@0.20.2
 
       - name: Format
         run: cargo fmt --check
