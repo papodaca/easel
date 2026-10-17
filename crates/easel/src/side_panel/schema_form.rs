@@ -2,10 +2,10 @@ use easel_core::schema::{FieldDef, FieldKind, RuleContext};
 use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Subscription, Window, div, prelude::*, px,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::app_state::AppState;
-use crate::ui::muted_text;
+use crate::ui::Button;
 use crate::widgets::{self, Checkbox, NumberInput, Select, Slider, TextInput};
 
 const FLUX3_ID: &str = "flux-3-image";
@@ -22,7 +22,19 @@ enum FieldControl {
         input: Entity<TextInput>,
         integer: bool,
     },
-    Repeated,
+    Repeated {
+        rows: Vec<Vec<(String, FieldControl)>>,
+    },
+}
+
+#[derive(Clone)]
+enum Binding {
+    Top(String),
+    Row {
+        parent: String,
+        index: usize,
+        child: String,
+    },
 }
 
 pub struct SchemaForm {
@@ -31,6 +43,7 @@ pub struct SchemaForm {
     controls: Vec<(String, FieldControl)>,
     #[cfg(test)]
     presented: Vec<(String, Option<String>)>,
+    quiet: bool,
     _observe: Subscription,
 }
 
@@ -42,7 +55,11 @@ impl SchemaForm {
             controls: Vec::new(),
             #[cfg(test)]
             presented: Vec::new(),
+            quiet: false,
             _observe: cx.observe(&app_state, |this, _, cx| {
+                if this.quiet {
+                    return;
+                }
                 let id = this.app_state.read(cx).model_id.clone();
                 if id != this.model_id {
                     this.rebuild(cx);
@@ -201,14 +218,12 @@ impl SchemaForm {
     pub fn is_repeated(&self, key: &str) -> bool {
         self.controls
             .iter()
-            .any(|(name, control)| name == key && matches!(control, FieldControl::Repeated))
+            .any(|(name, control)| name == key && matches!(control, FieldControl::Repeated { .. }))
     }
 
     #[cfg(test)]
     pub fn has_control(&self, key: &str) -> bool {
-        self.controls
-            .iter()
-            .any(|(name, control)| name == key && !matches!(control, FieldControl::Repeated))
+        self.controls.iter().any(|(name, _)| name == key)
     }
 
     #[cfg(test)]
@@ -231,7 +246,7 @@ impl SchemaForm {
             FieldControl::Text { input, .. } => {
                 caption(input.read(cx).label(), input.read(cx).help())
             }
-            FieldControl::Repeated => (None, None),
+            FieldControl::Repeated { .. } => (None, None),
         }
     }
 
@@ -241,16 +256,47 @@ impl SchemaForm {
             (app.model_id.clone(), app.spec().schema.fields.clone())
         };
         self.model_id = model_id;
+        self.ensure_empty_lists(&fields, cx);
+        let values = self.app_state.read(cx).values.clone();
         let state = self.app_state.clone();
         self.controls = fields
             .iter()
-            .map(|field| (field.key.clone(), build_control(field, &state, cx)))
+            .map(|field| {
+                (
+                    field.key.clone(),
+                    build_control(field, &state, Binding::Top(field.key.clone()), &values, cx),
+                )
+            })
             .collect();
         self.push_values(cx);
         self.copy_flux_aspect(cx);
     }
 
-    fn push_values(&self, cx: &mut Context<Self>) {
+    fn ensure_empty_lists(&mut self, fields: &[FieldDef], cx: &mut Context<Self>) {
+        let missing: Vec<String> = {
+            let values = &self.app_state.read(cx).values;
+            fields
+                .iter()
+                .filter(|field| matches!(field.kind, FieldKind::Repeated { .. }))
+                .filter(|field| !matches!(values.get(&field.key), Some(Value::Array(_))))
+                .map(|field| field.key.clone())
+                .collect()
+        };
+        if missing.is_empty() {
+            return;
+        }
+        self.quiet = true;
+        self.app_state.update(cx, |app, cx| {
+            for key in missing {
+                app.values.insert(key, Value::Array(Vec::new()));
+            }
+            cx.notify();
+        });
+        self.quiet = false;
+    }
+
+    fn push_values(&mut self, cx: &mut Context<Self>) {
+        self.sync_repeated_rows(cx);
         let app = self.app_state.read(cx);
         let schema = app.spec().schema.clone();
         let ctx = context_of(app);
@@ -308,9 +354,161 @@ impl SchemaForm {
                         input.update(cx, |text, cx| text.set_text(&desired, cx));
                     }
                 }
-                FieldControl::Repeated => {}
+                FieldControl::Repeated { rows } => {
+                    let Some(entries) = value.as_array().cloned() else {
+                        continue;
+                    };
+                    for (row, entry) in rows.iter().zip(entries) {
+                        let Some(object) = entry.as_object() else {
+                            continue;
+                        };
+                        for (child, control) in row {
+                            let child_value = object.get(child).cloned().unwrap_or(Value::Null);
+                            push_control(control, &child_value, cx);
+                        }
+                    }
+                }
             }
         }
+    }
+
+    fn sync_repeated_rows(&mut self, cx: &mut Context<Self>) {
+        let fields = self.app_state.read(cx).spec().schema.fields.clone();
+        let values = self.app_state.read(cx).values.clone();
+        let state = self.app_state.clone();
+        for field in &fields {
+            let FieldKind::Repeated { .. } = &field.kind else {
+                continue;
+            };
+            let len = values
+                .get(&field.key)
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            let current = self
+                .controls
+                .iter()
+                .find(|(key, _)| key == &field.key)
+                .and_then(|(_, control)| match control {
+                    FieldControl::Repeated { rows } => Some(rows.len()),
+                    _ => None,
+                });
+            if current == Some(len) {
+                continue;
+            }
+            let built = build_control(field, &state, Binding::Top(field.key.clone()), &values, cx);
+            if let Some((_, control)) = self.controls.iter_mut().find(|(key, _)| key == &field.key)
+            {
+                *control = built;
+            }
+        }
+    }
+
+    fn add_row(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(field) = self
+            .app_state
+            .read(cx)
+            .spec()
+            .schema
+            .fields
+            .iter()
+            .find(|field| field.key == key)
+            .cloned()
+        else {
+            return;
+        };
+        let FieldKind::Repeated { item, max } = field.kind else {
+            return;
+        };
+        let mut entries = self.entries(key, cx);
+        if entries.len() >= max {
+            return;
+        }
+        entries.push(Value::Object(default_entry(&item)));
+        self.store_entries(key, entries, cx);
+    }
+
+    fn remove_row(&mut self, key: &str, index: usize, cx: &mut Context<Self>) {
+        let mut entries = self.entries(key, cx);
+        if index >= entries.len() {
+            return;
+        }
+        entries.remove(index);
+        self.store_entries(key, entries, cx);
+    }
+
+    fn entries(&self, key: &str, cx: &Context<Self>) -> Vec<Value> {
+        self.app_state
+            .read(cx)
+            .values
+            .get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn store_entries(&mut self, key: &str, entries: Vec<Value>, cx: &mut Context<Self>) {
+        self.quiet = true;
+        self.app_state.update(cx, |app, cx| {
+            app.values.insert(key.to_string(), Value::Array(entries));
+            cx.notify();
+        });
+        self.quiet = false;
+        self.push_values(cx);
+    }
+
+    #[cfg(test)]
+    pub fn repeated_len(&self, key: &str) -> usize {
+        self.controls
+            .iter()
+            .find(|(name, _)| name == key)
+            .and_then(|(_, control)| match control {
+                FieldControl::Repeated { rows } => Some(rows.len()),
+                _ => None,
+            })
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub fn add_repeated(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.add_row(key, cx);
+    }
+
+    #[cfg(test)]
+    pub fn remove_repeated(&mut self, key: &str, index: usize, cx: &mut Context<Self>) {
+        self.remove_row(key, index, cx);
+    }
+
+    #[cfg(test)]
+    pub fn row_text(&self, key: &str, index: usize, child: &str) -> Option<&Entity<TextInput>> {
+        self.row_control(key, index, child, |control| match control {
+            FieldControl::Text { input, .. } => Some(input),
+            _ => None,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn row_number(&self, key: &str, index: usize, child: &str) -> Option<&Entity<NumberInput>> {
+        self.row_control(key, index, child, |control| match control {
+            FieldControl::Number { input, .. } => Some(input),
+            _ => None,
+        })
+    }
+
+    #[cfg(test)]
+    fn row_control<'a, T>(
+        &'a self,
+        key: &str,
+        index: usize,
+        child: &str,
+        pick: impl FnOnce(&'a FieldControl) -> Option<T>,
+    ) -> Option<T> {
+        let (_, control) = self.controls.iter().find(|(name, _)| name == key)?;
+        let FieldControl::Repeated { rows } = control else {
+            return None;
+        };
+        let (_, control) = rows.get(index)?.iter().find(|(name, _)| name == child)?;
+        pick(control)
     }
 
     fn copy_flux_aspect(&self, cx: &mut Context<Self>) {
@@ -346,6 +544,8 @@ fn caption(label: Option<&str>, help: Option<&str>) -> (Option<String>, Option<S
 fn build_control(
     field: &FieldDef,
     state: &Entity<AppState>,
+    binding: Binding,
+    values: &std::collections::BTreeMap<String, Value>,
     cx: &mut Context<SchemaForm>,
 ) -> FieldControl {
     match &field.kind {
@@ -359,17 +559,17 @@ fn build_control(
                 items.insert(0, gpui::SharedString::from(""));
             }
             let input = cx.new(|cx| Select::new(items, cx));
-            bind_select(state, &input, field.key.clone(), blank_clears, cx);
+            bind_select(state, &input, binding, blank_clears, cx);
             FieldControl::Select(input)
         }
         FieldKind::Bool => {
             let input = cx.new(Checkbox::new);
-            bind_check(state, &input, field.key.clone(), cx);
+            bind_check(state, &input, binding, cx);
             FieldControl::Check(input)
         }
         FieldKind::Int { max, .. } if *max == i64::MAX => {
             let input = cx.new(TextInput::new);
-            bind_text(state, &input, field.key.clone(), true, true, cx);
+            bind_text(state, &input, binding, true, true, cx);
             FieldControl::Text {
                 input,
                 integer: true,
@@ -383,7 +583,7 @@ fn build_control(
                 slider.set_step(*step as f64, cx);
                 slider
             });
-            bind_slider(state, &input, field.key.clone(), cx);
+            bind_slider(state, &input, binding, cx);
             FieldControl::Slider(input)
         }
         FieldKind::Int { min, max, step } if exact_integer(*min) && exact_integer(*max) => {
@@ -393,12 +593,12 @@ fn build_control(
                 number.set_blank_allowed(clear_blank, cx);
                 number
             });
-            bind_number(state, &input, field.key.clone(), true, clear_blank, cx);
+            bind_number(state, &input, binding, true, clear_blank, cx);
             FieldControl::Number { input, clear_blank }
         }
         FieldKind::Int { .. } => {
             let input = cx.new(TextInput::new);
-            bind_text(state, &input, field.key.clone(), true, true, cx);
+            bind_text(state, &input, binding, true, true, cx);
             FieldControl::Text {
                 input,
                 integer: true,
@@ -411,7 +611,7 @@ fn build_control(
                 number.set_blank_allowed(clear_blank, cx);
                 number
             });
-            bind_number(state, &input, field.key.clone(), false, clear_blank, cx);
+            bind_number(state, &input, binding, false, clear_blank, cx);
             FieldControl::Number { input, clear_blank }
         }
         FieldKind::Text { multiline } => {
@@ -421,7 +621,7 @@ fn build_control(
             } else {
                 cx.new(TextInput::new)
             };
-            bind_text(state, &input, field.key.clone(), false, clear_blank, cx);
+            bind_text(state, &input, binding, false, clear_blank, cx);
             FieldControl::Text {
                 input,
                 integer: false,
@@ -430,7 +630,7 @@ fn build_control(
         FieldKind::Uuid => {
             let clear_blank = !field.required && field.default.is_none();
             let input = cx.new(TextInput::new);
-            bind_text(state, &input, field.key.clone(), false, clear_blank, cx);
+            bind_text(state, &input, binding, false, clear_blank, cx);
             FieldControl::Text {
                 input,
                 integer: false,
@@ -447,7 +647,33 @@ fn build_control(
                 integer: false,
             }
         }
-        FieldKind::Repeated { .. } => FieldControl::Repeated,
+        FieldKind::Repeated { item, .. } => {
+            let entries = values
+                .get(&field.key)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let rows = entries
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    item.iter()
+                        .map(|child| {
+                            let binding = Binding::Row {
+                                parent: field.key.clone(),
+                                index,
+                                child: child.key.clone(),
+                            };
+                            (
+                                child.key.clone(),
+                                build_control(child, state, binding, values, cx),
+                            )
+                        })
+                        .collect()
+                })
+                .collect();
+            FieldControl::Repeated { rows }
+        }
     }
 }
 
@@ -463,10 +689,45 @@ fn exact_integer(value: i64) -> bool {
     float as i64 == value
 }
 
+fn store(app: &mut AppState, binding: &Binding, value: Option<Value>) {
+    match binding {
+        Binding::Top(key) => match value {
+            Some(value) => {
+                app.values.insert(key.clone(), value);
+            }
+            None => {
+                app.values.remove(key);
+            }
+        },
+        Binding::Row {
+            parent,
+            index,
+            child,
+        } => {
+            let Some(mut entries) = app.values.get(parent).and_then(Value::as_array).cloned()
+            else {
+                return;
+            };
+            let Some(object) = entries.get_mut(*index).and_then(Value::as_object_mut) else {
+                return;
+            };
+            match value {
+                Some(value) => {
+                    object.insert(child.clone(), value);
+                }
+                None => {
+                    object.remove(child);
+                }
+            }
+            app.values.insert(parent.clone(), Value::Array(entries));
+        }
+    }
+}
+
 fn bind_select(
     state: &Entity<AppState>,
     select: &Entity<Select>,
-    key: String,
+    binding: Binding,
     blank_clears: bool,
     cx: &mut Context<SchemaForm>,
 ) {
@@ -477,17 +738,18 @@ fn bind_select(
                 let value = value.clone();
                 state.update(cx, |app, cx| {
                     let blank = value.as_str().is_some_and(str::is_empty);
+                    if let Binding::Top(key) = &binding
+                        && key == "aspect_ratio"
+                        && app.model_id == FLUX3_ID
+                        && let Some(ratio) = value.as_str()
+                        && !ratio.is_empty()
+                    {
+                        app.scene.aspect_ratio = Some(ratio.to_string());
+                    }
                     if blank_clears && blank {
-                        app.values.remove(&key);
+                        store(app, &binding, None);
                     } else {
-                        if key == "aspect_ratio"
-                            && app.model_id == FLUX3_ID
-                            && let Some(ratio) = value.as_str()
-                            && !ratio.is_empty()
-                        {
-                            app.scene.aspect_ratio = Some(ratio.to_string());
-                        }
-                        app.values.insert(key.clone(), value);
+                        store(app, &binding, Some(value));
                     }
                     cx.notify();
                 });
@@ -500,7 +762,7 @@ fn bind_select(
 fn bind_check(
     state: &Entity<AppState>,
     check: &Entity<Checkbox>,
-    key: String,
+    binding: Binding,
     cx: &mut Context<SchemaForm>,
 ) {
     let state = state.clone();
@@ -509,7 +771,7 @@ fn bind_check(
             Box::new(move |value, _window, cx| {
                 let value = value.clone();
                 state.update(cx, |app, cx| {
-                    app.values.insert(key.clone(), value);
+                    store(app, &binding, Some(value));
                     cx.notify();
                 });
             }),
@@ -521,7 +783,7 @@ fn bind_check(
 fn bind_slider(
     state: &Entity<AppState>,
     slider: &Entity<Slider>,
-    key: String,
+    binding: Binding,
     cx: &mut Context<SchemaForm>,
 ) {
     let state = state.clone();
@@ -532,7 +794,7 @@ fn bind_slider(
                     return;
                 };
                 state.update(cx, |app, cx| {
-                    app.values.insert(key.clone(), json!(number.round() as i64));
+                    store(app, &binding, Some(json!(number.round() as i64)));
                     cx.notify();
                 });
             }),
@@ -544,7 +806,7 @@ fn bind_slider(
 fn bind_number(
     state: &Entity<AppState>,
     number: &Entity<NumberInput>,
-    key: String,
+    binding: Binding,
     integer: bool,
     clear_blank: bool,
     cx: &mut Context<SchemaForm>,
@@ -555,11 +817,11 @@ fn bind_number(
             Box::new(move |value, _window, cx| {
                 state.update(cx, |app, cx| {
                     if value.is_null() && clear_blank {
-                        app.values.remove(&key);
+                        store(app, &binding, None);
                     } else if integer {
-                        app.values.insert(key.clone(), stored_integer(value));
+                        store(app, &binding, Some(stored_integer(value)));
                     } else if let Some(number) = value.as_f64() {
-                        app.values.insert(key.clone(), json!(number));
+                        store(app, &binding, Some(json!(number)));
                     }
                     cx.notify();
                 });
@@ -572,7 +834,7 @@ fn bind_number(
 fn bind_text(
     state: &Entity<AppState>,
     input: &Entity<TextInput>,
-    key: String,
+    binding: Binding,
     integer: bool,
     clear_blank: bool,
     cx: &mut Context<SchemaForm>,
@@ -585,14 +847,14 @@ fn bind_text(
                 state.update(cx, |app, cx| {
                     if integer {
                         if text.is_empty() && clear_blank {
-                            app.values.remove(&key);
+                            store(app, &binding, None);
                         } else if let Ok(number) = text.parse::<i64>() {
-                            app.values.insert(key.clone(), json!(number));
+                            store(app, &binding, Some(json!(number)));
                         }
                     } else if text.is_empty() && clear_blank {
-                        app.values.remove(&key);
+                        store(app, &binding, None);
                     } else {
-                        app.values.insert(key.clone(), Value::String(text));
+                        store(app, &binding, Some(Value::String(text)));
                     }
                     cx.notify();
                 });
@@ -600,6 +862,58 @@ fn bind_text(
             cx,
         );
     });
+}
+
+fn default_entry(item: &[FieldDef]) -> Map<String, Value> {
+    let mut object = Map::new();
+    for field in item {
+        if let Some(value) = &field.default {
+            object.insert(field.key.clone(), value.clone());
+        }
+    }
+    object
+}
+
+fn push_control(control: &FieldControl, value: &Value, cx: &mut Context<SchemaForm>) {
+    match control {
+        FieldControl::Select(input) => {
+            let desired = if value.as_str().is_some_and(|text| !text.is_empty()) {
+                value.clone()
+            } else {
+                Value::Null
+            };
+            if input.read(cx).value() != &desired {
+                input.update(cx, |select, cx| select.set_value(desired, cx));
+            }
+        }
+        FieldControl::Slider(input) => {
+            if let Some(number) = value.as_f64()
+                && input.read(cx).value().as_f64() != Some(number)
+            {
+                input.update(cx, |slider, cx| slider.set_value(&json!(number), cx));
+            }
+        }
+        FieldControl::Check(input) => {
+            if let Some(checked) = value.as_bool()
+                && input.read(cx).value().as_bool() != Some(checked)
+            {
+                input.update(cx, |check, cx| check.set_value(&json!(checked), cx));
+            }
+        }
+        FieldControl::Number { input, clear_blank } => {
+            if value.is_null() && !clear_blank {
+                return;
+            }
+            input.update(cx, |number, cx| number.set_value(value, cx));
+        }
+        FieldControl::Text { input, integer } => {
+            let desired = text_of(value, *integer);
+            if input.read(cx).text() != desired {
+                input.update(cx, |text, cx| text.set_text(&desired, cx));
+            }
+        }
+        FieldControl::Repeated { .. } => {}
+    }
 }
 
 fn stored_integer(value: &Value) -> Value {
@@ -626,6 +940,17 @@ fn text_of(value: &Value, integer: bool) -> String {
         return String::new();
     }
     value.as_str().unwrap_or("").to_string()
+}
+
+fn control_element(control: &FieldControl) -> gpui::AnyElement {
+    match control {
+        FieldControl::Select(input) => input.clone().into_any_element(),
+        FieldControl::Slider(input) => input.clone().into_any_element(),
+        FieldControl::Check(input) => input.clone().into_any_element(),
+        FieldControl::Number { input, .. } => input.clone().into_any_element(),
+        FieldControl::Text { input, .. } => input.clone().into_any_element(),
+        FieldControl::Repeated { .. } => div().into_any_element(),
+    }
 }
 
 fn context_of(app: &AppState) -> RuleContext {
@@ -666,15 +991,47 @@ impl Render for SchemaForm {
                 FieldControl::Check(input) => input.clone().into_any_element(),
                 FieldControl::Number { input, .. } => input.clone().into_any_element(),
                 FieldControl::Text { input, .. } => input.clone().into_any_element(),
-                FieldControl::Repeated => {
-                    let shown = self
-                        .app_state
-                        .read(cx)
-                        .values
-                        .get(&field.key)
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "empty".into());
-                    muted_text(shown).into_any_element()
+                FieldControl::Repeated { rows } => {
+                    let FieldKind::Repeated { item, max } = &field.kind else {
+                        continue;
+                    };
+                    let form = cx.entity();
+                    let mut list = div().flex().flex_col().gap(px(8.));
+                    for (index, row) in rows.iter().enumerate() {
+                        let mut block = div().flex().flex_col().gap(px(4.));
+                        for (child_key, child) in row {
+                            let Some(child_field) =
+                                item.iter().find(|candidate| candidate.key == *child_key)
+                            else {
+                                continue;
+                            };
+                            block = block.child(widgets::field_row(
+                                Some(child_field.label.as_str()),
+                                child_field.help.as_deref(),
+                                control_element(child),
+                            ));
+                        }
+                        let form = form.clone();
+                        let key = field.key.clone();
+                        block = block.child(
+                            Button::ghost(format!("remove-{key}-{index}"), "Remove").on_click(
+                                move |_, _, cx| {
+                                    form.update(cx, |form, cx| form.remove_row(&key, index, cx));
+                                },
+                            ),
+                        );
+                        list = list.child(block);
+                    }
+                    if rows.len() < *max {
+                        let form = form.clone();
+                        let key = field.key.clone();
+                        list = list.child(Button::ghost(format!("add-{key}"), "Add").on_click(
+                            move |_, _, cx| {
+                                form.update(cx, |form, cx| form.add_row(&key, cx));
+                            },
+                        ));
+                    }
+                    list.into_any_element()
                 }
             };
             column = column.child(widgets::field_row(

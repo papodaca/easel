@@ -631,10 +631,181 @@ fn repeated_fields_stay_plain_and_scalars_do_not(cx: &mut TestAppContext) {
             for field in &fields {
                 let repeated = matches!(field.kind, FieldKind::Repeated { .. });
                 assert_eq!(form.is_repeated(&field.key), repeated, "{}", field.key);
-                assert_eq!(form.has_control(&field.key), !repeated, "{}", field.key);
+                assert!(form.has_control(&field.key), "{}", field.key);
             }
         });
     }
+}
+
+fn replace_row_text(
+    cx: &mut VisualTestContext,
+    form: &gpui::Entity<SchemaForm>,
+    key: &str,
+    index: usize,
+    child: &str,
+    text: &str,
+) {
+    let input = form.read_with(cx, |form, _| {
+        form.row_text(key, index, child).expect(child).clone()
+    });
+    cx.update(|window, cx| input.focus_handle(cx).focus(window, cx));
+    cx.simulate_keystrokes("ctrl-a backspace");
+    if !text.is_empty() {
+        cx.simulate_input(text);
+    }
+}
+
+fn replace_row_number(
+    cx: &mut VisualTestContext,
+    form: &gpui::Entity<SchemaForm>,
+    key: &str,
+    index: usize,
+    child: &str,
+    text: &str,
+) {
+    let input = form.read_with(cx, |form, _| {
+        form.row_number(key, index, child).expect(child).clone()
+    });
+    cx.update(|window, cx| input.focus_handle(cx).focus(window, cx));
+    cx.simulate_keystrokes("ctrl-a backspace");
+    if !text.is_empty() {
+        cx.simulate_input(text);
+    }
+    cx.update(|window, cx| {
+        window.blur(cx);
+        window.draw(cx).clear(cx);
+    });
+}
+
+#[gpui::test]
+fn krea2_styles_can_be_added_edited_and_removed(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| app.set_model("krea-2-large", cx));
+    form.update(&mut cx, |form, cx| {
+        form.add_repeated("styles", cx);
+        form.add_repeated("styles", cx);
+    });
+    replace_row_text(&mut cx, &form, "styles", 0, "id", "style-a");
+    replace_row_number(&mut cx, &form, "styles", 0, "strength", "0.8");
+    replace_row_text(&mut cx, &form, "styles", 1, "id", "style-b");
+    replace_row_number(&mut cx, &form, "styles", 1, "strength", "-0.4");
+    let styles = stored(&state, &cx, "styles").unwrap();
+    let rows = styles.as_array().unwrap();
+    assert_eq!(rows[0]["id"], json!("style-a"));
+    assert_eq!(rows[1]["id"], json!("style-b"));
+    assert!((rows[0]["strength"].as_f64().unwrap() - 0.8).abs() < 1e-6);
+    assert!((rows[1]["strength"].as_f64().unwrap() - -0.4).abs() < 1e-6);
+    form.update(&mut cx, |form, cx| form.remove_repeated("styles", 0, cx));
+    let styles = stored(&state, &cx, "styles").unwrap();
+    let rows = styles.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], json!("style-b"));
+    assert!((rows[0]["strength"].as_f64().unwrap() - -0.4).abs() < 1e-6);
+}
+
+#[gpui::test]
+fn repeated_add_stops_at_the_schema_maximum(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| app.set_model("krea-2-large", cx));
+    let max = state.read_with(&cx, |app, _| {
+        app.spec()
+            .schema
+            .fields
+            .iter()
+            .find(|field| field.key == "styles")
+            .and_then(|field| match field.kind {
+                FieldKind::Repeated { max, .. } => Some(max),
+                _ => None,
+            })
+            .unwrap()
+    });
+    form.update(&mut cx, |form, cx| {
+        for _ in 0..max {
+            form.add_repeated("styles", cx);
+        }
+        form.add_repeated("styles", cx);
+    });
+    assert_eq!(
+        form.read_with(&cx, |form, _| form.repeated_len("styles")),
+        max
+    );
+    assert_eq!(
+        stored(&state, &cx, "styles")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        max
+    );
+}
+
+#[gpui::test]
+fn a_bad_moodboard_id_blocks_generate(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| {
+        app.scene.prose = "a red square".into();
+        app.set_model("krea-2-large", cx);
+    });
+    choose(&mut cx, &form, "aspect_ratio", "1:1");
+    form.update(&mut cx, |form, cx| form.add_repeated("moodboards", cx));
+    replace_row_text(&mut cx, &form, "moodboards", 0, "id", "not-a-uuid");
+    let keys: Arc<dyn crate::net::KeyResolver> =
+        Arc::new(MapKeys::default().insert(ProviderId::Krea, "krea-key"));
+    let validation = cx.new(|cx| Validation::new(state.clone(), keys, cx));
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert!(validation.read_with(&cx, |validation, cx| {
+        validation
+            .messages(cx)
+            .iter()
+            .any(|message| message.contains("UUID"))
+    }));
+    replace_row_text(
+        &mut cx,
+        &form,
+        "moodboards",
+        0,
+        "id",
+        "11111111-1111-4111-8111-111111111111",
+    );
+    assert!(validation.read_with(&cx, |validation, cx| {
+        !validation
+            .messages(cx)
+            .iter()
+            .any(|message| message.contains("UUID"))
+    }));
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn empty_style_rows_do_not_block_generate(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| {
+        app.scene.prose = "a red square".into();
+        app.set_model("krea-2-large", cx);
+    });
+    let styles = stored(&state, &cx, "styles").unwrap();
+    assert_eq!(styles.as_array().map(Vec::len), Some(0));
+    let keys: Arc<dyn crate::net::KeyResolver> =
+        Arc::new(MapKeys::default().insert(ProviderId::Krea, "krea-key"));
+    let validation = cx.new(|cx| Validation::new(state.clone(), keys, cx));
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    choose(&mut cx, &form, "aspect_ratio", "3:2");
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn source_strength_stays_visible_without_an_image(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| app.set_model("krea-2-large", cx));
+    assert!(state.read_with(&cx, |app, _| app.scene.source_image.is_none()));
+    let (shown, text) = form.read_with(&cx, |form, cx| {
+        (
+            form.has_control("strength"),
+            form.number("strength").unwrap().read(cx).text(cx),
+        )
+    });
+    assert!(shown);
+    assert_eq!(text, "0.99");
 }
 
 fn source_image() -> Arc<crate::image_load::DecodedImage> {
