@@ -27,6 +27,8 @@ pub enum FieldKind {
     Float { min: f64, max: f64, step: f64 },
     Bool,
     ReadOnly,
+    Uuid,
+    Repeated { item: Vec<FieldDef>, max: usize },
 }
 
 /// Step 1 stand-in. Later steps add scene-driven variants.
@@ -267,8 +269,78 @@ fn check_kind(key: &str, kind: &FieldKind, value: &Value) -> Option<FieldError> 
             }
         }
         FieldKind::ReadOnly => {}
+        FieldKind::Uuid => {
+            let Some(text) = value.as_str() else {
+                return Some(type_error(key, "expected a UUID"));
+            };
+            if !is_uuid(text) {
+                return Some(FieldError {
+                    key: key.to_string(),
+                    message: "must be a UUID".into(),
+                    approved_max: None,
+                });
+            }
+        }
+        FieldKind::Repeated { item, max } => {
+            let Some(entries) = value.as_array() else {
+                return Some(type_error(key, "expected a list"));
+            };
+            if entries.len() > *max {
+                return Some(FieldError {
+                    key: key.to_string(),
+                    message: format!("accepts at most {max}"),
+                    approved_max: i64::try_from(*max).ok(),
+                });
+            }
+            for entry in entries {
+                let Some(object) = entry.as_object() else {
+                    return Some(type_error(key, "expected an object"));
+                };
+                for field in item {
+                    match object.get(&field.key) {
+                        None | Some(Value::Null) if field.required => {
+                            return Some(FieldError {
+                                key: key.to_string(),
+                                message: format!("{} is required", field.label),
+                                approved_max: None,
+                            });
+                        }
+                        Some(child) => {
+                            if let Some(mut error) = check_kind(&field.key, &field.kind, child) {
+                                error.key = key.to_string();
+                                return Some(error);
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
     }
     None
+}
+
+fn is_uuid(text: &str) -> bool {
+    if text == "00000000-0000-0000-0000-000000000000"
+        || text.eq_ignore_ascii_case("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    {
+        return true;
+    }
+    let parts: Vec<&str> = text.split('-').collect();
+    if parts.len() != 5 {
+        return false;
+    }
+    let lengths = [8, 4, 4, 4, 12];
+    if parts
+        .iter()
+        .zip(lengths)
+        .any(|(part, length)| part.len() != length || !part.chars().all(|c| c.is_ascii_hexdigit()))
+    {
+        return false;
+    }
+    let version = parts[2].as_bytes()[0];
+    let variant = parts[3].as_bytes()[0];
+    (b'1'..=b'8').contains(&version) && matches!(variant, b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
 }
 
 fn type_error(key: &str, message: &str) -> FieldError {

@@ -108,6 +108,9 @@ pub enum ImageSlots {
         max: usize,
     },
     Single,
+    SingleWithStyleRefs {
+        max_style_refs: usize,
+    },
 }
 
 fn default_image_key() -> String {
@@ -120,6 +123,7 @@ impl ImageSlots {
         match self {
             Self::List { max, .. } | Self::Numbered { max } => *max,
             Self::Single => 1,
+            Self::SingleWithStyleRefs { max_style_refs } => max_style_refs.saturating_add(1),
         }
     }
 }

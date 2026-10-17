@@ -19,6 +19,7 @@ impl ModelRegistry {
                     bfl::flux3::model_spec(),
                     bfl::flux2_pro::model_spec(),
                     krea::krea3::model_spec(),
+                    krea::krea2_large::model_spec(),
                 ]
             })
             .as_slice()
@@ -151,6 +152,31 @@ pub fn map_images(
                     format!("input_image_{}", index + 1)
                 };
                 fields.insert(key, serde_json::Value::String(input.as_str().to_owned()));
+            }
+        }
+        ImageSlots::SingleWithStyleRefs { max_style_refs } => {
+            if let Some(input) = inputs.first() {
+                fields.insert(
+                    "image_url".into(),
+                    serde_json::Value::String(input.as_str().to_owned()),
+                );
+            }
+            let refs: Vec<_> = inputs
+                .iter()
+                .skip(1)
+                .take(*max_style_refs)
+                .map(|input| {
+                    serde_json::json!({
+                        "url": input.as_str(),
+                        "strength": 0.5,
+                    })
+                })
+                .collect();
+            if !refs.is_empty() {
+                fields.insert(
+                    "image_style_references".into(),
+                    serde_json::Value::Array(refs),
+                );
             }
         }
         ImageSlots::Single => {

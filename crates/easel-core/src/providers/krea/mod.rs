@@ -1,4 +1,5 @@
 mod assets;
+pub mod krea2_large;
 pub mod krea3;
 pub mod protocol;
 

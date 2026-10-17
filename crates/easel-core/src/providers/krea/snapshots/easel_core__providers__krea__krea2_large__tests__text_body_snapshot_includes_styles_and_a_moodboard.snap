@@ -1,0 +1,29 @@
+---
+source: crates/easel-core/src/providers/krea/krea2_large.rs
+expression: json
+---
+{
+  "aspect_ratio": "3:2",
+  "complexity": 0,
+  "creativity": "medium",
+  "intensity": 40,
+  "moodboards": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "strength": 0.23
+    }
+  ],
+  "movement": 0,
+  "prompt": "adobe towers",
+  "resolution": "1K",
+  "styles": [
+    {
+      "id": "style-a",
+      "strength": 0.8
+    },
+    {
+      "id": "style-b",
+      "strength": -0.4
+    }
+  ]
+}
