@@ -102,28 +102,93 @@ fn auto_with_boxes_and_no_source_disables_generate(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn aspect_locks_only_when_a_source_and_boxes_are_both_present(cx: &mut TestAppContext) {
-    let (state, mut cx) = open(cx);
-    let form = cx.new(|cx| SchemaForm::new(state.clone(), cx));
-    state.update(&mut cx, |app, cx| app.set_image(source_image(), cx));
+fn picking_an_aspect_ratio_updates_the_scene(cx: &mut TestAppContext) {
+    let window = cx.update(|cx| {
+        crate::widgets::bind_keys(cx);
+        cx.open_window(gpui::WindowOptions::default(), |_window, cx| {
+            let state = cx.new(|_| AppState::new());
+            let form = cx.new(|cx| SchemaForm::new(state.clone(), cx));
+            cx.new(|_| Shown { state, form })
+        })
+        .unwrap()
+    });
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    let shown = window.root(&mut cx).unwrap();
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    let form = shown.read_with(&cx, |shown, _| shown.form.clone());
+    let point = form.read_with(&cx, |form, cx| form.aspect_control().read(cx).click_point());
+    cx.simulate_click(point, gpui::Modifiers::default());
+    assert!(form.read_with(&cx, |form, cx| form.aspect_control().read(cx).is_open()));
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    let option = form.read_with(&cx, |form, cx| form.aspect_control().read(cx).menu_point(0));
+    cx.simulate_click(option, gpui::Modifiers::default());
+    let ratio = shown.read_with(&cx, |shown, cx| {
+        shown.state.read(cx).scene.aspect_ratio.clone()
+    });
+    assert_eq!(ratio.as_deref(), Some("21:9"));
+}
+
+struct Shown {
+    state: gpui::Entity<AppState>,
+    form: gpui::Entity<SchemaForm>,
+}
+
+impl gpui::Render for Shown {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        gpui::div().size_full().child(self.form.clone())
+    }
+}
+
+#[gpui::test]
+fn aspect_stays_editable_with_a_source_and_boxes(cx: &mut TestAppContext) {
+    let window = cx.update(|cx| {
+        crate::widgets::bind_keys(cx);
+        cx.open_window(gpui::WindowOptions::default(), |_window, cx| {
+            let state = cx.new(|cx| {
+                let mut app = AppState::new();
+                app.set_image(source_image(), cx);
+                app.scene.add_box(
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        w: 40,
+                        h: 40,
+                    },
+                    BoxKind::New,
+                );
+                app
+            });
+            let form = cx.new(|cx| SchemaForm::new(state.clone(), cx));
+            cx.new(|_| Shown { state, form })
+        })
+        .unwrap()
+    });
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    let shown = window.root(&mut cx).unwrap();
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    let form = shown.read_with(&cx, |shown, _| shown.form.clone());
     assert!(form.read_with(&cx, |form, cx| form.aspect_enabled(cx)));
-    state.update(&mut cx, |app, cx| {
-        app.scene.add_box(
-            Rect {
-                x: 0,
-                y: 0,
-                w: 40,
-                h: 40,
-            },
-            BoxKind::New,
-        );
-        cx.notify();
+    let point = form.read_with(&cx, |form, cx| form.aspect_control().read(cx).click_point());
+    cx.simulate_click(point, gpui::Modifiers::default());
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
     });
-    let (enabled, value) = form.read_with(&cx, |form, cx| {
-        (form.aspect_enabled(cx), form.value("aspect_ratio", cx))
+    let option = form.read_with(&cx, |form, cx| form.aspect_control().read(cx).menu_point(0));
+    cx.simulate_click(option, gpui::Modifiers::default());
+    let ratio = shown.read_with(&cx, |shown, cx| {
+        shown.state.read(cx).scene.aspect_ratio.clone()
     });
-    assert!(!enabled);
-    assert_eq!(value, json!("auto"));
+    assert_eq!(ratio.as_deref(), Some("21:9"));
 }
 
 #[gpui::test]

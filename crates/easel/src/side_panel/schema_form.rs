@@ -64,10 +64,14 @@ impl SchemaForm {
         locked_or_stored(app, key)
     }
 
+    #[cfg(test)]
+    pub fn aspect_control(&self) -> &Entity<Select> {
+        &self.aspect
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn aspect_enabled(&self, cx: &gpui::App) -> bool {
-        let app = self.app_state.read(cx);
-        !aspect_locked(app)
+        self.aspect.read(cx).is_enabled()
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -147,10 +151,9 @@ impl SchemaForm {
     }
 
     fn sync(&mut self, cx: &mut Context<Self>) {
-        let locked = aspect_locked(self.app_state.read(cx));
         let value = self.value("aspect_ratio", cx);
         self.aspect.update(cx, |select, cx| {
-            select.set_enabled(!locked, cx);
+            select.set_enabled(true, cx);
             select.set_value(value, cx);
         });
     }
@@ -205,19 +208,6 @@ fn context_of(app: &AppState) -> RuleContext {
         image_count: usize::from(app.scene.source_image.is_some()) + app.scene.references.len(),
         box_count: app.scene.boxes.len(),
     }
-}
-
-fn aspect_locked(app: &AppState) -> bool {
-    let spec = Flux3.spec();
-    let Some(field) = spec
-        .schema
-        .fields
-        .iter()
-        .find(|field| field.key == "aspect_ratio")
-    else {
-        return false;
-    };
-    spec.schema.locked_value(field, &context_of(app)).is_some()
 }
 
 fn locked_or_stored(app: &AppState, key: &str) -> Value {

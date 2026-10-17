@@ -53,6 +53,14 @@ impl Select {
         self.bounds.center()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn menu_point(&self, row: usize) -> gpui::Point<Pixels> {
+        gpui::point(
+            self.bounds.left() + px(16.0),
+            self.bounds.bottom() + px(16.0) + px(28.0) * row as f32,
+        )
+    }
+
     pub fn value(&self) -> &Value {
         &self.value
     }
@@ -60,6 +68,10 @@ impl Select {
     pub fn set_value(&mut self, value: Value, cx: &mut Context<Self>) {
         self.value = value;
         cx.notify();
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     pub fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -154,13 +166,15 @@ impl gpui::Render for Select {
         let menu = self.open.then(|| {
             let highlight = self.highlight;
             let options = self.options.clone();
+            let width = self.bounds.size.width.max(px(160.0));
             deferred(
                 anchored()
                     .anchor(Anchor::TopLeft)
+                    .position(gpui::point(self.bounds.left(), self.bounds.bottom()))
                     .snap_to_window_with_margin(px(8.0))
                     .child(
                         div()
-                            .w(px(220.0))
+                            .w(width)
                             .py(px(4.0))
                             .rounded_md()
                             .shadow_md()
@@ -168,7 +182,10 @@ impl gpui::Render for Select {
                             .text_color(rgb(theme::TEXT))
                             .border_1()
                             .border_color(rgb(theme::BORDER))
-                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            .on_mouse_down_out(cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                                if this.bounds.contains(&event.position) {
+                                    return;
+                                }
                                 this.open = false;
                                 cx.notify();
                             }))

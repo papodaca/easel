@@ -241,6 +241,36 @@ mod tests {
     }
 
     #[gpui::test]
+    fn select_click_again_closes_without_changing_the_value(cx: &mut TestAppContext) {
+        let seen = changes();
+        let record = Arc::clone(&seen);
+        let (window, mut cx) = open(cx, move |_, cx| {
+            let mut select = Select::new(vec!["red".into(), "green".into(), "blue".into()], cx);
+            select.set_value(json!("green"), cx);
+            let record = Arc::clone(&record);
+            select.on_change(
+                Box::new(move |value, _, _| record.lock().expect("changes").push(value.clone())),
+                cx,
+            );
+            select
+        });
+        let select = window.root(&mut cx).unwrap();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let point = select.read_with(&cx, |select, _| select.click_point());
+        cx.simulate_click(point, Modifiers::default());
+        assert!(select.read_with(&cx, |select, _| select.is_open()));
+        cx.simulate_click(point, Modifiers::default());
+        assert!(!select.read_with(&cx, |select, _| select.is_open()));
+        assert_eq!(
+            select.read_with(&cx, |select, _| select.value().clone()),
+            json!("green")
+        );
+        assert!(seen.lock().expect("changes").is_empty());
+    }
+
+    #[gpui::test]
     fn checkbox_toggles_on_click_and_space(cx: &mut TestAppContext) {
         let seen = changes();
         let record = Arc::clone(&seen);

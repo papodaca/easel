@@ -273,9 +273,7 @@ fn spec() -> crate::model_spec::ModelSpec {
                     kind: FieldKind::Select { options: aspects },
                     required: true,
                     default: Some(json!("auto")),
-                    locked_when: Some(LockRule::WhenSourceImageAndBoxes {
-                        value: json!("auto"),
-                    }),
+                    locked_when: None,
                 },
                 FieldDef {
                     key: "resolution".into(),
