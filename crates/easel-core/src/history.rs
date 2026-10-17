@@ -38,6 +38,7 @@ pub struct Entry {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedRequest {
+    pub model_id: String,
     pub compiled_prompt: String,
     pub params: serde_json::Map<String, serde_json::Value>,
     pub images: Vec<ImageSummary>,
@@ -295,6 +296,7 @@ impl HistoryStore {
             }
         };
         Ok(LoadedRequest {
+            model_id: stored.model_id,
             compiled_prompt: stored.compiled_prompt,
             params,
             images: stored.images,

@@ -5,13 +5,11 @@ use serde_json::{Map, Value};
 use crate::error::FieldError;
 use crate::http::{Body, HttpHeader, HttpRequest, Method};
 use crate::job::JobRequest;
-use crate::model_spec::{
-    AuthScheme, Capabilities, ImageSlots, ModelSpec, ProviderId, SizeControl,
-};
+use crate::model_spec::{AuthScheme, Capabilities, ImageSlots, ModelSpec, ProviderId, SizeControl};
 use crate::providers::krea::{assets, protocol};
 use crate::providers::{ImageInput, PollOutcome, Provider, ReferenceStep, Submitted};
-use crate::schema::{FieldDef, FieldKind, ParamSchema, RuleContext};
 use crate::scene::Scene;
+use crate::schema::{FieldDef, FieldKind, ParamSchema, RuleContext};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Krea2Large;
@@ -216,7 +214,10 @@ fn spec() -> ModelSpec {
                 FieldDef {
                     key: "strength".into(),
                     label: "Strength".into(),
-                    help: Some("How far an image-to-image run moves from the source. 0.99 is the default.".into()),
+                    help: Some(
+                        "How far an image-to-image run moves from the source. 0.99 is the default."
+                            .into(),
+                    ),
                     kind: FieldKind::Float {
                         min: 0.0,
                         max: 1.0,
@@ -386,18 +387,32 @@ mod tests {
         let schema = &Krea2Large.spec().schema;
         let mut values = ready();
         values.remove("aspect_ratio");
-        assert!(schema.validate(&values, &ctx()).iter().any(|error| error.key == "aspect_ratio"));
+        assert!(
+            schema
+                .validate(&values, &ctx())
+                .iter()
+                .any(|error| error.key == "aspect_ratio")
+        );
         let mut values = ready();
         values.remove("resolution");
-        assert!(schema.validate(&values, &ctx()).iter().any(|error| error.key == "resolution"));
+        assert!(
+            schema
+                .validate(&values, &ctx())
+                .iter()
+                .any(|error| error.key == "resolution")
+        );
     }
 
     #[test]
     fn references_split_into_the_source_and_style_refs() {
-        let inputs = ["https://api.krea.ai/a", "https://api.krea.ai/b", "https://api.krea.ai/c"]
-            .into_iter()
-            .map(|url| ImageInput::Url(url.into()))
-            .collect::<Vec<_>>();
+        let inputs = [
+            "https://api.krea.ai/a",
+            "https://api.krea.ai/b",
+            "https://api.krea.ai/c",
+        ]
+        .into_iter()
+        .map(|url| ImageInput::Url(url.into()))
+        .collect::<Vec<_>>();
         let body = Krea2Large.build_submit(&request("a street", ready()), &inputs);
         let Body::Json(json) = body.body else {
             panic!("json");
@@ -442,9 +457,12 @@ mod tests {
             "moodboards".into(),
             json!([{"id": "not-a-uuid", "strength": 0.23}]),
         );
-        assert!(schema.validate(&values, &ctx()).iter().any(|error| {
-            error.key == "moodboards" && error.message.contains("UUID")
-        }));
+        assert!(
+            schema
+                .validate(&values, &ctx())
+                .iter()
+                .any(|error| { error.key == "moodboards" && error.message.contains("UUID") })
+        );
         values.insert(
             "moodboards".into(),
             json!([
@@ -452,14 +470,27 @@ mod tests {
                 {"id": "22222222-2222-4222-8222-222222222222", "strength": 0.23}
             ]),
         );
-        assert!(schema.validate(&values, &ctx()).iter().any(|error| {
-            error.key == "moodboards" && error.message.contains("at most 1")
-        }));
+        assert!(
+            schema
+                .validate(&values, &ctx())
+                .iter()
+                .any(|error| { error.key == "moodboards" && error.message.contains("at most 1") })
+        );
         let mut values = ready();
         values.insert("movement".into(), json!(101));
-        assert!(schema.validate(&values, &ctx()).iter().any(|error| error.key == "movement"));
+        assert!(
+            schema
+                .validate(&values, &ctx())
+                .iter()
+                .any(|error| error.key == "movement")
+        );
         values.insert("movement".into(), json!(0));
         values.insert("strength".into(), json!(1.5));
-        assert!(schema.validate(&values, &ctx()).iter().any(|error| error.key == "strength"));
+        assert!(
+            schema
+                .validate(&values, &ctx())
+                .iter()
+                .any(|error| error.key == "strength")
+        );
     }
 }

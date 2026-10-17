@@ -1,6 +1,3 @@
-use easel_core::geometry::Size;
-use easel_core::providers::Provider;
-use easel_core::providers::bfl::flux3::Flux3;
 use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Subscription, Window, div, prelude::*, px,
 };
@@ -70,10 +67,8 @@ impl PromptEditor {
     }
 
     fn preview(&self, cx: &gpui::App) -> String {
-        let app = self.app_state.read(cx);
-        let frame = app.scene.frame().unwrap_or(Size { w: 1000, h: 1000 });
-        let compiled = Flux3.compile_prompt(&app.scene, frame);
-        if compiled.rows_json.is_empty() {
+        let compiled = self.app_state.read(cx).compiled();
+        if compiled.warnings.is_empty() {
             compiled.text
         } else {
             format!("{}\n{}", compiled.text, compiled.warnings.join("\n"))

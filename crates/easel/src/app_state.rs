@@ -42,6 +42,7 @@ pub struct AppState {
     pub source_ref: Option<easel_core::session::SourceRef>,
     retired_renders: Vec<Arc<RenderImage>>,
     krea_sunset_noted: bool,
+    pub model_id: String,
 }
 
 impl AppState {
@@ -64,7 +65,118 @@ impl AppState {
             source_ref: None,
             retired_renders: Vec::new(),
             krea_sunset_noted: false,
+            model_id: easel_core::providers::bfl::flux3::Flux3.spec().id.clone(),
         }
+    }
+
+    pub fn spec(&self) -> &'static easel_core::model_spec::ModelSpec {
+        easel_core::providers::ModelRegistry::specs()
+            .iter()
+            .copied()
+            .find(|spec| spec.id == self.model_id)
+            .unwrap_or_else(|| easel_core::providers::bfl::flux3::model_spec())
+    }
+
+    pub fn set_model(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(spec) = easel_core::providers::ModelRegistry::specs()
+            .iter()
+            .copied()
+            .find(|spec| spec.id == id)
+        else {
+            return;
+        };
+        if spec.id == self.model_id {
+            return;
+        }
+        let mut values = spec.schema.defaults();
+        for (key, value) in &self.values {
+            if spec.schema.accepts(key, value) {
+                values.insert(key.clone(), value.clone());
+            }
+        }
+        self.model_id = spec.id.clone();
+        self.values = values;
+        if !spec.capabilities.supports_boxes && self.tool == Tool::Box {
+            self.tool = Tool::Select;
+        }
+        cx.notify();
+    }
+
+    pub fn field_errors(&self, sent_images: usize) -> Vec<easel_core::error::FieldError> {
+        use easel_core::providers::Provider;
+        use easel_core::providers::bfl::flux2_pro::Flux2Pro;
+        use easel_core::providers::bfl::flux3::Flux3;
+        use easel_core::providers::krea::krea2_large::Krea2Large;
+        use easel_core::providers::krea::krea3::Krea3;
+
+        match self.model_id.as_str() {
+            "flux-2-pro" => Flux2Pro.validate_for_submit(&self.scene, &self.values, sent_images),
+            "krea-3" => Krea3.validate_for_submit(&self.scene, &self.values, sent_images),
+            "krea-2-large" => {
+                Krea2Large.validate_for_submit(&self.scene, &self.values, sent_images)
+            }
+            _ => Flux3.validate_for_submit(&self.scene, &self.values, sent_images),
+        }
+    }
+
+    pub fn compiled(&self) -> easel_core::providers::bfl::flux3::CompiledPrompt {
+        use easel_core::providers::Provider;
+        use easel_core::providers::bfl::flux2_pro::Flux2Pro;
+        use easel_core::providers::bfl::flux3::Flux3;
+        use easel_core::providers::krea::krea2_large::Krea2Large;
+        use easel_core::providers::krea::krea3::Krea3;
+
+        let frame = self
+            .scene
+            .frame()
+            .unwrap_or(easel_core::geometry::Size { w: 1000, h: 1000 });
+        match self.model_id.as_str() {
+            "flux-2-pro" => Flux2Pro.compile_prompt(&self.scene, frame),
+            "krea-3" => Krea3.compile_prompt(&self.scene, frame),
+            "krea-2-large" => Krea2Large.compile_prompt(&self.scene, frame),
+            _ => Flux3.compile_prompt(&self.scene, frame),
+        }
+    }
+
+    pub fn reference_marks(&self) -> Vec<(String, bool)> {
+        use easel_core::model_spec::ImageSlots;
+
+        let count = usize::from(self.scene.source_image.is_some()) + self.scene.references.len();
+        let slots = &self.spec().capabilities.image_slots;
+        let max = slots.max();
+        (0..count)
+            .map(|index| {
+                let label = match slots {
+                    ImageSlots::Numbered { .. } => {
+                        if index == 0 {
+                            "input_image".to_owned()
+                        } else {
+                            format!("input_image_{}", index + 1)
+                        }
+                    }
+                    ImageSlots::SingleWithStyleRefs { .. } => {
+                        if index == 0 {
+                            "image_url".to_owned()
+                        } else {
+                            format!("style {index}")
+                        }
+                    }
+                    ImageSlots::List { key, .. } if key == "image_urls" => {
+                        format!("image_urls[{index}]")
+                    }
+                    ImageSlots::List { .. } | ImageSlots::Single => {
+                        format!("ref_image_{index}")
+                    }
+                };
+                let sent = index < max;
+                let label = if sent {
+                    label
+                } else {
+                    format!("{label} not sent")
+                };
+                (label, sent)
+            })
+            .collect()
     }
 
     pub fn note_krea_sunset(
@@ -92,7 +204,7 @@ impl AppState {
     }
 
     pub fn box_tool_enabled(&self) -> bool {
-        self.scene.frame().is_some()
+        self.scene.frame().is_some() && self.spec().capabilities.supports_boxes
     }
 
     pub fn set_image(&mut self, image: Arc<DecodedImage>, cx: &mut Context<Self>) {
@@ -110,10 +222,11 @@ impl AppState {
         &mut self,
         image: Arc<DecodedImage>,
         cx: &mut Context<Self>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), String> {
         let count = usize::from(self.scene.source_image.is_some()) + self.scene.references.len();
-        if count >= 10 {
-            return Err("FLUX 3 accepts at most 10 images");
+        let max = self.spec().capabilities.image_slots.max();
+        if count >= max {
+            return Err(format!("accepts at most {max} images"));
         }
         self.scene
             .add_reference(ImageRef::new("reference", image.size.w, image.size.h));

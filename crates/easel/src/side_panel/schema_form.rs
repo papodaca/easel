@@ -151,10 +151,19 @@ impl SchemaForm {
     }
 
     fn sync(&mut self, cx: &mut Context<Self>) {
+        let schema = self.app_state.read(cx).spec().schema.clone();
+        let aspect_options = select_options(&schema, "aspect_ratio");
+        let resolution_options = select_options(&schema, "resolution");
         let value = self.value("aspect_ratio", cx);
         self.aspect.update(cx, |select, cx| {
+            select.set_options(aspect_options, cx);
             select.set_enabled(true, cx);
             select.set_value(value, cx);
+        });
+        let resolution = self.value("resolution", cx);
+        self.resolution.update(cx, |select, cx| {
+            select.set_options(resolution_options, cx);
+            select.set_value(resolution, cx);
         });
     }
 }
@@ -223,19 +232,37 @@ fn locked_or_stored(app: &AppState, key: &str) -> Value {
 impl Render for SchemaForm {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync(cx);
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(section_label("Aspect ratio"))
-            .child(self.aspect.clone())
-            .child(section_label("Resolution"))
-            .child(self.resolution.clone())
-            .child(section_label("Safety tolerance"))
-            .child(self.safety.clone())
-            .child(section_label("Grounding"))
-            .child(self.grounding.clone())
-            .child(section_label("Version"))
-            .child(self.version.clone())
+        let spec = self.app_state.read(cx).spec().clone();
+        let values = self.app_state.read(cx).values.clone();
+        let mut column = div().flex().flex_col().gap(px(8.));
+        for field in &spec.schema.fields {
+            column = match field.key.as_str() {
+                "aspect_ratio" => column
+                    .child(section_label(field.label.clone()))
+                    .child(self.aspect.clone()),
+                "resolution" => column
+                    .child(section_label(field.label.clone()))
+                    .child(self.resolution.clone()),
+                "safety_tolerance" => column
+                    .child(section_label(field.label.clone()))
+                    .child(self.safety.clone()),
+                "grounding" => column
+                    .child(section_label(field.label.clone()))
+                    .child(self.grounding.clone()),
+                "version" => column
+                    .child(section_label(field.label.clone()))
+                    .child(self.version.clone()),
+                _ => {
+                    let shown = values
+                        .get(&field.key)
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "empty".into());
+                    column
+                        .child(section_label(field.label.clone()))
+                        .child(crate::ui::muted_text(shown))
+                }
+            };
+        }
+        column
     }
 }

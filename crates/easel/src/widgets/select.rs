@@ -38,6 +38,11 @@ impl Select {
         }
     }
 
+    pub fn set_options(&mut self, options: Vec<SharedString>, cx: &mut Context<Self>) {
+        self.options = options;
+        cx.notify();
+    }
+
     pub fn set_label(&mut self, label: impl Into<String>, cx: &mut Context<Self>) {
         self.label = Some(label.into());
         cx.notify();

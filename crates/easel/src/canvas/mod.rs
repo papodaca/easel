@@ -500,12 +500,13 @@ fn paint_marks(
     origin: gpui::Point<Pixels>,
     viewport: &Viewport,
     boxes: &[easel_core::scene::BoxElement],
+    opacity: f32,
     window: &mut Window,
 ) {
     for element in boxes {
         let packed = kind_color(element.kind);
-        let fill = theme::color(packed, theme::BOX_FILL_ALPHA);
-        let outline = theme::color(packed, 1.0);
+        let fill = theme::color(packed, theme::BOX_FILL_ALPHA * opacity);
+        let outline = theme::color(packed, opacity);
         if element.kind == BoxKind::Move {
             if let Some(rect) = element.src {
                 paint_mark(
@@ -801,6 +802,7 @@ impl Render for Canvas {
                 .into_any_element(),
         };
         let painted = boxes.clone();
+        let boxes_live = self.app_state.read(cx).spec().capabilities.supports_boxes;
         let draft = self.draft_rect().map(|rect| {
             let frame = self.app_state.read(cx).scene.frame();
             frame.map(|frame| rect.clamp_to(frame)).unwrap_or(rect)
@@ -871,9 +873,19 @@ impl Render for Canvas {
                                 again.update(cx, |_, cx| cx.notify());
                             });
                         }
-                        (viewport, painted, draft, selected_mark, render_image)
+                        (
+                            viewport,
+                            painted,
+                            draft,
+                            selected_mark,
+                            render_image,
+                            boxes_live,
+                        )
                     },
-                    |bounds, (viewport, painted, draft, selected, render_image), window, cx| {
+                    |bounds,
+                     (viewport, painted, draft, selected, render_image, boxes_live),
+                     window,
+                     cx| {
                         if let Some(render_image) = render_image {
                             let rect = viewport.image_rect_in_view();
                             let image_bounds = Bounds {
@@ -894,7 +906,13 @@ impl Render for Canvas {
                                 )
                                 .ok();
                         }
-                        paint_marks(bounds.origin, &viewport, &painted, window);
+                        paint_marks(
+                            bounds.origin,
+                            &viewport,
+                            &painted,
+                            if boxes_live { 1.0 } else { 0.4 },
+                            window,
+                        );
                         paint_labels(bounds.origin, &viewport, &painted, window, cx);
                         if let Some(rect) = draft {
                             paint_mark(
@@ -907,7 +925,7 @@ impl Render for Canvas {
                                 window,
                             );
                         }
-                        if let Some(rect) = selected {
+                        if boxes_live && let Some(rect) = selected {
                             paint_handles(bounds.origin, &viewport, rect, window);
                         }
                     },

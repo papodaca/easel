@@ -1,16 +1,12 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use easel_core::geometry::Size;
 use easel_core::image_prep::{PrepOptions, prepare_for_upload};
 use easel_core::job::JobRequest;
-use easel_core::providers::Provider;
-use easel_core::providers::bfl::flux3::Flux3;
 
 use crate::app_state::AppState;
 
 pub fn build_request(app: &AppState) -> Result<JobRequest, String> {
-    let frame = app.scene.frame().unwrap_or(Size { w: 1000, h: 1000 });
-    let compiled = Flux3.compile_prompt(&app.scene, frame);
+    let compiled = app.compiled();
     let tier = app
         .values
         .get("resolution")
@@ -29,7 +25,7 @@ pub fn build_request(app: &AppState) -> Result<JobRequest, String> {
         );
     }
     Ok(JobRequest {
-        model_id: Flux3.spec().id.clone(),
+        model_id: app.model_id.clone(),
         compiled_prompt: compiled.text,
         params: app.values.clone(),
         images,

@@ -85,6 +85,14 @@ pub struct RuleContext {
 
 impl ParamSchema {
     #[must_use]
+    pub fn accepts(&self, key: &str, value: &Value) -> bool {
+        let Some(field) = self.fields.iter().find(|field| field.key == key) else {
+            return false;
+        };
+        check_kind(key, &field.kind, value).is_none()
+    }
+
+    #[must_use]
     pub fn defaults(&self) -> BTreeMap<String, Value> {
         self.fields
             .iter()

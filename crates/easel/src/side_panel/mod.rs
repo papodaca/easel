@@ -13,6 +13,8 @@ pub use validation::Validation;
 mod form_tests;
 #[cfg(test)]
 mod generate_tests;
+#[cfg(test)]
+mod switch_tests;
 
 use gpui::{
     Bounds, Context, IntoElement, MouseButton, ParentElement, Pixels, Render, ScrollHandle, Styled,
@@ -26,6 +28,7 @@ use crate::app_state::{AppState, SideMode};
 use crate::settings::{SettingsPanel, SharedKeys};
 use crate::theme;
 use crate::ui::{Button, pane_header};
+use crate::widgets::Select;
 
 pub struct SidePanel {
     app_state: gpui::Entity<AppState>,
@@ -35,6 +38,7 @@ pub struct SidePanel {
     references: gpui::Entity<References>,
     form: gpui::Entity<SchemaForm>,
     validation: gpui::Entity<Validation>,
+    model: gpui::Entity<Select>,
     runner: Option<gpui::Entity<crate::jobs::JobRunner<easel_core::providers::bfl::flux3::Flux3>>>,
     scroll: ScrollHandle,
     thumb: Bounds<Pixels>,
@@ -57,6 +61,44 @@ impl SidePanel {
         let form = cx.new(|cx| SchemaForm::new(app_state.clone(), cx));
         let resolver = std::sync::Arc::new(crate::settings::Resolver(keys));
         let validation = cx.new(|cx| Validation::new(app_state.clone(), resolver, cx));
+        let names = easel_core::providers::ModelRegistry::specs()
+            .iter()
+            .map(|spec| gpui::SharedString::from(spec.display_name.clone()))
+            .collect();
+        let model = cx.new(|cx| {
+            let mut select = Select::new(names, cx);
+            select.set_value(
+                serde_json::Value::String(app_state.read(cx).spec().display_name.clone()),
+                cx,
+            );
+            let state = app_state.clone();
+            select.on_change(
+                Box::new(move |value, _window, cx| {
+                    let Some(name) = value.as_str() else {
+                        return;
+                    };
+                    let Some(spec) = easel_core::providers::ModelRegistry::specs()
+                        .iter()
+                        .find(|spec| spec.display_name == name)
+                    else {
+                        return;
+                    };
+                    let id = spec.id.clone();
+                    state.update(cx, |app, cx| app.set_model(&id, cx));
+                }),
+                cx,
+            );
+            select
+        });
+        let watched = app_state.clone();
+        let model_watch = model.clone();
+        cx.observe(&watched, move |_, app, cx| {
+            let name = app.read(cx).spec().display_name.clone();
+            model_watch.update(cx, |select, cx| {
+                select.set_value(serde_json::Value::String(name), cx);
+            });
+        })
+        .detach();
         Self {
             app_state,
             settings,
@@ -65,6 +107,7 @@ impl SidePanel {
             references,
             form,
             validation,
+            model,
             runner,
             scroll: ScrollHandle::new(),
             thumb: Bounds::default(),
@@ -149,7 +192,7 @@ impl Render for SidePanel {
                 )
             }
             SideMode::Editor => (
-                pane_header("Editor"),
+                pane_header("Editor").child(self.model.clone()),
                 div()
                     .flex()
                     .flex_col()

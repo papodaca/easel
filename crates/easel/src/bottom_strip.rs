@@ -250,7 +250,11 @@ impl BottomStrip {
             return;
         };
         let inspection = inspection_from(&loaded);
-        self.app_state.update(cx, |app, cx| {
+        let model_id = loaded.model_id.clone();
+        let params = loaded.params.into_iter().collect();
+        self.app_state.update(cx, move |app, cx| {
+            app.set_model(&model_id, cx);
+            app.values = params;
             app.inspection = Some(inspection);
             cx.notify();
         });
