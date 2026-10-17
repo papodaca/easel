@@ -66,6 +66,18 @@ impl Select {
         )
     }
 
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    pub fn help(&self) -> Option<&str> {
+        self.help.as_deref()
+    }
+
+    pub fn options(&self) -> &[SharedString] {
+        &self.options
+    }
+
     pub fn value(&self) -> &Value {
         &self.value
     }

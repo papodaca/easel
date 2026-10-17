@@ -326,6 +326,32 @@ mod tests {
     }
 
     #[gpui::test]
+    fn number_input_blank_commit_clears_an_optional_value(cx: &mut TestAppContext) {
+        let seen = changes();
+        let record = Arc::clone(&seen);
+        let (window, mut cx) = open(cx, move |_, cx| {
+            let mut input = NumberInput::new(0.0, 10.0, 1.0, cx);
+            input.set_blank_allowed(true, cx);
+            input.set_value(&json!(4.0), cx);
+            let record = Arc::clone(&record);
+            input.on_change(
+                Box::new(move |value, _, _| record.lock().expect("changes").push(value.clone())),
+                cx,
+            );
+            input
+        });
+        let input = window.root(&mut cx).unwrap();
+        cx.update(|window, cx| input.focus_handle(cx).focus(window, cx));
+        cx.simulate_keystrokes("ctrl-a backspace");
+        cx.update(|window, cx| {
+            window.blur(cx);
+            window.draw(cx).clear(cx);
+        });
+        assert!(input.read_with(&cx, |input, _| input.value().is_null()));
+        assert_eq!(seen.lock().expect("changes").as_slice(), &[Value::Null]);
+    }
+
+    #[gpui::test]
     fn slider_maps_track_position_and_drag(cx: &mut TestAppContext) {
         let seen = changes();
         let record = Arc::clone(&seen);

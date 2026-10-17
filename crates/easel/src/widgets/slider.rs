@@ -14,6 +14,7 @@ pub struct Slider {
     min: f64,
     max: f64,
     value: f64,
+    step: f64,
     label: Option<String>,
     help: Option<String>,
     enabled: bool,
@@ -29,6 +30,7 @@ impl Slider {
             min,
             max,
             value: min,
+            step: 0.0,
             label: None,
             help: None,
             enabled: true,
@@ -40,6 +42,20 @@ impl Slider {
 
     pub fn value(&self) -> Value {
         json!(self.value)
+    }
+
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    pub fn help(&self) -> Option<&str> {
+        self.help.as_deref()
+    }
+
+    pub fn set_step(&mut self, step: f64, cx: &mut Context<Self>) {
+        self.step = step;
+        self.value = self.snap(self.value);
+        cx.notify();
     }
 
     pub fn set_range(&mut self, min: f64, max: f64, cx: &mut Context<Self>) {
@@ -91,7 +107,7 @@ impl Slider {
         } else {
             ((x - left) / width).clamp(0.0, 1.0)
         } as f64;
-        self.value = self.min + (self.max - self.min) * t;
+        self.value = self.snap(self.min + (self.max - self.min) * t);
         let value = json!(self.value);
         if let Some(callback) = self.on_change.as_ref() {
             callback(&value, window, cx);
@@ -122,6 +138,14 @@ impl Slider {
 
     fn on_mouse_up(&mut self, _: &gpui::MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.dragging = false;
+    }
+
+    fn snap(&self, value: f64) -> f64 {
+        if self.step <= 0.0 {
+            return value;
+        }
+        let steps = ((value - self.min) / self.step).round();
+        (self.min + steps * self.step).clamp(self.min, self.max)
     }
 
     fn readout(&self) -> String {
@@ -159,7 +183,7 @@ impl gpui::Render for Slider {
                 .w_full()
                 .child(
                     div()
-                        .id("slider")
+                        .id(("slider", cx.entity_id()))
                         .track_focus(&self.focus_handle)
                         .relative()
                         .flex_1()

@@ -16,6 +16,8 @@ pub struct NumberInput {
     max: f64,
     step: f64,
     value: f64,
+    blank: bool,
+    blank_allowed: bool,
     label: Option<String>,
     help: Option<String>,
     enabled: bool,
@@ -43,6 +45,8 @@ impl NumberInput {
             max,
             step,
             value: min,
+            blank: false,
+            blank_allowed: false,
             label: None,
             help: None,
             enabled: true,
@@ -51,15 +55,48 @@ impl NumberInput {
         }
     }
 
+    pub fn text(&self, cx: &App) -> String {
+        self.input.read(cx).text().to_string()
+    }
+
     pub fn value(&self) -> Value {
-        json!(self.value)
+        if self.blank {
+            Value::Null
+        } else {
+            json!(self.value)
+        }
+    }
+
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    pub fn help(&self) -> Option<&str> {
+        self.help.as_deref()
+    }
+
+    pub fn set_blank_allowed(&mut self, allowed: bool, cx: &mut Context<Self>) {
+        self.blank_allowed = allowed;
+        cx.notify();
     }
 
     pub fn set_value(&mut self, value: &Value, cx: &mut Context<Self>) {
+        if value.is_null() {
+            if self.blank_allowed {
+                self.blank = true;
+                self.input.update(cx, |input, cx| input.set_text("", cx));
+                cx.notify();
+            }
+            return;
+        }
         if let Some(number) = value.as_f64() {
+            self.blank = false;
             self.value = number.clamp(self.min, self.max);
             let text = format_number(self.value);
-            self.input.update(cx, |input, cx| input.set_text(&text, cx));
+            if self.input.read(cx).text() != text {
+                self.input.update(cx, |input, cx| input.set_text(&text, cx));
+            }
+            cx.notify();
         }
     }
 
@@ -88,12 +125,18 @@ impl NumberInput {
     fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).text().trim().to_owned();
         if text.is_empty() {
+            if self.blank_allowed && !self.blank {
+                self.blank = true;
+                self.fire(window, cx);
+            }
             return;
         }
+        let was_blank = self.blank;
+        self.blank = false;
         match text.parse::<f64>() {
             Ok(parsed) => {
                 let clamped = parsed.clamp(self.min, self.max);
-                let changed = (clamped - self.value).abs() > f64::EPSILON;
+                let changed = was_blank || (clamped - self.value).abs() > f64::EPSILON;
                 self.value = clamped;
                 let rendered = format_number(clamped);
                 if self.input.read(cx).text() != rendered {
@@ -118,6 +161,7 @@ impl NumberInput {
         if !self.enabled {
             return;
         }
+        self.blank = false;
         let next = (self.value + direction * self.step).clamp(self.min, self.max);
         if (next - self.value).abs() <= f64::EPSILON {
             return;
@@ -130,7 +174,7 @@ impl NumberInput {
     }
 
     fn fire(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let value = json!(self.value);
+        let value = self.value();
         if let Some(callback) = self.on_change.as_ref() {
             callback(&value, window, cx);
         }
@@ -162,7 +206,7 @@ impl gpui::Render for NumberInput {
                 .child(div().flex_1().min_w(px(0.0)).child(self.input.clone()))
                 .child(
                     div()
-                        .id("number-step-up")
+                        .id(("number-step-up", cx.entity_id()))
                         .relative()
                         .w(px(28.0))
                         .h(px(28.0))

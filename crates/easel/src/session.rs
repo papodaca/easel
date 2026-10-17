@@ -278,14 +278,10 @@ mod tests {
             editor.read_with(cx, |editor, cx| editor.prose(cx)),
             "a harbor at dusk"
         );
-        let keys: std::sync::Arc<dyn crate::net::KeyResolver> =
-            std::sync::Arc::new(crate::net::MapKeys::default().insert(
-                easel_core::model_spec::ProviderId::Bfl,
-                "key",
-            ));
-        let validation = cx.new(|cx| {
-            crate::side_panel::Validation::new(state.clone(), keys, cx)
-        });
+        let keys: std::sync::Arc<dyn crate::net::KeyResolver> = std::sync::Arc::new(
+            crate::net::MapKeys::default().insert(easel_core::model_spec::ProviderId::Bfl, "key"),
+        );
+        let validation = cx.new(|cx| crate::side_panel::Validation::new(state.clone(), keys, cx));
         let messages = validation.read_with(cx, |validation, cx| validation.messages(cx));
         assert!(
             messages.iter().all(|message| {

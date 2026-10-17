@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use easel_core::geometry::Rect;
+use easel_core::geometry::{Rect, Size};
 use easel_core::model_spec::ProviderId;
 use easel_core::scene::BoxKind;
+use easel_core::schema::FieldKind;
 use gpui::{
     ClipboardItem, Focusable as _, Image, ImageFormat, TestAppContext, VisualTestContext,
     prelude::*,
@@ -283,6 +284,357 @@ fn a_safety_cap_shrinks_the_slider(cx: &mut TestAppContext) {
     let (max, value) = form.read_with(&cx, |form, cx| (form.safety_max(cx), form.safety_value(cx)));
     assert_eq!(max, 4.0);
     assert!(value <= 4.0);
+}
+
+fn mount(
+    cx: &mut TestAppContext,
+) -> (
+    gpui::Entity<AppState>,
+    gpui::Entity<SchemaForm>,
+    VisualTestContext,
+) {
+    let window = cx.update(|cx| {
+        crate::widgets::bind_keys(cx);
+        cx.open_window(gpui::WindowOptions::default(), |_window, cx| {
+            let state = cx.new(|_| AppState::new());
+            let form = cx.new(|cx| SchemaForm::new(state.clone(), cx));
+            cx.new(|_| Shown { state, form })
+        })
+        .unwrap()
+    });
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let shown = window.root(&mut visual).unwrap();
+    visual.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    let (state, form) = shown.read_with(&visual, |shown, _| {
+        (shown.state.clone(), shown.form.clone())
+    });
+    (state, form, visual)
+}
+
+fn choose(cx: &mut VisualTestContext, form: &gpui::Entity<SchemaForm>, key: &str, label: &str) {
+    let select = form.read_with(cx, |form, _| form.select(key).expect(key).clone());
+    let (start, target) = select.read_with(cx, |select, _| {
+        let options = select.options();
+        let start = options
+            .iter()
+            .position(|option| select.value().as_str() == Some(option.as_ref()))
+            .unwrap_or(0);
+        let target = options
+            .iter()
+            .position(|option| option.as_ref() == label)
+            .unwrap_or_else(|| panic!("missing option {label}"));
+        (start, target)
+    });
+    cx.update(|window, cx| select.focus_handle(cx).focus(window, cx));
+    let mut keys = String::from("enter ");
+    let motion = if target >= start { "down " } else { "up " };
+    for _ in 0..start.abs_diff(target) {
+        keys.push_str(motion);
+    }
+    keys.push_str("enter");
+    cx.simulate_keystrokes(keys.trim());
+}
+
+fn replace_text(
+    cx: &mut VisualTestContext,
+    form: &gpui::Entity<SchemaForm>,
+    key: &str,
+    text: &str,
+) {
+    let input = form.read_with(cx, |form, _| form.text(key).expect(key).clone());
+    cx.update(|window, cx| input.focus_handle(cx).focus(window, cx));
+    cx.simulate_keystrokes("ctrl-a backspace");
+    if !text.is_empty() {
+        cx.simulate_input(text);
+    }
+}
+
+fn replace_number(
+    cx: &mut VisualTestContext,
+    form: &gpui::Entity<SchemaForm>,
+    key: &str,
+    text: &str,
+) {
+    let input = form.read_with(cx, |form, _| form.number(key).expect(key).clone());
+    cx.update(|window, cx| input.focus_handle(cx).focus(window, cx));
+    cx.simulate_keystrokes("ctrl-a backspace");
+    if !text.is_empty() {
+        cx.simulate_input(text);
+    }
+    cx.update(|window, cx| {
+        window.blur(cx);
+        window.draw(cx).clear(cx);
+    });
+}
+
+fn click_check(cx: &mut VisualTestContext, form: &gpui::Entity<SchemaForm>, key: &str) {
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    let point = form.read_with(cx, |form, cx| {
+        form.check(key).expect(key).read(cx).click_point()
+    });
+    cx.simulate_click(point, gpui::Modifiers::default());
+}
+
+fn drag_slider(cx: &mut VisualTestContext, form: &gpui::Entity<SchemaForm>, key: &str, at: f32) {
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    let bounds = form.read_with(cx, |form, cx| {
+        form.slider(key).expect(key).read(cx).track_bounds()
+    });
+    let y = bounds.origin.y + bounds.size.height / 2.0;
+    let x = if at >= 1.0 {
+        bounds.origin.x + bounds.size.width - gpui::px(1.0)
+    } else {
+        bounds.origin.x + bounds.size.width * at
+    };
+    let point = gpui::point(x, y);
+    cx.simulate_mouse_down(point, gpui::MouseButton::Left, gpui::Modifiers::default());
+    cx.simulate_mouse_up(point, gpui::MouseButton::Left, gpui::Modifiers::default());
+}
+
+fn stored(
+    state: &gpui::Entity<AppState>,
+    cx: &VisualTestContext,
+    key: &str,
+) -> Option<serde_json::Value> {
+    state.read_with(cx, |app, _| app.values.get(key).cloned())
+}
+
+#[gpui::test]
+fn krea3_edits_thinking_seed_and_regional_edit(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| {
+        app.scene.prose = "a red square".into();
+        app.set_model("krea-3", cx);
+    });
+    choose(&mut cx, &form, "thinking_mode", "high");
+    replace_text(&mut cx, &form, "seed", "7");
+    click_check(&mut cx, &form, "regional_edit");
+    assert_eq!(stored(&state, &cx, "thinking_mode"), Some(json!("high")));
+    assert_eq!(stored(&state, &cx, "seed"), Some(json!(7)));
+    assert!(stored(&state, &cx, "seed").unwrap().is_i64());
+    assert_eq!(stored(&state, &cx, "regional_edit"), Some(json!(true)));
+    let keys: Arc<dyn crate::net::KeyResolver> =
+        Arc::new(MapKeys::default().insert(ProviderId::Krea, "krea-key"));
+    let validation = cx.new(|cx| Validation::new(state.clone(), keys, cx));
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert!(validation.read_with(&cx, |validation, cx| {
+        validation
+            .messages(cx)
+            .iter()
+            .any(|message| message.contains("reference image"))
+    }));
+    state.update(&mut cx, |app, cx| app.set_image(source_image(), cx));
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+
+    replace_text(&mut cx, &form, "seed", "");
+    assert_eq!(stored(&state, &cx, "seed"), None);
+    replace_text(&mut cx, &form, "seed", "9007199254740993");
+    let seed = stored(&state, &cx, "seed").unwrap();
+    assert_eq!(seed.as_i64(), Some(9007199254740993));
+    assert!(seed.is_i64());
+}
+
+#[gpui::test]
+fn krea3_blank_aspect_removes_the_key(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| app.set_model("krea-3", cx));
+    choose(&mut cx, &form, "aspect_ratio", "4:3");
+    assert_eq!(stored(&state, &cx, "aspect_ratio"), Some(json!("4:3")));
+    choose(&mut cx, &form, "aspect_ratio", "");
+    assert_eq!(stored(&state, &cx, "aspect_ratio"), None);
+    let options = form.read_with(&cx, |form, cx| {
+        form.select("resolution")
+            .unwrap()
+            .read(cx)
+            .options()
+            .iter()
+            .map(|option| option.to_string())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(options, ["1K", "2K"]);
+}
+
+#[gpui::test]
+fn flux2_width_seed_and_safety_follow_the_schema(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| {
+        app.scene.prose = "a red square".into();
+        app.set_model("flux-2-pro", cx);
+    });
+    assert_eq!(form.read_with(&cx, |form, cx| form.safety_max(cx)), 5.0);
+    let width = stored(&state, &cx, "width").unwrap();
+    assert_eq!(width.as_i64(), Some(0));
+    assert!(width.is_i64());
+    assert_eq!(
+        form.read_with(&cx, |form, cx| form
+            .number("width")
+            .unwrap()
+            .read(cx)
+            .text(cx)),
+        "0"
+    );
+    replace_text(&mut cx, &form, "seed", "7");
+    replace_text(&mut cx, &form, "seed", "");
+    assert_eq!(stored(&state, &cx, "seed"), None);
+    assert_eq!(stored(&state, &cx, "width").unwrap().as_i64(), Some(0));
+
+    replace_number(&mut cx, &form, "width", "100");
+    let width = stored(&state, &cx, "width").unwrap();
+    assert_eq!(width.as_i64(), Some(100));
+    assert!(width.is_i64());
+    let keys: Arc<dyn crate::net::KeyResolver> =
+        Arc::new(MapKeys::default().insert(ProviderId::Bfl, "bfl-key"));
+    let validation = cx.new(|cx| Validation::new(state, keys, cx));
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert!(validation.read_with(&cx, |validation, cx| {
+        validation
+            .messages(cx)
+            .iter()
+            .any(|message| message.contains("multiple of 16"))
+    }));
+}
+
+#[gpui::test]
+fn flux2_user_clears_and_stores_text(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| app.set_model("flux-2-pro", cx));
+    assert_eq!(stored(&state, &cx, "user"), None);
+    replace_text(&mut cx, &form, "user", "ada");
+    assert_eq!(stored(&state, &cx, "user"), Some(json!("ada")));
+    replace_text(&mut cx, &form, "user", "");
+    assert_eq!(stored(&state, &cx, "user"), None);
+}
+
+#[gpui::test]
+fn switching_models_keeps_seed_and_restores_flux3(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| app.set_model("krea-3", cx));
+    replace_text(&mut cx, &form, "seed", "7");
+    state.update(&mut cx, |app, cx| app.set_model("flux-2-pro", cx));
+    assert_eq!(stored(&state, &cx, "seed"), Some(json!(7)));
+    assert_eq!(stored(&state, &cx, "width").unwrap().as_i64(), Some(0));
+    assert!(form.read_with(&cx, |form, _| !form.has_control("thinking_mode")));
+    state.update(&mut cx, |app, cx| app.set_model("flux-3-image", cx));
+    let (read_only, version, aspect_enabled) = form.read_with(&cx, |form, cx| {
+        (
+            form.version_is_read_only(cx),
+            form.value("version", cx),
+            form.aspect_enabled(cx),
+        )
+    });
+    assert!(read_only);
+    assert_eq!(version, json!("latest"));
+    assert!(aspect_enabled);
+}
+
+#[gpui::test]
+fn krea2_aspect_does_not_move_the_scene_until_flux3(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("krea-2-large", cx);
+        app.scene.aspect_ratio = Some("1:1".into());
+    });
+    choose(&mut cx, &form, "aspect_ratio", "4:3");
+    assert_eq!(stored(&state, &cx, "aspect_ratio"), Some(json!("4:3")));
+    assert_eq!(
+        state.read_with(&cx, |app, _| app.scene.aspect_ratio.clone()),
+        Some("1:1".into())
+    );
+    state.update(&mut cx, |app, cx| app.set_model("flux-3-image", cx));
+    assert_eq!(
+        state.read_with(&cx, |app, _| app.scene.aspect_ratio.clone()),
+        Some("4:3".into())
+    );
+}
+
+#[gpui::test]
+fn krea2_wide_aspect_stays_off_the_scene_and_sliders_both_move(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("krea-2-large", cx);
+        app.scene.aspect_ratio = Some("1:1".into());
+    });
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    choose(&mut cx, &form, "aspect_ratio", "2.35:1");
+    assert_eq!(stored(&state, &cx, "aspect_ratio"), Some(json!("2.35:1")));
+    assert_eq!(
+        state.read_with(&cx, |app, _| app.scene.aspect_ratio.clone()),
+        Some("1:1".into())
+    );
+    drag_slider(&mut cx, &form, "intensity", 1.0);
+    drag_slider(&mut cx, &form, "complexity", 0.0);
+    let intensity = stored(&state, &cx, "intensity").unwrap();
+    let complexity = stored(&state, &cx, "complexity").unwrap();
+    assert!(intensity.is_i64());
+    assert!(complexity.is_i64());
+    assert_ne!(intensity, complexity);
+}
+
+#[gpui::test]
+fn flux3_aspect_writes_the_scene_frame(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    choose(&mut cx, &form, "aspect_ratio", "16:9");
+    assert_eq!(
+        state.read_with(&cx, |app, _| app.scene.aspect_ratio.clone()),
+        Some("16:9".into())
+    );
+    assert_eq!(
+        state.read_with(&cx, |app, _| app.scene.frame()),
+        Some(Size { w: 1000, h: 562 })
+    );
+}
+
+#[gpui::test]
+fn field_help_is_shown_once(cx: &mut TestAppContext) {
+    let (_state, form, cx) = mount(cx);
+    let (rows, caption) = form.read_with(&cx, |form, cx| {
+        (
+            form.presented().to_vec(),
+            form.control_caption("grounding", cx),
+        )
+    });
+    assert_eq!(
+        rows.iter()
+            .filter(|(label, _)| label == "Grounding")
+            .count(),
+        1
+    );
+    assert!(rows.iter().any(|(label, help)| {
+        label == "Grounding"
+            && help
+                .as_deref()
+                .is_some_and(|text| text.contains("web search"))
+    }));
+    assert_eq!(caption, (None, None));
+}
+
+#[gpui::test]
+fn repeated_fields_stay_plain_and_scalars_do_not(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    let form = cx.new(|cx| SchemaForm::new(state.clone(), cx));
+    for id in ["flux-3-image", "flux-2-pro", "krea-3", "krea-2-large"] {
+        state.update(&mut cx, |app, cx| {
+            if app.model_id != id {
+                app.set_model(id, cx);
+            }
+        });
+        let fields = state.read_with(&cx, |app, _| app.spec().schema.fields.clone());
+        form.read_with(&cx, |form, _| {
+            for field in &fields {
+                let repeated = matches!(field.kind, FieldKind::Repeated { .. });
+                assert_eq!(form.is_repeated(&field.key), repeated, "{}", field.key);
+                assert_eq!(form.has_control(&field.key), !repeated, "{}", field.key);
+            }
+        });
+    }
 }
 
 fn source_image() -> Arc<crate::image_load::DecodedImage> {

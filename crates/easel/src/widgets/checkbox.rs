@@ -36,6 +36,14 @@ impl Checkbox {
         json!(self.checked)
     }
 
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    pub fn help(&self) -> Option<&str> {
+        self.help.as_deref()
+    }
+
     pub fn set_value(&mut self, value: &Value, cx: &mut Context<Self>) {
         if let Some(checked) = value.as_bool() {
             self.checked = checked;
@@ -108,7 +116,7 @@ impl gpui::Render for Checkbox {
             self.label.as_deref(),
             self.help.as_deref(),
             div()
-                .id("checkbox")
+                .id(("checkbox", cx.entity_id()))
                 .track_focus(&self.focus_handle)
                 .relative()
                 .size(px(20.0))

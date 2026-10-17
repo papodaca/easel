@@ -134,6 +134,14 @@ impl TextInput {
         self.content.as_ref()
     }
 
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    pub fn help(&self) -> Option<&str> {
+        self.help.as_deref()
+    }
+
     pub fn value(&self) -> Value {
         Value::String(self.content.to_string())
     }
