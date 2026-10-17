@@ -13,7 +13,7 @@ impl ModelRegistry {
     pub fn specs() -> &'static [&'static ModelSpec] {
         static SPECS: OnceLock<Vec<&'static ModelSpec>> = OnceLock::new();
         SPECS
-            .get_or_init(|| vec![bfl::flux3::model_spec()])
+            .get_or_init(|| vec![bfl::flux3::model_spec(), bfl::flux2_pro::model_spec()])
             .as_slice()
     }
 
@@ -105,6 +105,56 @@ use self::bfl::flux3::CompiledPrompt;
 pub enum ImageInput {
     RawBase64(String),
     Url(String),
+}
+
+impl ImageInput {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::RawBase64(text) | Self::Url(text) => text,
+        }
+    }
+}
+
+/// Place prepared images into the request fields the slot kind names.
+#[must_use]
+pub fn map_images(
+    slots: crate::model_spec::ImageSlots,
+    inputs: &[ImageInput],
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    use crate::model_spec::ImageSlots;
+    let mut fields = std::collections::BTreeMap::new();
+    match slots {
+        ImageSlots::List { max } => {
+            let values = inputs
+                .iter()
+                .take(max)
+                .map(|input| serde_json::Value::String(input.as_str().to_owned()))
+                .collect();
+            if !inputs.is_empty() {
+                fields.insert("images".into(), serde_json::Value::Array(values));
+            }
+        }
+        ImageSlots::Numbered { max } => {
+            for (index, input) in inputs.iter().take(max).enumerate() {
+                let key = if index == 0 {
+                    "input_image".to_owned()
+                } else {
+                    format!("input_image_{}", index + 1)
+                };
+                fields.insert(key, serde_json::Value::String(input.as_str().to_owned()));
+            }
+        }
+        ImageSlots::Single => {
+            if let Some(input) = inputs.first() {
+                fields.insert(
+                    "image_url".into(),
+                    serde_json::Value::String(input.as_str().to_owned()),
+                );
+            }
+        }
+    }
+    fields
 }
 
 #[derive(Clone)]

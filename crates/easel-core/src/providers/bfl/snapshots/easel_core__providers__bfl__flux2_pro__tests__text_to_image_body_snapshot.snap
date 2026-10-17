@@ -1,0 +1,13 @@
+---
+source: crates/easel-core/src/providers/bfl/flux2_pro.rs
+expression: json
+---
+{
+  "disable_pup": true,
+  "height": 768,
+  "output_format": "png",
+  "prompt": "a harbor at dusk",
+  "safety_tolerance": 2,
+  "seed": 42,
+  "width": 1024
+}

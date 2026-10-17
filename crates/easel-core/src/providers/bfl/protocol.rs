@@ -9,6 +9,8 @@ const BODY_CAP: usize = 64 * 1024;
 const RETRY_CAP_SECS: f64 = 300.0;
 const SAFETY_MAX: i64 = 7;
 
+pub const READY_POLL_BODY: &str = r#"{"status":"Ready","result":{"sample":"https://delivery.bfl.ai/img.png","prompt":"expanded","duration":3.5},"cost":4.5}"#;
+
 const SCHEMA_KEYS: &[&str] = &[
     "prompt",
     "images",
@@ -345,7 +347,7 @@ fn lossy_prefix(body: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_result_mime, parse_poll, parse_submit};
+    use super::{READY_POLL_BODY, extract_result_mime, parse_poll, parse_submit};
     use crate::error::ProviderError;
     use crate::http::{HttpHeader, HttpResponse};
     use crate::providers::PollOutcome;
@@ -529,10 +531,7 @@ mod tests {
                 other => panic!("{other:?}"),
             }
         }
-        match parse_poll(&response(
-            200,
-            r#"{"status":"Ready","result":{"sample":"https://delivery.bfl.ai/img.png","prompt":"expanded","duration":3.5},"cost":4.5}"#,
-        )) {
+        match parse_poll(&response(200, READY_POLL_BODY)) {
             PollOutcome::Ready {
                 url,
                 settled_cost,

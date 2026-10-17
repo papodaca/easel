@@ -37,11 +37,28 @@ pub enum LockRule {
     WhenSourceImageAndBoxes { value: Value },
 }
 
-/// Step 1 stand-in. Later steps add numeric cross-field rules.
+/// Rules that look at more than one field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CrossRule {
     Never,
+    /// Each listed field is a multiple of `n`. Zero is skipped when `exempt_zero`.
+    MultipleOf {
+        keys: Vec<String>,
+        n: i64,
+        exempt_zero: bool,
+    },
+    /// Each listed field is 0 or at least `min`.
+    ZeroOrAtLeast {
+        keys: Vec<String>,
+        min: i64,
+    },
+    /// `values[w] * values[h]` is at most `max`. A zero dimension counts as zero area.
+    MaxArea {
+        w: String,
+        h: String,
+        max: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -96,9 +113,7 @@ impl ParamSchema {
             }
         }
         for rule in &self.cross_rules {
-            match rule {
-                CrossRule::Never => {}
-            }
+            errors.extend(eval_cross(rule, values));
         }
         errors
     }
@@ -116,6 +131,69 @@ impl ParamSchema {
                 (ctx.has_source_image && ctx.box_count > 0).then(|| value.clone())
             }
         }
+    }
+}
+
+fn eval_cross(rule: &CrossRule, values: &BTreeMap<String, Value>) -> Vec<FieldError> {
+    match rule {
+        CrossRule::Never => Vec::new(),
+        CrossRule::MultipleOf {
+            keys,
+            n,
+            exempt_zero,
+        } => {
+            if *n == 0 {
+                return Vec::new();
+            }
+            keys.iter()
+                .filter_map(|key| {
+                    let number = values.get(key)?.as_i64()?;
+                    if *exempt_zero && number == 0 {
+                        return None;
+                    }
+                    (number % n != 0).then(|| FieldError {
+                        key: key.clone(),
+                        message: format!("must be a multiple of {n}"),
+                        approved_max: None,
+                    })
+                })
+                .collect()
+        }
+        CrossRule::ZeroOrAtLeast { keys, min } => keys
+            .iter()
+            .filter_map(|key| {
+                let number = values.get(key)?.as_i64()?;
+                (number != 0 && number < *min).then(|| FieldError {
+                    key: key.clone(),
+                    message: format!("must be 0 or at least {min}"),
+                    approved_max: None,
+                })
+            })
+            .collect(),
+        CrossRule::MaxArea { w, h, max } => {
+            let Some(width) = values.get(w).and_then(Value::as_i64) else {
+                return Vec::new();
+            };
+            let Some(height) = values.get(h).and_then(Value::as_i64) else {
+                return Vec::new();
+            };
+            let Some(area) = width.checked_mul(height) else {
+                return vec![area_error(w), area_error(h)];
+            };
+            if area > *max {
+                vec![area_error(w), area_error(h)]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
+fn area_error(key: &str) -> FieldError {
+    FieldError {
+        key: key.to_string(),
+        message: "must be at most 4 MP".into(),
+        approved_max: None,
     }
 }
 
