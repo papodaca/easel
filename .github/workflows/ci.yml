@@ -36,12 +36,21 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: Install nextest and cargo-deny
+      - name: Install nextest
         uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.9.4
         with:
-          # cargo-deny@latest still resolves to 0.13.9, which rejects
-          # `unmaintained = "workspace"`.
-          tool: nextest,cargo-deny@0.20.2
+          tool: nextest
+
+      - name: Install cargo-deny
+        run: |
+          # cargo-deny@latest in install-action is still 0.13.9, and that
+          # action has no 0.20.2 build. cargo-binstall cannot parse the
+          # edition 2024 manifest, so take the release binary.
+          curl -fsSL -o cargo-deny.tar.gz \
+            https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+          tar -xzf cargo-deny.tar.gz
+          install -m 755 cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny "$CARGO_HOME/bin/cargo-deny"
+          cargo deny --version
 
       - name: Format
         run: cargo fmt --check
