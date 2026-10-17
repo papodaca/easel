@@ -23,6 +23,8 @@ pub struct SessionFile {
     pub scene: Scene,
     pub values: BTreeMap<String, Value>,
     #[serde(default)]
+    pub model_id: String,
+    #[serde(default)]
     pub source: Option<SourceRef>,
     #[serde(default)]
     pub references: Vec<SourceRef>,
@@ -297,6 +299,7 @@ mod tests {
             version: 1,
             scene,
             values: [("resolution".into(), json!("1k"))].into(),
+            model_id: String::new(),
             source: Some(SourceRef {
                 path: "source.png".into(),
                 hash: "abc".into(),

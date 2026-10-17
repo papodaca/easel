@@ -130,6 +130,7 @@ fn picking_an_aspect_ratio_updates_the_scene(cx: &mut TestAppContext) {
         shown.state.read(cx).scene.aspect_ratio.clone()
     });
     assert_eq!(ratio.as_deref(), Some("21:9"));
+    assert!(!form.read_with(&cx, |form, cx| form.resolution_is_open(cx)));
 }
 
 struct Shown {

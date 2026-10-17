@@ -69,6 +69,11 @@ impl SchemaForm {
         &self.aspect
     }
 
+    #[cfg(test)]
+    pub fn resolution_is_open(&self, cx: &gpui::App) -> bool {
+        self.resolution.read(cx).is_open()
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn aspect_enabled(&self, cx: &gpui::App) -> bool {
         self.aspect.read(cx).is_enabled()
@@ -126,9 +131,12 @@ impl SchemaForm {
         self.safety.update(cx, |slider, cx| {
             slider.on_change(
                 Box::new(move |value, _window, cx| {
-                    let value = value.clone();
+                    let stored = match value.as_f64() {
+                        Some(number) => json!(number.round() as i64),
+                        None => value.clone(),
+                    };
                     state.update(cx, |app, cx| {
-                        app.values.insert("safety_tolerance".into(), value);
+                        app.values.insert("safety_tolerance".into(), stored);
                         cx.notify();
                     });
                 }),
@@ -165,6 +173,16 @@ impl SchemaForm {
             select.set_options(resolution_options, cx);
             select.set_value(resolution, cx);
         });
+        let safety = self.value("safety_tolerance", cx);
+        if !safety.is_null() {
+            self.safety
+                .update(cx, |slider, cx| slider.set_value(&safety, cx));
+        }
+        let grounding = self.value("grounding", cx);
+        if !grounding.is_null() {
+            self.grounding
+                .update(cx, |check, cx| check.set_value(&grounding, cx));
+        }
     }
 }
 

@@ -241,6 +241,30 @@ mod tests {
     }
 
     #[gpui::test]
+    fn releasing_over_a_snapped_menu_does_not_choose(cx: &mut TestAppContext) {
+        let (window, mut cx) = open(cx, |_, cx| {
+            Select::new(vec!["red".into(), "green".into(), "blue".into()], cx)
+        });
+        let select = window.root(&mut cx).unwrap();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let point = select.read_with(&cx, |select, _| select.click_point());
+        cx.simulate_mouse_down(point, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert!(select.read_with(&cx, |select, _| select.is_open()));
+        let option = select.read_with(&cx, |select, _| select.menu_point(0));
+        cx.simulate_mouse_up(option, MouseButton::Left, Modifiers::default());
+        assert!(select.read_with(&cx, |select, _| select.is_open()));
+        assert_eq!(
+            select.read_with(&cx, |select, _| select.value().clone()),
+            serde_json::Value::Null
+        );
+    }
+
+    #[gpui::test]
     fn select_click_again_closes_without_changing_the_value(cx: &mut TestAppContext) {
         let seen = changes();
         let record = Arc::clone(&seen);

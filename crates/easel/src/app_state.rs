@@ -96,6 +96,19 @@ impl AppState {
         cx.notify();
     }
 
+    pub fn reconcile_values(
+        &self,
+        stored: std::collections::BTreeMap<String, Value>,
+    ) -> std::collections::BTreeMap<String, Value> {
+        let mut values = self.spec().schema.defaults();
+        for (key, value) in stored {
+            if self.spec().schema.accepts(&key, &value) {
+                values.insert(key, value);
+            }
+        }
+        values
+    }
+
     pub fn field_errors(&self, sent_images: usize) -> Vec<easel_core::error::FieldError> {
         use easel_core::providers::Provider;
         use easel_core::providers::bfl::flux2_pro::Flux2Pro;

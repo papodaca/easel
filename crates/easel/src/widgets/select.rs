@@ -179,7 +179,10 @@ impl gpui::Render for Select {
                     .snap_to_window_with_margin(px(8.0))
                     .child(
                         div()
+                            .id(("select-menu", cx.entity_id()))
                             .w(width)
+                            .max_h(px(240.0))
+                            .overflow_y_scroll()
                             .py(px(4.0))
                             .rounded_md()
                             .shadow_md()
@@ -187,13 +190,18 @@ impl gpui::Render for Select {
                             .text_color(rgb(theme::TEXT))
                             .border_1()
                             .border_color(rgb(theme::BORDER))
-                            .on_mouse_down_out(cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                                if this.bounds.contains(&event.position) {
-                                    return;
-                                }
-                                this.open = false;
-                                cx.notify();
-                            }))
+                            .occlude()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_mouse_down_out(cx.listener(
+                                |this, event: &gpui::MouseDownEvent, _, cx| {
+                                    if this.bounds.contains(&event.position) {
+                                        return;
+                                    }
+                                    this.open = false;
+                                    cx.notify();
+                                },
+                            ))
                             .children(options.into_iter().enumerate().map(|(index, option)| {
                                 let selected = index == highlight;
                                 div()
@@ -210,6 +218,7 @@ impl gpui::Render for Select {
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
                                             this.highlight = index;
                                             this.choose(window, cx);
                                         }),

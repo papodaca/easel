@@ -248,7 +248,7 @@ fn check_kind(key: &str, kind: &FieldKind, value: &Value) -> Option<FieldError> 
             }
         }
         FieldKind::Int { min, max, .. } => {
-            let Some(number) = value.as_i64() else {
+            let Some(number) = integer_value(value) else {
                 return Some(type_error(key, "expected an integer"));
             };
             if number < *min || number > *max {
@@ -326,6 +326,19 @@ fn check_kind(key: &str, kind: &FieldKind, value: &Value) -> Option<FieldError> 
         }
     }
     None
+}
+
+fn integer_value(value: &Value) -> Option<i64> {
+    if let Some(number) = value.as_i64() {
+        return Some(number);
+    }
+    let float = value.as_f64()?;
+    if (float - float.round()).abs() < 1e-6 && float >= i64::MIN as f64 && float <= i64::MAX as f64
+    {
+        Some(float.round() as i64)
+    } else {
+        None
+    }
 }
 
 fn is_uuid(text: &str) -> bool {

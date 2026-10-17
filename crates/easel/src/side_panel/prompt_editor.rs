@@ -39,7 +39,14 @@ impl PromptEditor {
         Self {
             app_state: app_state.clone(),
             input,
-            _observe: cx.observe(&app_state, |_, _, cx| cx.notify()),
+            _observe: cx.observe(&app_state, |this, app, cx| {
+                let prose = app.read(cx).scene.prose.clone();
+                if this.input.read(cx).text() != prose {
+                    this.input
+                        .update(cx, |input, cx| input.set_text(&prose, cx));
+                }
+                cx.notify();
+            }),
         }
     }
 

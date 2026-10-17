@@ -66,6 +66,7 @@ impl Session {
         let app = self.app_state.read(cx);
         let scene = app.scene.clone();
         let values = app.values.clone();
+        let model_id = app.model_id.clone();
         let source = app.source_ref.clone();
         let image = app
             .image
@@ -92,6 +93,7 @@ impl Session {
                 version: easel_core::session::VERSION,
                 scene,
                 values,
+                model_id,
                 source: source.clone(),
                 references: Vec::new(),
             };
@@ -125,8 +127,14 @@ pub fn restore(state: Entity<AppState>, path: PathBuf, cx: &mut App) {
         };
         cx.update(|cx| {
             state.update(cx, |app, cx| {
+                if easel_core::providers::ModelRegistry::specs()
+                    .iter()
+                    .any(|spec| spec.id == file.model_id)
+                {
+                    app.model_id = file.model_id.clone();
+                }
                 app.scene = file.scene;
-                app.values = file.values;
+                app.values = app.reconcile_values(file.values);
                 app.source_ref = file.source;
                 app.image = image;
                 if app.image.is_none() {
@@ -208,6 +216,7 @@ mod tests {
             version: 1,
             scene,
             values: [("resolution".into(), json!("2k"))].into(),
+            model_id: String::new(),
             source: Some(easel_core::session::SourceRef {
                 path: image.display().to_string(),
                 hash: "unused".into(),
@@ -231,6 +240,63 @@ mod tests {
         assert_eq!(prose, "kept");
         assert_eq!(resolution, Some(json!("2k")));
         assert!(!image);
+        assert_eq!(
+            state.read_with(cx, |app, _| app.values.get("safety_tolerance").cloned()),
+            Some(json!(2))
+        );
+        assert_eq!(
+            state.read_with(cx, |app, _| app.values.get("grounding").cloned()),
+            Some(json!(true))
+        );
+    }
+
+    #[gpui::test]
+    fn restore_puts_the_saved_prompt_in_the_editor(cx: &mut TestAppContext) {
+        let root = temp_dir("prompt");
+        let mut scene = easel_core::scene::Scene::empty();
+        scene.prose = "a harbor at dusk".into();
+        let file = SessionFile {
+            version: 1,
+            scene,
+            values: [
+                ("aspect_ratio".into(), json!("nope")),
+                ("resolution".into(), json!("1k")),
+            ]
+            .into(),
+            model_id: String::new(),
+            source: None,
+            references: Vec::new(),
+        };
+        SessionStore::open(root.join("session.json"))
+            .write(&file)
+            .unwrap();
+        let state = cx.new(|_| AppState::new());
+        let editor = cx.new(|cx| crate::side_panel::PromptEditor::new(state.clone(), cx));
+        cx.update(|cx| restore(state.clone(), root.join("session.json"), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| editor.prose(cx)),
+            "a harbor at dusk"
+        );
+        let keys: std::sync::Arc<dyn crate::net::KeyResolver> =
+            std::sync::Arc::new(crate::net::MapKeys::default().insert(
+                easel_core::model_spec::ProviderId::Bfl,
+                "key",
+            ));
+        let validation = cx.new(|cx| {
+            crate::side_panel::Validation::new(state.clone(), keys, cx)
+        });
+        let messages = validation.read_with(cx, |validation, cx| validation.messages(cx));
+        assert!(
+            messages.iter().all(|message| {
+                !message.contains("required") && !message.contains("not one of the options")
+            }),
+            "{messages:?}"
+        );
+        assert_eq!(
+            state.read_with(cx, |app, _| app.values.get("aspect_ratio").cloned()),
+            Some(json!("auto"))
+        );
     }
 
     #[gpui::test]
@@ -289,6 +355,7 @@ mod tests {
             version: 1,
             scene,
             values: [("aspect_ratio".into(), json!("auto"))].into(),
+            model_id: String::new(),
             source: Some(owned),
             references: Vec::new(),
         };
