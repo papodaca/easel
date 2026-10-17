@@ -80,6 +80,9 @@ impl Root {
                 history,
             )
         });
+        runner.update(cx, |runner, _| {
+            runner.watch_krea_sunset(app_state.clone(), notifications.clone());
+        });
         let panel_runner = runner.clone();
         let credit_runner = runner.clone();
         let credit_settings = settings.clone();

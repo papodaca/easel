@@ -9,6 +9,7 @@ use gpui::{Context, EventEmitter, RenderImage};
 use serde_json::Value;
 
 use crate::image_load::DecodedImage;
+use crate::notifications::{Notifications, Toast, ToastLevel};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SideMode {
@@ -40,6 +41,7 @@ pub struct AppState {
     pub inspection: Option<crate::jobs::Inspection>,
     pub source_ref: Option<easel_core::session::SourceRef>,
     retired_renders: Vec<Arc<RenderImage>>,
+    krea_sunset_noted: bool,
 }
 
 impl AppState {
@@ -61,7 +63,32 @@ impl AppState {
             inspection: None,
             source_ref: None,
             retired_renders: Vec::new(),
+            krea_sunset_noted: false,
         }
+    }
+
+    pub fn note_krea_sunset(
+        &mut self,
+        sunset: easel_core::providers::krea::Sunset,
+        notes: &gpui::Entity<Notifications>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.krea_sunset_noted {
+            return;
+        }
+        self.krea_sunset_noted = true;
+        let text = easel_core::providers::krea::sunset_toast(&sunset);
+        notes.update(cx, |notes, cx| {
+            notes.push(
+                Toast {
+                    level: ToastLevel::Info,
+                    text: text.into(),
+                    ttl: std::time::Duration::from_secs(8),
+                    action: None,
+                },
+                cx,
+            );
+        });
     }
 
     pub fn box_tool_enabled(&self) -> bool {
@@ -156,5 +183,48 @@ impl EventEmitter<()> for AppState {}
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use easel_core::http::{HttpHeader, HttpResponse};
+    use easel_core::providers::krea::{self, Sunset};
+    use gpui::{TestAppContext, prelude::*};
+
+    use crate::notifications::Notifications;
+
+    use super::AppState;
+
+    #[gpui::test]
+    fn a_sunset_header_toasts_once_per_session(cx: &mut TestAppContext) {
+        let response = HttpResponse {
+            status: 200,
+            headers: vec![
+                HttpHeader {
+                    name: "Deprecation".into(),
+                    value: "true".into(),
+                    sensitive: false,
+                },
+                HttpHeader {
+                    name: "Sunset".into(),
+                    value: "Sun, 06 Nov 1994 08:49:37 GMT".into(),
+                    sensitive: false,
+                },
+            ],
+            body: Vec::new(),
+        };
+        let sunset = krea::deprecation_headers(&response).expect("sunset");
+        assert_eq!(sunset, Sunset::On("06 Nov 1994".into()));
+        let notes = cx.new(|_| Notifications::new());
+        let app = cx.new(|_| AppState::new());
+        app.update(cx, |app, cx| {
+            app.note_krea_sunset(sunset.clone(), &notes, cx)
+        });
+        app.update(cx, |app, cx| app.note_krea_sunset(sunset, &notes, cx));
+        assert_eq!(notes.read_with(cx, |notes, _| notes.toast_count()), 1);
+        let text = notes.read_with(cx, |notes, _| notes.last_toast_text());
+        assert!(text.contains("06 Nov 1994"), "{text}");
+        assert!(!text.contains("GMT"), "{text}");
     }
 }

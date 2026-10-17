@@ -24,7 +24,9 @@ const SCHEMA_KEYS: &[&str] = &[
 pub fn parse_submit(response: &HttpResponse) -> Result<Submitted, ProviderError> {
     match response.status {
         401 | 403 => return Err(ProviderError::Auth),
-        402 => return Err(ProviderError::OutOfCredits),
+        402 => {
+            return Err(ProviderError::OutOfCredits { hint: None });
+        }
         429 => return Err(rate_limited(response)),
         400 => return Err(images_rejected(response)),
         422 => return Err(validation_error(response)),
@@ -74,7 +76,9 @@ pub fn parse_poll(response: &HttpResponse) -> PollOutcome {
     }
     match response.status {
         401 | 403 => return PollOutcome::Failed(ProviderError::Auth),
-        402 => return PollOutcome::Failed(ProviderError::OutOfCredits),
+        402 => {
+            return PollOutcome::Failed(ProviderError::OutOfCredits { hint: None });
+        }
         429 => return PollOutcome::Failed(rate_limited(response)),
         _ => {}
     }
@@ -403,7 +407,7 @@ mod tests {
         ));
         assert!(matches!(
             parse_submit(&response(402, "nope")).unwrap_err(),
-            ProviderError::OutOfCredits
+            ProviderError::OutOfCredits { hint: None }
         ));
         let limited = parse_submit(&response(429, r#"{"retry_after":12}"#)).unwrap_err();
         assert_eq!(

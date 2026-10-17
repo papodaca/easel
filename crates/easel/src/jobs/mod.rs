@@ -2,6 +2,9 @@ mod promote;
 mod runner;
 mod submit;
 
+#[cfg(test)]
+mod krea_tests;
+
 use std::path::PathBuf;
 
 #[allow(unused_imports)]

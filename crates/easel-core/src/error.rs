@@ -15,8 +15,11 @@ pub struct FieldError {
 pub enum ProviderError {
     #[error("authentication failed")]
     Auth,
-    #[error("out of credits")]
-    OutOfCredits,
+    #[error("{}", credits_message(hint))]
+    OutOfCredits {
+        #[serde(default)]
+        hint: Option<String>,
+    },
     #[error("rate limited")]
     RateLimited {
         #[serde(with = "duration_option")]
@@ -30,7 +33,7 @@ pub enum ProviderError {
     },
     #[error("moderated")]
     Moderated { reasons: Vec<String> },
-    #[error("gone")]
+    #[error("{}", gone_message(replacement, sunset))]
     Gone {
         replacement: Option<String>,
         sunset: Option<String>,
@@ -41,6 +44,22 @@ pub enum ProviderError {
     Protocol(String),
     #[error("network error: {0}")]
     Network(String),
+}
+
+fn credits_message(hint: &Option<String>) -> String {
+    match hint {
+        Some(hint) => format!("out of API balance ({hint})"),
+        None => "out of credits".into(),
+    }
+}
+
+fn gone_message(replacement: &Option<String>, sunset: &Option<String>) -> String {
+    match (replacement, sunset) {
+        (Some(name), Some(date)) => format!("replaced by {name} (sunset {date})"),
+        (Some(name), None) => format!("replaced by {name}"),
+        (None, Some(date)) => format!("model sunset {date}"),
+        (None, None) => "model is gone".into(),
+    }
 }
 
 mod duration_option {

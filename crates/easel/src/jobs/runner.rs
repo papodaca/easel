@@ -27,6 +27,7 @@ struct Slot {
     dead: bool,
     status: String,
     cost: Option<f64>,
+    last_outcome: Option<PollOutcome>,
 }
 
 pub struct LiveJob {
@@ -46,6 +47,10 @@ pub struct JobRunner<P> {
     slots: Vec<Slot>,
     uploads: HashMap<String, ImageInput>,
     next_token: u64,
+    sunset_watch: Option<(
+        gpui::Entity<crate::app_state::AppState>,
+        gpui::Entity<crate::notifications::Notifications>,
+    )>,
 }
 
 impl<P: Provider + 'static> JobRunner<P> {
@@ -63,6 +68,7 @@ impl<P: Provider + 'static> JobRunner<P> {
             slots: Vec::new(),
             uploads: HashMap::new(),
             next_token: 1,
+            sunset_watch: None,
         }
     }
 
@@ -79,18 +85,32 @@ impl<P: Provider + 'static> JobRunner<P> {
             dead: false,
             status: "Queued".into(),
             cost: None,
+            last_outcome: None,
         });
         self.pump(cx);
     }
 
+    pub fn watch_krea_sunset(
+        &mut self,
+        app: gpui::Entity<crate::app_state::AppState>,
+        notes: gpui::Entity<crate::notifications::Notifications>,
+    ) {
+        self.sunset_watch = Some((app, notes));
+    }
+
     pub fn dismiss(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(slot) = self.slots.get_mut(index) else {
+        if self.slots.get(index).is_none() {
             return;
-        };
-        if matches!(slot.state, JobState::Queued) {
+        }
+        if matches!(self.slots[index].state, JobState::Queued) {
             self.slots.remove(index);
             return;
         }
+        let cancel = self.slots[index].submitted.clone().and_then(|submitted| {
+            self.provider
+                .cancel_request(&submitted, self.slots[index].last_outcome.as_ref())
+        });
+        let slot = &mut self.slots[index];
         slot.dead = true;
         let state = std::mem::replace(&mut slot.state, JobState::Queued);
         slot.state = advance(state, JobEvent::Dismiss);
@@ -102,6 +122,13 @@ impl<P: Provider + 'static> JobRunner<P> {
             let _ = self.history.set_state(&id, JobState::Dismissed);
         }
         cx.notify();
+        if let Some(request) = cancel {
+            let task = self.transport.request(request, cx);
+            cx.spawn(async move |_, _| {
+                let _ = task.await;
+            })
+            .detach();
+        }
         self.pump(cx);
     }
 
@@ -183,6 +210,7 @@ impl<P: Provider + 'static> JobRunner<P> {
                 dead: false,
                 status: "Polling".into(),
                 cost: None,
+                last_outcome: None,
             });
             self.schedule_poll(token, cx);
         }
@@ -330,6 +358,7 @@ impl<P: Provider + 'static> JobRunner<P> {
                 return;
             }
         };
+        self.note_headers(&response, cx);
         match self.provider.parse_submit(&response) {
             Ok(submitted) => {
                 let request = self.slot_mut(token).map(|slot| slot.request.clone());
@@ -427,6 +456,9 @@ impl<P: Provider + 'static> JobRunner<P> {
         if self.dead(token) {
             return;
         }
+        if let Ok(response) = &response {
+            self.note_headers(response, cx);
+        }
         let outcome = match response {
             Ok(response) => self.provider.parse_poll(&response),
             Err(TransportError::Network { .. } | TransportError::Timeout { .. }) => {
@@ -437,6 +469,9 @@ impl<P: Provider + 'static> JobRunner<P> {
             }
         };
         let downloading = matches!(outcome, PollOutcome::Ready { .. });
+        if let Some(slot) = self.slot_mut(token) {
+            slot.last_outcome = Some(outcome.clone());
+        }
         if let PollOutcome::InFlight { status, .. } = &outcome
             && let Some(slot) = self.slot_mut(token)
         {
@@ -630,6 +665,19 @@ impl<P: Provider + 'static> JobRunner<P> {
         }
         cx.notify();
         self.pump(cx);
+    }
+
+    fn note_headers(&mut self, response: &HttpResponse, cx: &mut Context<Self>) {
+        if self.provider.spec().provider != ProviderId::Krea {
+            return;
+        }
+        let Some(sunset) = easel_core::providers::krea::deprecation_headers(response) else {
+            return;
+        };
+        let Some((app, notes)) = self.sunset_watch.clone() else {
+            return;
+        };
+        app.update(cx, |app, cx| app.note_krea_sunset(sunset, &notes, cx));
     }
 
     fn fail(&mut self, token: u64, error: ProviderError, cx: &mut Context<Self>) {

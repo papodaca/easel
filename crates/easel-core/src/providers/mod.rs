@@ -1,4 +1,5 @@
 pub mod bfl;
+pub mod krea;
 
 use std::sync::OnceLock;
 
@@ -101,7 +102,7 @@ use crate::scene::Scene;
 
 use self::bfl::flux3::CompiledPrompt;
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageInput {
     RawBase64(String),
     Url(String),
