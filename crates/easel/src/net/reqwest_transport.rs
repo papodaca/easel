@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use easel_core::{
-    http::{Body, HttpHeader, HttpRequest, HttpResponse, Method},
-    model_spec::ProviderId,
+    http::{Body, HttpHeader, HttpRequest, HttpResponse, Method, Part},
+    model_spec::AuthScheme,
 };
 use gpui::{App, Task};
 
@@ -102,9 +102,6 @@ async fn execute(
     let url = request.url.clone();
     ensure_url(&url)?;
     apply_auth(&mut request, keys)?;
-    if matches!(request.body, Body::Multipart { .. }) {
-        return Err(TransportError::Unsupported { url });
-    }
     log_request(&request);
 
     let reqwest_method = match request.method {
@@ -123,7 +120,13 @@ async fn execute(
         );
     }
     builder = match &request.body {
-        Body::Empty | Body::Multipart { .. } => builder,
+        Body::Empty => builder,
+        Body::Multipart { parts } => {
+            builder.multipart(multipart_form(parts).map_err(|_| TransportError::Network {
+                method: method.clone(),
+                url: url.clone(),
+            })?)
+        }
         Body::Json(value) => {
             let bytes = serde_json::to_vec(value).map_err(|_| TransportError::Network {
                 method: method.clone(),
@@ -160,19 +163,35 @@ fn apply_auth(request: &mut HttpRequest, keys: &dyn KeyResolver) -> Result<(), T
     let Some(key) = keys.key_for(provider).filter(|key| !key.is_empty()) else {
         return Err(TransportError::NoCredential(provider));
     };
-    let (name, value) = match provider {
-        ProviderId::Bfl => ("x-key", key.to_string()),
-        ProviderId::Krea => ("authorization", format!("Bearer {}", key.as_str())),
+    let (name, value) = match provider.auth_scheme() {
+        AuthScheme::HeaderKey { header } => (header, key.to_string()),
+        AuthScheme::Bearer => (
+            "authorization".to_owned(),
+            format!("Bearer {}", key.as_str()),
+        ),
     };
     request
         .headers
-        .retain(|header| !header.name.eq_ignore_ascii_case(name));
+        .retain(|header| !header.name.eq_ignore_ascii_case(&name));
     request.headers.push(HttpHeader {
-        name: name.to_owned(),
+        name,
         value,
         sensitive: true,
     });
     Ok(())
+}
+
+fn multipart_form(parts: &[Part]) -> Result<reqwest::multipart::Form, ()> {
+    let mut form = reqwest::multipart::Form::new();
+    for part in parts {
+        let mut encoded = reqwest::multipart::Part::bytes(part.bytes.clone());
+        if let Some(filename) = &part.filename {
+            encoded = encoded.file_name(filename.clone());
+        }
+        encoded = encoded.mime_str(&part.content_type).map_err(|_| ())?;
+        form = form.part(part.name.clone(), encoded);
+    }
+    Ok(form)
 }
 
 fn header_value(header: &HttpHeader) -> Result<reqwest::header::HeaderValue, ()> {
@@ -804,20 +823,64 @@ mod tests {
         mock.assert_async().await;
     }
 
+    #[test]
+    fn bearer_header_debug_redacts_the_key() {
+        use easel_core::model_spec::AuthScheme;
+
+        let mut http = request(Method::Get, "https://api.krea.ai/jobs/x", Body::Empty);
+        http.auth = Some(ProviderId::Krea);
+        assert!(matches!(ProviderId::Krea.auth_scheme(), AuthScheme::Bearer));
+        assert!(matches!(
+            ProviderId::Bfl.auth_scheme(),
+            AuthScheme::HeaderKey { ref header } if header == "x-key"
+        ));
+        super::apply_auth(
+            &mut http,
+            &MapKeys::default().insert(ProviderId::Krea, "krea-key-9f3a"),
+        )
+        .expect("auth");
+        let debug = format!("{http:?}");
+        assert!(debug.contains("<redacted>"), "{debug}");
+        assert!(!debug.contains("krea-key-9f3a"), "{debug}");
+    }
+
     #[gpui::test]
-    async fn multipart_is_unsupported(cx: &mut TestAppContext) {
+    async fn multipart_sends_the_file_part(cx: &mut TestAppContext) {
+        use easel_core::http::Part;
+
         let mut server = server();
-        let mock = server.mock("POST", "/parts").expect(0).create_async().await;
+        let mock = server
+            .mock("POST", "/parts")
+            .match_header(
+                "content-type",
+                mockito::Matcher::Regex(r"^multipart/form-data".into()),
+            )
+            .match_body(mockito::Matcher::Regex(r#"filename="image.png""#.into()))
+            .with_status(201)
+            .with_body(r#"{"image_url":"https://api.krea.ai/a"}"#)
+            .create_async()
+            .await;
         let transport = boot(cx, MapKeys::default());
         let url = format!("{}/parts", server.url());
-        let err = dispatch(
+        let response = dispatch(
             cx,
             &transport,
-            request(Method::Post, url, Body::Multipart { parts: Vec::new() }),
+            request(
+                Method::Post,
+                url,
+                Body::Multipart {
+                    parts: vec![Part {
+                        name: "file".into(),
+                        filename: Some("image.png".into()),
+                        content_type: "image/png".into(),
+                        bytes: b"png-bytes".to_vec(),
+                    }],
+                },
+            ),
         )
         .await
-        .expect_err("multipart");
-        assert!(matches!(err, TransportError::Unsupported { .. }), "{err:?}");
+        .expect("multipart");
+        assert_eq!(response.status, 201);
         mock.assert_async().await;
     }
 

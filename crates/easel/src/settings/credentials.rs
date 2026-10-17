@@ -14,6 +14,32 @@ fn env_with(value: &str) -> std::collections::HashMap<String, String> {
 }
 
 #[test]
+fn krea_env_beats_the_store_keyed_by_base_url() {
+    let store = MemoryStore::default();
+    store.write(ProviderId::Krea, "store-key").expect("write");
+    assert!(store.stores_under(ProviderId::Krea.base_url()));
+    let mut session = SessionKeys::default();
+    session.set(ProviderId::Krea, "session-key");
+    let env = std::collections::HashMap::from([(
+        ProviderId::Krea.env_var().to_owned(),
+        "env-key".to_owned(),
+    )]);
+    let resolved = resolve_key(ProviderId::Krea, &env, &store, &session).expect("env");
+    assert_eq!(resolved.0.as_str(), "env-key");
+    assert_eq!(resolved.1, Source::Env);
+
+    let resolved = resolve_key(
+        ProviderId::Krea,
+        &std::collections::HashMap::new(),
+        &store,
+        &session,
+    )
+    .expect("store");
+    assert_eq!(resolved.0.as_str(), "store-key");
+    assert_eq!(resolved.1, Source::Store);
+}
+
+#[test]
 fn env_beats_store_and_session() {
     let store = MemoryStore::default();
     store.write(ProviderId::Bfl, "store-key").expect("write");
@@ -170,15 +196,79 @@ async fn test_action_classifies_the_bfl_response(cx: &mut TestAppContext) {
         let transport = Arc::clone(&transport);
         move |cx| SettingsPanel::new(notes, transport, cx)
     });
-    panel.update(cx, |panel, cx| panel.set_draft("sekrit-key-zz", cx));
-    panel.update(cx, |panel, cx| panel.test_key(cx)).await;
+    panel.update(cx, |panel, cx| {
+        panel.set_draft(ProviderId::Bfl, "sekrit-key-zz", cx)
+    });
+    panel
+        .update(cx, |panel, cx| panel.test_key(ProviderId::Bfl, cx))
+        .await;
     assert!(notes.read_with(cx, |notes, _| {
         notes.last_toast_text().contains("invalid key")
     }));
-    panel.update(cx, |panel, cx| panel.test_key(cx)).await;
+    panel
+        .update(cx, |panel, cx| panel.test_key(ProviderId::Bfl, cx))
+        .await;
     assert!(notes.read_with(cx, |notes, _| {
         notes.last_toast_text().contains("key accepted")
     }));
     let logged = panel.read_with(cx, |panel, _| panel.logged_test_lines());
     assert!(!logged.iter().any(|line| line.contains("sekrit-key-zz")));
+}
+
+#[gpui::test]
+async fn each_provider_row_keeps_its_own_test_result(cx: &mut TestAppContext) {
+    use easel_core::http::HttpResponse;
+    use easel_core::providers::ModelRegistry;
+    use gpui::prelude::*;
+
+    use crate::net::FakeTransport;
+    use crate::notifications::Notifications;
+    use crate::settings::SettingsPanel;
+
+    let transport = Arc::new(FakeTransport::scripted(vec![
+        Ok(HttpResponse {
+            status: 401,
+            headers: Vec::new(),
+            body: b"no".to_vec(),
+        }),
+        Ok(HttpResponse {
+            status: 404,
+            headers: Vec::new(),
+            body: b"missing".to_vec(),
+        }),
+    ]));
+    let notes = cx.new(|_| Notifications::new());
+    let panel = cx.new({
+        let notes = notes.clone();
+        let transport = Arc::clone(&transport);
+        move |cx| SettingsPanel::new(notes, transport, cx)
+    });
+    let titles = panel.read_with(cx, |panel, _| panel.provider_titles());
+    assert_eq!(titles.len(), ModelRegistry::providers().len());
+    assert!(titles.iter().any(|title| title == "Black Forest Labs"));
+    assert!(titles.iter().any(|title| title == "Krea"));
+
+    panel.update(cx, |panel, cx| {
+        panel.set_draft(ProviderId::Krea, "krea-secret", cx);
+        panel.set_draft(ProviderId::Bfl, "bfl-secret", cx);
+    });
+    panel
+        .update(cx, |panel, cx| panel.test_key(ProviderId::Krea, cx))
+        .await;
+    panel
+        .update(cx, |panel, cx| panel.test_key(ProviderId::Bfl, cx))
+        .await;
+    let (krea, bfl) = panel.read_with(cx, |panel, _| {
+        (
+            panel.row_note(ProviderId::Krea).to_owned(),
+            panel.row_note(ProviderId::Bfl).to_owned(),
+        )
+    });
+    assert!(krea.contains("invalid key"), "{krea}");
+    assert!(bfl.contains("key accepted"), "{bfl}");
+    let seen = transport.seen();
+    assert!(seen[0].url.starts_with("https://api.krea.ai/jobs/"));
+    assert!(seen[1].url.starts_with("https://api.bfl.ai/"));
+    assert_eq!(seen[0].auth, Some(ProviderId::Krea));
+    assert_eq!(seen[1].auth, Some(ProviderId::Bfl));
 }

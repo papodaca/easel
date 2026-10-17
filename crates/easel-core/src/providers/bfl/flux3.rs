@@ -234,6 +234,11 @@ impl crate::providers::Provider for Flux3 {
 
 static SPEC: std::sync::LazyLock<crate::model_spec::ModelSpec> = std::sync::LazyLock::new(spec);
 
+#[must_use]
+pub fn model_spec() -> &'static crate::model_spec::ModelSpec {
+    &SPEC
+}
+
 fn spec() -> crate::model_spec::ModelSpec {
     use crate::model_spec::{
         AuthScheme, Capabilities, ImageSlots, ModelSpec, ProviderId, SizeControl,

@@ -27,7 +27,6 @@ pub trait HttpTransport: Send + Sync {
 pub enum TransportError {
     InsecureUrl { url: String },
     NoCredential(ProviderId),
-    Unsupported { url: String },
     TooLarge { method: String, url: String },
     Timeout { method: String, url: String },
     Network { method: String, url: String },
@@ -43,10 +42,6 @@ impl fmt::Debug for TransportError {
             Self::NoCredential(provider) => formatter
                 .debug_tuple("NoCredential")
                 .field(provider)
-                .finish(),
-            Self::Unsupported { url } => formatter
-                .debug_struct("Unsupported")
-                .field("url", url)
                 .finish(),
             Self::TooLarge { method, url } => formatter
                 .debug_struct("TooLarge")
@@ -72,7 +67,6 @@ impl fmt::Display for TransportError {
         match self {
             Self::InsecureUrl { url } => write!(formatter, "refusing non-https url {url}"),
             Self::NoCredential(provider) => write!(formatter, "no credential for {provider:?}"),
-            Self::Unsupported { url } => write!(formatter, "unsupported request to {url}"),
             Self::TooLarge { method, url } => {
                 write!(formatter, "{method} {url} exceeded the size limit")
             }

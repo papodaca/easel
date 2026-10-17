@@ -37,6 +37,24 @@ impl ProviderId {
     }
 
     #[must_use]
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Bfl => "Black Forest Labs",
+            Self::Krea => "Krea",
+        }
+    }
+
+    #[must_use]
+    pub fn auth_scheme(self) -> AuthScheme {
+        match self {
+            Self::Bfl => AuthScheme::HeaderKey {
+                header: "x-key".into(),
+            },
+            Self::Krea => AuthScheme::Bearer,
+        }
+    }
+
+    #[must_use]
     pub fn allowed_hosts(self) -> &'static [HostRule] {
         match self {
             Self::Bfl => BFL_HOSTS,

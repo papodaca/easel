@@ -19,7 +19,7 @@ log = "0.4"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "fb69067729cb16a7f6135e2c1600c26a28c59659" } # v1.24.2
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "fb69067729cb16a7f6135e2c1600c26a28c59659", features = ["wayland", "x11"] } # v1.24.2
 gpui_tokio = { git = "https://github.com/zed-industries/zed", rev = "fb69067729cb16a7f6135e2c1600c26a28c59659" } # v1.24.2
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "http2", "charset"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "http2", "charset", "multipart"] }
 serde_json.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }

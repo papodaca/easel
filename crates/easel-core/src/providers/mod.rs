@@ -1,6 +1,32 @@
 pub mod bfl;
 
+use std::sync::OnceLock;
+
 use crate::error::ProviderError;
+use crate::model_spec::{ModelSpec, ProviderId};
+
+/// Registered models and the providers that own their keys.
+pub struct ModelRegistry;
+
+impl ModelRegistry {
+    #[must_use]
+    pub fn specs() -> &'static [&'static ModelSpec] {
+        static SPECS: OnceLock<Vec<&'static ModelSpec>> = OnceLock::new();
+        SPECS
+            .get_or_init(|| vec![bfl::flux3::model_spec()])
+            .as_slice()
+    }
+
+    #[must_use]
+    pub fn providers() -> &'static [ProviderId] {
+        &[ProviderId::Bfl, ProviderId::Krea]
+    }
+
+    #[must_use]
+    pub fn auth_scheme(provider: ProviderId) -> crate::model_spec::AuthScheme {
+        provider.auth_scheme()
+    }
+}
 use serde::{Deserialize, Serialize};
 
 /// Server job id. Only values matching `^[A-Za-z0-9_-]{1,64}$` can name a file.
@@ -71,7 +97,6 @@ use crate::error::FieldError;
 use crate::geometry::Size;
 use crate::http::{Body, HttpRequest, HttpResponse, Method};
 use crate::job::{EncodedImage, JobRequest, PollPolicy};
-use crate::model_spec::ModelSpec;
 use crate::scene::Scene;
 
 use self::bfl::flux3::CompiledPrompt;

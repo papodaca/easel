@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use easel_core::http::{Body, HttpRequest, Method};
 use easel_core::model_spec::ProviderId;
+use easel_core::providers::ModelRegistry;
 use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, prelude::*, px, rgb,
 };
@@ -17,7 +18,59 @@ use crate::theme;
 use crate::ui::{Button, muted_text, section_label};
 use crate::widgets::{TextInput, field_row};
 
-const TEST_URL: &str = "https://api.bfl.ai/v1/get_result?id=nonexistent";
+/// Probe the provider uses to decide whether a key is accepted.
+/// Krea asks for a fresh job id; a valid key gets 404, an invalid key gets 401.
+pub fn key_probe(provider: ProviderId) -> HttpRequest {
+    let url = match provider {
+        ProviderId::Bfl => "https://api.bfl.ai/v1/get_result?id=nonexistent".to_owned(),
+        ProviderId::Krea => format!("https://api.krea.ai/jobs/{}", fresh_uuid()),
+    };
+    HttpRequest {
+        method: Method::Get,
+        url,
+        headers: Vec::new(),
+        auth: Some(provider),
+        body: Body::Empty,
+        max_body_bytes: 64 * 1024,
+    }
+}
+
+fn fresh_uuid() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
+    let mixed = hasher.finish();
+    hasher.write_u64(mixed);
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&hasher.finish().to_le_bytes());
+    hasher.write_u8(1);
+    bytes[8..].copy_from_slice(&hasher.finish().to_le_bytes());
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    )
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -41,7 +94,17 @@ pub trait CredentialStore {
 
 #[derive(Default)]
 pub struct MemoryStore {
-    keys: Mutex<HashMap<ProviderId, String>>,
+    keys: Mutex<HashMap<String, String>>,
+}
+
+impl MemoryStore {
+    #[cfg(test)]
+    pub fn stores_under(&self, service: &str) -> bool {
+        self.keys
+            .lock()
+            .expect("memory store")
+            .contains_key(service)
+    }
 }
 
 impl CredentialStore for MemoryStore {
@@ -50,7 +113,7 @@ impl CredentialStore for MemoryStore {
             .keys
             .lock()
             .expect("memory store")
-            .get(&provider)
+            .get(provider.base_url())
             .cloned()
             .map(Zeroizing::new))
     }
@@ -59,12 +122,15 @@ impl CredentialStore for MemoryStore {
         self.keys
             .lock()
             .expect("memory store")
-            .insert(provider, key.to_owned());
+            .insert(provider.base_url().to_owned(), key.to_owned());
         Ok(())
     }
 
     fn delete(&self, provider: ProviderId) -> Result<(), ()> {
-        self.keys.lock().expect("memory store").remove(&provider);
+        self.keys
+            .lock()
+            .expect("memory store")
+            .remove(provider.base_url());
         Ok(())
     }
 }
@@ -211,15 +277,20 @@ fn normalize_key(raw: &str) -> Result<String, String> {
     }
 }
 
+struct ProviderRow {
+    provider: ProviderId,
+    draft: Entity<TextInput>,
+    note: gpui::SharedString,
+    field_message: gpui::SharedString,
+    revealed: bool,
+}
+
 pub struct SettingsPanel {
     notifications: Entity<Notifications>,
     transport: Arc<dyn HttpTransport>,
     keys: Arc<SharedKeys>,
-    draft: Entity<TextInput>,
-    note: gpui::SharedString,
-    field_message: gpui::SharedString,
+    rows: Vec<ProviderRow>,
     test_log: Vec<String>,
-    revealed: bool,
     data_directory: gpui::SharedString,
 }
 
@@ -244,33 +315,58 @@ impl SettingsPanel {
         keys: Arc<SharedKeys>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let draft = cx.new(|cx| {
-            let mut input = TextInput::new(cx);
-            input.set_masked(true, cx);
-            input.set_label("BFL API key", cx);
-            input
-        });
-        let url = ProviderId::Bfl.base_url().to_owned();
-        let keys_for_load = Arc::clone(&keys);
-        let read = cx.read_credentials(&url);
+        let rows = ModelRegistry::providers()
+            .iter()
+            .copied()
+            .map(|provider| {
+                let label = format!("{} API key", provider.display_name());
+                let draft = cx.new(|cx| {
+                    let mut input = TextInput::new(cx);
+                    input.set_masked(true, cx);
+                    input.set_label(label, cx);
+                    input
+                });
+                ProviderRow {
+                    provider,
+                    draft,
+                    note: "Source: none".into(),
+                    field_message: gpui::SharedString::default(),
+                    revealed: false,
+                }
+            })
+            .collect();
+        let reads: Vec<_> = ModelRegistry::providers()
+            .iter()
+            .copied()
+            .map(|provider| {
+                let url = provider.base_url().to_owned();
+                (provider, cx.read_credentials(&url))
+            })
+            .collect();
         cx.spawn(async move |this, cx| {
-            let result = read.await;
+            let mut loaded = Vec::new();
+            for (provider, read) in reads {
+                loaded.push((provider, read.await));
+            }
             this.update(cx, |this, cx| {
-                match result {
-                    Ok(Some((_, bytes))) => {
-                        if let Ok(text) = String::from_utf8(bytes)
-                            && normalize_key(&text).is_ok()
-                        {
-                            this.keys.memory.write(ProviderId::Bfl, &text).ok();
-                            this.note = "Source: credential store".into();
+                for (provider, result) in loaded {
+                    match result {
+                        Ok(Some((_, bytes))) => {
+                            if let Ok(text) = String::from_utf8(bytes)
+                                && normalize_key(&text).is_ok()
+                            {
+                                this.keys.memory.write(provider, &text).ok();
+                                this.row_mut(provider).note = "Source: credential store".into();
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(_) => {
+                            this.row_mut(provider).note =
+                                "Credential store is unavailable. Keys stay in memory for this session."
+                                    .into();
                         }
                     }
-                    Ok(None) => {}
-                    Err(_) => {
-                        this.note = "Credential store is unavailable. Keys stay in memory for this session.".into();
-                    }
                 }
-                let _ = keys_for_load;
                 cx.notify();
             })
             .ok();
@@ -280,11 +376,8 @@ impl SettingsPanel {
             notifications,
             transport,
             keys,
-            draft,
-            note: "Source: none".into(),
-            field_message: gpui::SharedString::default(),
+            rows,
             test_log: Vec::new(),
-            revealed: false,
             data_directory: gpui::SharedString::default(),
         }
     }
@@ -295,8 +388,10 @@ impl SettingsPanel {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn set_draft(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.draft.update(cx, |input, cx| input.set_text(text, cx));
+    pub fn set_draft(&mut self, provider: ProviderId, text: &str, cx: &mut Context<Self>) {
+        self.row(provider)
+            .draft
+            .update(cx, |input, cx| input.set_text(text, cx));
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -304,21 +399,28 @@ impl SettingsPanel {
         self.test_log.clone()
     }
 
-    pub fn test_key(&mut self, cx: &mut Context<Self>) -> gpui::Task<()> {
-        let draft = self.draft.read(cx).text().to_owned();
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn provider_titles(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .map(|row| row.provider.display_name().to_owned())
+            .collect()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn row_note(&self, provider: ProviderId) -> &str {
+        self.row(provider).note.as_ref()
+    }
+
+    pub fn test_key(&mut self, provider: ProviderId, cx: &mut Context<Self>) -> gpui::Task<()> {
+        let draft = self.row(provider).draft.read(cx).text().to_owned();
         if let Ok(key) = normalize_key(&draft) {
-            self.keys.lock_session().set(ProviderId::Bfl, key);
+            self.keys.lock_session().set(provider, key);
         }
-        self.test_log.push("BFL key test".into());
-        log::debug!("BFL key test");
-        let request = HttpRequest {
-            method: Method::Get,
-            url: TEST_URL.to_owned(),
-            headers: Vec::new(),
-            auth: Some(ProviderId::Bfl),
-            body: Body::Empty,
-            max_body_bytes: 64 * 1024,
-        };
+        let label = format!("{} key test", provider.display_name());
+        log::debug!("{label}");
+        self.test_log.push(label);
+        let request = key_probe(provider);
         let response = self.transport.request(request, cx);
         let notes = self.notifications.clone();
         cx.spawn(async move |this, cx| {
@@ -342,25 +444,39 @@ impl SettingsPanel {
                 );
             });
             this.update(cx, |this, cx| {
-                this.note = text.into();
+                this.row_mut(provider).note = text.into();
                 cx.notify();
             })
             .ok();
         })
     }
 
-    fn save(&mut self, cx: &mut Context<Self>) {
-        let draft = self.draft.read(cx).text().to_owned();
+    fn row(&self, provider: ProviderId) -> &ProviderRow {
+        self.rows
+            .iter()
+            .find(|row| row.provider == provider)
+            .expect("registered provider")
+    }
+
+    fn row_mut(&mut self, provider: ProviderId) -> &mut ProviderRow {
+        self.rows
+            .iter_mut()
+            .find(|row| row.provider == provider)
+            .expect("registered provider")
+    }
+
+    fn save(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
+        let draft = self.row(provider).draft.read(cx).text().to_owned();
         let key = match normalize_key(&draft) {
             Ok(key) => key,
             Err(message) => {
-                self.field_message = message.into();
+                self.row_mut(provider).field_message = message.into();
                 cx.notify();
                 return;
             }
         };
-        self.field_message = gpui::SharedString::default();
-        let url = ProviderId::Bfl.base_url().to_owned();
+        self.row_mut(provider).field_message = gpui::SharedString::default();
+        let url = provider.base_url().to_owned();
         let secret = key.clone();
         let write = cx.write_credentials(&url, "api", secret.as_bytes());
         let keys = Arc::clone(&self.keys);
@@ -368,12 +484,12 @@ impl SettingsPanel {
             let stored = write.await.is_ok();
             this.update(cx, |this, cx| {
                 if stored {
-                    keys.memory.write(ProviderId::Bfl, &key).ok();
-                    this.note = "Source: credential store".into();
+                    keys.memory.write(provider, &key).ok();
+                    this.row_mut(provider).note = "Source: credential store".into();
                 } else {
-                    keys.memory.delete(ProviderId::Bfl).ok();
-                    keys.lock_session().set(ProviderId::Bfl, key);
-                    this.note =
+                    keys.memory.delete(provider).ok();
+                    keys.lock_session().set(provider, key);
+                    this.row_mut(provider).note =
                         "Credential store is unavailable. The key is kept for this session.".into();
                 }
                 cx.notify();
@@ -383,13 +499,14 @@ impl SettingsPanel {
         .detach();
     }
 
-    fn clear(&mut self, cx: &mut Context<Self>) {
-        let url = ProviderId::Bfl.base_url().to_owned();
+    fn clear(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
+        let url = provider.base_url().to_owned();
         let delete = cx.delete_credentials(&url);
-        self.keys.memory.delete(ProviderId::Bfl).ok();
-        self.keys.lock_session().clear(ProviderId::Bfl);
-        self.draft.update(cx, |input, cx| input.set_text("", cx));
-        self.note = "Source: none".into();
+        self.keys.memory.delete(provider).ok();
+        self.keys.lock_session().clear(provider);
+        let row = self.row_mut(provider);
+        row.draft.update(cx, |input, cx| input.set_text("", cx));
+        row.note = "Source: none".into();
         cx.spawn(async move |_, _| {
             delete.await.ok();
         })
@@ -397,67 +514,90 @@ impl SettingsPanel {
         cx.notify();
     }
 
-    fn reveal(&mut self, cx: &mut Context<Self>) {
-        self.revealed = !self.revealed;
-        let revealed = self.revealed;
-        self.draft
+    fn reveal(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
+        let revealed = !self.row(provider).revealed;
+        self.row_mut(provider).revealed = revealed;
+        self.row(provider)
+            .draft
             .update(cx, |input, cx| input.set_masked(!revealed, cx));
     }
 }
 
 impl Render for SettingsPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let note = self.note.clone();
-        let field_message = self.field_message.clone();
-        let reveal_label = if self.revealed { "Hide" } else { "Reveal" };
-        div()
+        let rows: Vec<_> = self
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.provider,
+                    row.draft.clone(),
+                    row.note.clone(),
+                    row.field_message.clone(),
+                    row.revealed,
+                )
+            })
+            .collect();
+        let mut column = div()
             .flex()
             .flex_col()
             .gap(px(10.0))
             .w_full()
-            .text_color(rgb(theme::TEXT))
-            .child(section_label("Black Forest Labs"))
-            .child(self.draft.clone())
-            .child(muted_text(note))
-            .when(!field_message.is_empty(), |column| {
-                column.child(
+            .text_color(rgb(theme::TEXT));
+        for (provider, draft, note, field_message, revealed) in rows {
+            let slug = match provider {
+                ProviderId::Bfl => "bfl",
+                ProviderId::Krea => "krea",
+            };
+            let reveal_label = if revealed { "Hide" } else { "Reveal" };
+            column = column
+                .child(section_label(provider.display_name()))
+                .child(draft)
+                .child(muted_text(note))
+                .when(!field_message.is_empty(), |column| {
+                    column.child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(theme::ERROR))
+                            .child(field_message),
+                    )
+                })
+                .child(
                     div()
-                        .text_sm()
-                        .text_color(rgb(theme::ERROR))
-                        .child(field_message),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(
-                        Button::filled("settings-save", "Save")
-                            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-                    )
-                    .child(
-                        Button::filled("settings-test", "Test").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.test_key(cx).detach();
-                            },
-                        )),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::ghost("settings-reveal", reveal_label)
-                            .on_click(cx.listener(|this, _, _, cx| this.reveal(cx))),
-                    )
-                    .child(
-                        Button::ghost("settings-clear", "Clear")
-                            .on_click(cx.listener(|this, _, _, cx| this.clear(cx))),
-                    ),
-            )
-            .child(field_row(
-                Some("Data directory"),
-                None,
-                div().text_sm().child(self.data_directory.clone()),
-            ))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            Button::filled(format!("settings-save-{slug}"), "Save").on_click(
+                                cx.listener(move |this, _, _, cx| this.save(provider, cx)),
+                            ),
+                        )
+                        .child(
+                            Button::filled(format!("settings-test-{slug}"), "Test").on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.test_key(provider, cx).detach();
+                                }),
+                            ),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            Button::ghost(format!("settings-reveal-{slug}"), reveal_label)
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.reveal(provider, cx)),
+                                ),
+                        )
+                        .child(
+                            Button::ghost(format!("settings-clear-{slug}"), "Clear").on_click(
+                                cx.listener(move |this, _, _, cx| this.clear(provider, cx)),
+                            ),
+                        ),
+                );
+        }
+        column.child(field_row(
+            Some("Data directory"),
+            None,
+            div().text_sm().child(self.data_directory.clone()),
+        ))
     }
 }
