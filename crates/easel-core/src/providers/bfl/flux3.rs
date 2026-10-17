@@ -856,7 +856,9 @@ mod provider_tests {
         let Body::Json(json) = &body.body else {
             panic!("json");
         };
-        insta::assert_json_snapshot!(json);
+        insta::with_settings!({ sort_maps => true }, {
+            insta::assert_json_snapshot!(json);
+        });
         let rendered = serde_json::to_string(json).unwrap();
         assert!(!rendered.contains("x-key"));
         assert!(!format!("{body:?}").contains("aGVsbG8="));
