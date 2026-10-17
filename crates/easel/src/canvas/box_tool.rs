@@ -4,8 +4,8 @@ use easel_core::geometry::Point;
 use easel_core::providers::bfl::flux3::compile_prompt;
 use easel_core::scene::BoxKind;
 use gpui::{
-    Focusable as _, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, prelude::*,
-    px,
+    CursorStyle, Focusable as _, Modifiers, MouseButton, TestAppContext, VisualTestContext, point,
+    prelude::*, px,
 };
 
 use crate::actions::{self, BoxTool, DeleteBox};
@@ -425,4 +425,54 @@ fn auto_without_a_frame_disables_the_box_tool(cx: &mut TestAppContext) {
     assert!(enabled);
     assert!(!hint);
     assert_eq!(tool, Tool::Select);
+}
+
+#[gpui::test]
+fn a_selected_handle_shows_the_resize_cursor(cx: &mut TestAppContext) {
+    let (window, mut cx) = open(cx);
+    let root = surface(&window, &mut cx);
+    root.update(&mut cx, |surface, cx| {
+        surface
+            .app_state
+            .update(cx, |app, cx| app.set_aspect_ratio("1:1", cx));
+    });
+    let canvas = root.read_with(&cx, |surface, _| surface.canvas.clone());
+    use_box_tool(&mut cx, &canvas);
+    drag(&mut cx, &canvas, (40.0, 30.0), (160.0, 110.0));
+    let (corner, north, east, inside) = canvas.read_with(&cx, |canvas, cx| {
+        let rect = canvas.app_state().read(cx).scene.boxes[0]
+            .src
+            .or(canvas.app_state().read(cx).scene.boxes[0].tgt)
+            .unwrap();
+        let viewport = canvas.viewport();
+        let view = super::view_of(&viewport, rect);
+        let bounds = canvas.content_bounds();
+        let at = |x: f32, y: f32| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
+        (
+            at(view.x, view.y),
+            at(view.x + view.w / 2.0, view.y),
+            at(view.x + view.w, view.y + view.h / 2.0),
+            at(view.x + view.w / 2.0, view.y + view.h / 2.0),
+        )
+    });
+    cx.simulate_mouse_move(corner, None, Modifiers::default());
+    assert_eq!(
+        canvas.read_with(&cx, |canvas, _| canvas.pointer()),
+        CursorStyle::ResizeUpLeftDownRight
+    );
+    cx.simulate_mouse_move(north, None, Modifiers::default());
+    assert_eq!(
+        canvas.read_with(&cx, |canvas, _| canvas.pointer()),
+        CursorStyle::ResizeUpDown
+    );
+    cx.simulate_mouse_move(east, None, Modifiers::default());
+    assert_eq!(
+        canvas.read_with(&cx, |canvas, _| canvas.pointer()),
+        CursorStyle::ResizeLeftRight
+    );
+    cx.simulate_mouse_move(inside, None, Modifiers::default());
+    assert_eq!(
+        canvas.read_with(&cx, |canvas, _| canvas.pointer()),
+        CursorStyle::Crosshair
+    );
 }

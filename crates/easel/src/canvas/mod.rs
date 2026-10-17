@@ -3,7 +3,9 @@ mod viewport;
 #[cfg(test)]
 mod box_tool;
 
-use easel_core::geometry::{Handle, Point, Rect, Size, ViewRect, Viewport, edge_at, hit_test};
+use easel_core::geometry::{
+    Handle, Point, Rect, Size, ViewRect, Viewport, edge_at, handle_at, hit_test,
+};
 use easel_core::scene::{BoxId, BoxKind};
 use gpui::{
     App, BorderStyle, Bounds, Context, CursorStyle, FocusHandle, Focusable, IntoElement,
@@ -27,6 +29,7 @@ pub struct Canvas {
     user_zoomed: bool,
     space_held: bool,
     last_cursor: Option<gpui::Point<Pixels>>,
+    pointer: CursorStyle,
     shown_image: Option<u64>,
     virtual_frame: Option<Size>,
     drag: Drag,
@@ -76,6 +79,7 @@ impl Canvas {
             user_zoomed: false,
             space_held: false,
             last_cursor: None,
+            pointer: CursorStyle::Crosshair,
             shown_image: None,
             virtual_frame: None,
             drag: Drag::Idle,
@@ -176,6 +180,39 @@ impl Canvas {
             .zoom_at(local, scroll_zoom_factor(event.delta));
         self.user_zoomed = true;
         cx.notify();
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn pointer(&self) -> CursorStyle {
+        self.pointer
+    }
+
+    fn note_pointer(&mut self, local: Point, cx: &mut Context<Self>) {
+        let next = match self.drag {
+            Drag::Resizing { handle, .. } => cursor_for(handle),
+            Drag::Idle => self.hover_cursor(local, cx),
+            _ => CursorStyle::Crosshair,
+        };
+        if next != self.pointer {
+            self.pointer = next;
+            cx.notify();
+        }
+    }
+
+    fn hover_cursor(&self, local: Point, cx: &App) -> CursorStyle {
+        let Some(selected) = self.app_state.read(cx).selected_box.clone() else {
+            return CursorStyle::Crosshair;
+        };
+        let Some((_, _, view)) = self
+            .box_views(cx)
+            .into_iter()
+            .find(|(id, _, _)| id == &selected)
+        else {
+            return CursorStyle::Crosshair;
+        };
+        handle_at(local, view)
+            .map(cursor_for)
+            .unwrap_or(CursorStyle::Crosshair)
     }
 
     fn pan_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
@@ -308,11 +345,12 @@ impl Canvas {
     }
 
     fn on_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let local = self.local_point(event.position);
+        self.note_pointer(local, cx);
         if matches!(self.drag, Drag::Idle) {
             self.pan_move(event, cx);
             return;
         }
-        let local = self.local_point(event.position);
         let image = self.viewport.view_to_image(local);
         let drag = std::mem::replace(&mut self.drag, Drag::Idle);
         match drag {
@@ -397,6 +435,7 @@ impl Canvas {
             Drag::DrawingTarget { start, .. } => self.finish_box(start, image, true, cx),
             _ => {}
         }
+        self.note_pointer(self.local_point(event.position), cx);
     }
 
     fn finish_box(&mut self, start: Point, end: Point, target: bool, cx: &mut Context<Self>) {
@@ -504,6 +543,15 @@ fn paint_marks(
                 window,
             );
         }
+    }
+}
+
+fn cursor_for(handle: Handle) -> CursorStyle {
+    match handle {
+        Handle::North | Handle::South => CursorStyle::ResizeUpDown,
+        Handle::East | Handle::West => CursorStyle::ResizeLeftRight,
+        Handle::NorthWest | Handle::SouthEast => CursorStyle::ResizeUpLeftDownRight,
+        Handle::NorthEast | Handle::SouthWest => CursorStyle::ResizeUpRightDownLeft,
     }
 }
 
@@ -872,7 +920,7 @@ impl Render for Canvas {
                     .id("canvas-hit")
                     .absolute()
                     .size_full()
-                    .cursor(CursorStyle::Crosshair)
+                    .cursor(self.pointer)
                     .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                         this.zoom_wheel(event, cx);
                     }))
