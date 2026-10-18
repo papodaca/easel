@@ -1321,6 +1321,52 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_steps_response_saves_the_model_image_and_the_search_suggestion(cx: &mut TestAppContext) {
+        let thought = b"\x89PNG\r\n\x1a\nthought".to_vec();
+        let bytes = png();
+        let thought_data = EncodedImage {
+            media_type: "image/png".into(),
+            bytes: thought,
+            width: 1,
+            height: 1,
+            content_hash: String::new(),
+        }
+        .base64();
+        let data = EncodedImage {
+            media_type: "image/png".into(),
+            bytes: bytes.clone(),
+            width: 1,
+            height: 1,
+            content_hash: String::new(),
+        }
+        .base64();
+        let suggestion = "<div class='search'>cats</div>";
+        let body = format!(
+            r#"{{"id":"interaction-1","status":"completed","steps":[{{"type":"thought","content":[{{"type":"image","mime_type":"image/png","data":"{thought_data}"}}]}},{{"type":"google_search_result","result":[{{"search_suggestions":"{suggestion}"}}]}},{{"type":"model_output","content":[{{"type":"text","text":"a golf ball"}},{{"type":"image","mime_type":"image/png","data":"{data}"}}]}}]}}"#
+        );
+        let harness = open_google(cx, vec![Ok(http(200, body))]);
+        harness
+            .runner
+            .update(cx, |runner, cx| runner.submit(google_request(), cx));
+        cx.run_until_parked();
+        let states = harness.runner.read_with(cx, |runner, _| runner.states());
+        assert!(matches!(states[0], JobState::Done { .. }), "{states:?}");
+        let id = harness.history.list().unwrap()[0].id.clone();
+        assert_eq!(
+            std::fs::read(harness.root.join(id.as_str()).join("result.png")).unwrap(),
+            bytes
+        );
+        assert_eq!(harness.history.suggestion(&id), suggestion);
+        assert!(
+            harness
+                .transport
+                .seen()
+                .iter()
+                .all(|request| !request.url.contains("cite.example"))
+        );
+    }
+
+    #[gpui::test]
     fn a_google_jpeg_keeps_the_decoded_bytes(cx: &mut TestAppContext) {
         let bytes = b"\xff\xd8\xffjpeg".to_vec();
         let harness = open_google(

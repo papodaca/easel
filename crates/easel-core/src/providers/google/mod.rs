@@ -301,30 +301,95 @@ fn decode_inline(response: &crate::http::HttpResponse) -> Option<crate::provider
         return None;
     }
     let value: serde_json::Value = serde_json::from_slice(&response.body).ok()?;
-    let data = value.get("output_image")?.get("data")?.as_str()?;
-    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).ok()?;
-    let mime = value
-        .get("output_image")
-        .and_then(|image| image.get("mime_type"))
-        .and_then(|mime| mime.as_str())
-        .unwrap_or("image/png")
-        .to_owned();
+    let (data, mime) = inline_image_fields(&value)?;
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &data).ok()?;
     let interaction_id = value
         .get("id")
         .and_then(|id| id.as_str())
-        .unwrap_or("")
-        .to_owned();
-    let suggestion = value
-        .get("search_suggestions")
-        .and_then(|suggestion| suggestion.as_str())
         .unwrap_or("")
         .to_owned();
     Some(crate::providers::InlineImage {
         bytes,
         mime,
         interaction_id,
-        suggestion,
+        suggestion: suggestion_text(&value),
     })
+}
+
+fn inline_image_fields(value: &serde_json::Value) -> Option<(String, String)> {
+    if let Some((data, mime)) = image_block(value.get("output_image")) {
+        return Some((data, mime));
+    }
+    let mut found = None;
+    let steps = value.get("steps").and_then(|steps| steps.as_array())?;
+    for step in steps {
+        if step.get("type").and_then(|kind| kind.as_str()) != Some("model_output") {
+            continue;
+        }
+        let Some(content) = step.get("content").and_then(|content| content.as_array()) else {
+            continue;
+        };
+        for block in content {
+            if let Some((data, mime)) = image_block(Some(block)) {
+                found = Some((data, mime));
+            }
+        }
+    }
+    found
+}
+
+fn image_block(block: Option<&serde_json::Value>) -> Option<(String, String)> {
+    let block = block?;
+    if block.get("type").and_then(|kind| kind.as_str()) == Some("text") {
+        return None;
+    }
+    let data = block.get("data").and_then(|data| data.as_str())?;
+    if data.is_empty() {
+        return None;
+    }
+    if let Some(kind) = block.get("type").and_then(|kind| kind.as_str())
+        && kind != "image"
+    {
+        return None;
+    }
+    let mime = block
+        .get("mime_type")
+        .and_then(|mime| mime.as_str())
+        .unwrap_or("image/png")
+        .to_owned();
+    Some((data.to_owned(), mime))
+}
+
+fn suggestion_text(value: &serde_json::Value) -> String {
+    if let Some(text) = value
+        .get("search_suggestions")
+        .and_then(|suggestion| suggestion.as_str())
+        && !text.is_empty()
+    {
+        return text.to_owned();
+    }
+    let mut found = String::new();
+    let Some(steps) = value.get("steps").and_then(|steps| steps.as_array()) else {
+        return found;
+    };
+    for step in steps {
+        if step.get("type").and_then(|kind| kind.as_str()) != Some("google_search_result") {
+            continue;
+        }
+        let Some(results) = step.get("result").and_then(|result| result.as_array()) else {
+            continue;
+        };
+        for result in results {
+            if let Some(html) = result
+                .get("search_suggestions")
+                .and_then(|suggestion| suggestion.as_str())
+                && !html.is_empty()
+            {
+                found = html.to_owned();
+            }
+        }
+    }
+    found
 }
 
 pub const BODY_CAP: usize = 20 * 1024 * 1024;
