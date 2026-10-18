@@ -46,7 +46,7 @@ pub fn compile_prompt(scene: &Scene, frame: Size) -> CompiledPrompt {
     let rows: Vec<Row<'_>> = scene
         .boxes
         .iter()
-        .map(|element| row_for(element, frame))
+        .map(|element| row_for(scene, element, frame))
         .collect();
     let rows_json = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string());
     CompiledPrompt {
@@ -56,7 +56,8 @@ pub fn compile_prompt(scene: &Scene, frame: Size) -> CompiledPrompt {
     }
 }
 
-fn row_for(element: &BoxElement, frame: Size) -> Row<'_> {
+fn row_for<'a>(scene: &'a Scene, element: &'a BoxElement, fallback: Size) -> Row<'a> {
+    let frame = frame_for(scene, element, fallback);
     match element.kind {
         BoxKind::Layout => Row::Layout(LayoutRow {
             id: element.id.as_str(),
@@ -80,14 +81,14 @@ fn row_for(element: &BoxElement, frame: Size) -> Row<'_> {
         }),
         BoxKind::Keep | BoxKind::Move => Row::Edit(EditRow {
             id: element.id.as_str(),
-            from: Some(from_label(element)),
+            from: from_label(element),
             src_bbox: element.src.map(|rect| grid(rect, frame)),
             tgt_bbox: element.tgt.map(|rect| grid(rect, frame)),
             desc: &element.desc,
         }),
         BoxKind::Remove => Row::Edit(EditRow {
             id: element.id.as_str(),
-            from: Some(from_label(element)),
+            from: from_label(element),
             src_bbox: element.src.map(|rect| grid(rect, frame)),
             tgt_bbox: None,
             desc: &element.desc,
@@ -95,8 +96,23 @@ fn row_for(element: &BoxElement, frame: Size) -> Row<'_> {
     }
 }
 
-fn from_label(element: &BoxElement) -> String {
-    format!("ref_image_{}", element.from_image.unwrap_or(0))
+fn frame_for(scene: &Scene, element: &BoxElement, fallback: Size) -> Size {
+    if element.kind == BoxKind::Layout && scene.source_image.is_none() {
+        return scene.frame().unwrap_or(fallback);
+    }
+    if let Some(index) = element.from_image
+        && let Some(size) = scene.slots().get(index).and_then(|image| image.size())
+    {
+        return size;
+    }
+    if element.kind == BoxKind::Layout {
+        return scene.frame().unwrap_or(fallback);
+    }
+    fallback
+}
+
+fn from_label(element: &BoxElement) -> Option<String> {
+    element.from_image.map(|index| format!("ref_image_{index}"))
 }
 
 fn grid(rect: Rect, frame: Size) -> [u16; 4] {
@@ -106,13 +122,19 @@ fn grid(rect: Rect, frame: Size) -> [u16; 4] {
 fn warnings_for(scene: &Scene, frame: Size) -> Vec<String> {
     let mut warnings = Vec::new();
     for element in &scene.boxes {
+        if element.kind != BoxKind::Layout && element.from_image.is_none() {
+            warnings.push(format!(
+                "{} has no image slot, so it was not sent as ref_image_0",
+                element.id.as_str()
+            ));
+        }
         if element.kind != BoxKind::New {
             continue;
         }
         let Some(rect) = element.tgt.or(element.src) else {
             continue;
         };
-        let [top, left, bottom, right] = grid(rect, frame);
+        let [top, left, bottom, right] = grid(rect, frame_for(scene, element, frame));
         if right.saturating_sub(left) < 40 || bottom.saturating_sub(top) < 25 {
             warnings.push(format!(
                 "{} is under 40×25 grid units; small new elements often fail",
@@ -681,6 +703,62 @@ mod tests {
                 .any(|warning| warning.to_ascii_lowercase().contains("ratio"))
         );
     }
+
+    #[test]
+    fn compile_prompt_grids_each_tile_against_its_own_size() {
+        let mut scene = Scene::empty();
+        scene.set_source(ImageRef::new("a.png", 100, 100));
+        scene.add_reference(ImageRef::new("b.png", 400, 200));
+        scene.prose = "keep <box_1> and <box_2>".into();
+        let spot = Rect {
+            x: 10,
+            y: 10,
+            w: 10,
+            h: 10,
+        };
+        let source_id = scene.add_box(spot, BoxKind::Keep);
+        scene.rename_box(&source_id, "box_1").unwrap();
+        scene.boxes.push(crate::scene::BoxElement {
+            id: crate::scene::BoxId::parse("box_2").unwrap(),
+            kind: BoxKind::Keep,
+            desc: String::new(),
+            src: Some(spot),
+            tgt: Some(spot),
+            from_image: Some(1),
+        });
+        let compiled = compile_prompt(&scene, Size { w: 100, h: 100 });
+        let rows: Value = serde_json::from_str(&compiled.rows_json).unwrap();
+        assert_eq!(rows[0]["src_bbox"], serde_json::json!([100, 100, 200, 200]));
+        assert_eq!(rows[1]["src_bbox"], serde_json::json!([50, 25, 100, 50]));
+    }
+
+    #[test]
+    fn unset_from_image_on_a_new_box_is_not_sent_as_the_source() {
+        let mut scene = Scene::empty();
+        scene.set_source(ImageRef::new("a.png", 100, 100));
+        scene.prose = "add <box_1>".into();
+        scene.boxes.push(crate::scene::BoxElement {
+            id: crate::scene::BoxId::parse("box_1").unwrap(),
+            kind: BoxKind::New,
+            desc: String::new(),
+            src: None,
+            tgt: Some(Rect {
+                x: 10,
+                y: 10,
+                w: 80,
+                h: 80,
+            }),
+            from_image: None,
+        });
+        let compiled = compile_prompt(&scene, Size { w: 100, h: 100 });
+        assert!(!compiled.text.contains("ref_image_0"));
+        assert!(
+            compiled
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("box_1"))
+        );
+    }
 }
 
 #[cfg(test)]
@@ -809,6 +887,33 @@ mod provider_tests {
         );
         let errors = Flux3.validate_for_submit(&scene, &values(), 1);
         assert!(errors.iter().any(|error| error.key == "boxes"));
+    }
+
+    #[test]
+    fn a_layout_box_stays_layout_inside_the_first_source() {
+        let mut scene = Scene::empty();
+        scene.aspect_ratio = Some("1:1".into());
+        scene.prose = "place <box_1>".into();
+        scene.add_box(
+            crate::geometry::Rect {
+                x: 100,
+                y: 100,
+                w: 200,
+                h: 200,
+            },
+            BoxKind::Layout,
+        );
+        scene.set_source(ImageRef::new("sq.png", 500, 500));
+        assert_eq!(scene.boxes[0].kind, BoxKind::Layout);
+        let rect = scene.boxes[0].src.unwrap();
+        assert!(rect.x >= 0 && rect.y >= 0);
+        assert!(rect.x + rect.w <= 500 && rect.y + rect.h <= 500);
+        let errors = Flux3.validate_for_submit(&scene, &values(), 1);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("cannot be used"))
+        );
     }
 
     #[test]

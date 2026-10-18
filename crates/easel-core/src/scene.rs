@@ -153,12 +153,26 @@ impl Scene {
     }
 
     pub fn add_box(&mut self, rect: Rect, kind: BoxKind) -> BoxId {
-        self.add_box_with_prefix(rect, kind, "box")
+        self.add_box_on(rect, kind, 0)
+    }
+
+    pub fn add_box_on(&mut self, rect: Rect, kind: BoxKind, slot: usize) -> BoxId {
+        self.add_box_with_prefix_on(rect, kind, "box", slot)
     }
 
     pub fn add_box_with_prefix(&mut self, rect: Rect, kind: BoxKind, prefix: &str) -> BoxId {
+        self.add_box_with_prefix_on(rect, kind, prefix, 0)
+    }
+
+    fn add_box_with_prefix_on(
+        &mut self,
+        rect: Rect,
+        kind: BoxKind,
+        prefix: &str,
+        slot: usize,
+    ) -> BoxId {
         let id = self.next_id(prefix);
-        let (src, tgt, from_image) = placed_rect(kind, rect);
+        let (src, tgt, from_image) = placed_rect(kind, rect, slot);
         self.boxes.push(BoxElement {
             id: id.clone(),
             kind,
@@ -202,6 +216,7 @@ impl Scene {
     pub fn collapse_move_boxes(&mut self) {
         for element in &mut self.boxes {
             if element.kind == BoxKind::Move
+                && element.from_image.unwrap_or(0) == 0
                 && let Some(tgt) = element.tgt
             {
                 element.src = Some(tgt);
@@ -229,23 +244,38 @@ impl Scene {
 
     pub fn set_source(&mut self, image: ImageRef) {
         let previous = self.frame();
+        let replacing = self.source_image.is_some();
         if self.source_image.is_none() && !self.references.is_empty() {
             self.prose = prose::shift_ref_tags(&self.prose, RefChange::InsertedAt(0));
             retarget_boxes(&mut self.boxes, RefChange::InsertedAt(0));
         }
+        let next = image.size();
         self.source_image = Some(image);
-        self.rescale_after(previous);
+        let (Some(previous), Some(next)) = (previous, next) else {
+            return;
+        };
+        if replacing {
+            for element in &mut self.boxes {
+                if element.from_image == Some(0) {
+                    rescale_rects(element, previous, next);
+                }
+            }
+        } else {
+            for element in &mut self.boxes {
+                if element.kind == BoxKind::Layout {
+                    rescale_rects(element, previous, next);
+                }
+            }
+        }
     }
 
     pub fn clear_source(&mut self) {
         if self.source_image.is_none() {
             return;
         }
-        let previous = self.frame();
         self.source_image = None;
         self.prose = prose::shift_ref_tags(&self.prose, RefChange::Removed(0));
         retarget_boxes(&mut self.boxes, RefChange::Removed(0));
-        self.rescale_after(previous);
     }
 
     pub fn add_reference(&mut self, image: ImageRef) {
@@ -257,12 +287,10 @@ impl Scene {
         if index >= slots.len() {
             return;
         }
-        let previous = self.frame();
         slots.remove(index);
         self.prose = prose::shift_ref_tags(&self.prose, RefChange::Removed(index));
         retarget_boxes(&mut self.boxes, RefChange::Removed(index));
         self.write_slots(slots);
-        self.rescale_after(previous);
     }
 
     pub fn move_reference(&mut self, from: usize, to: usize) {
@@ -270,16 +298,15 @@ impl Scene {
         if from >= slots.len() || to >= slots.len() || from == to {
             return;
         }
-        let previous = self.frame();
         let image = slots.remove(from);
         slots.insert(to, image);
         self.prose = prose::shift_ref_tags(&self.prose, RefChange::Moved { from, to });
         retarget_boxes(&mut self.boxes, RefChange::Moved { from, to });
         self.write_slots(slots);
-        self.rescale_after(previous);
     }
 
-    fn slots(&self) -> Vec<ImageRef> {
+    #[must_use]
+    pub fn slots(&self) -> Vec<ImageRef> {
         let mut slots = Vec::new();
         if let Some(source) = &self.source_image {
             slots.push(source.clone());
@@ -295,26 +322,6 @@ impl Scene {
         } else {
             self.source_image = None;
             self.references.clear();
-        }
-    }
-
-    fn rescale_after(&mut self, previous: Option<Size>) {
-        let Some(previous) = previous else {
-            return;
-        };
-        let Some(next) = self.frame() else {
-            return;
-        };
-        if previous == next {
-            return;
-        }
-        for element in &mut self.boxes {
-            if let Some(src) = element.src {
-                element.src = Some(Rect::from_grid(src.to_grid(previous), next));
-            }
-            if let Some(tgt) = element.tgt {
-                element.tgt = Some(Rect::from_grid(tgt.to_grid(previous), next));
-            }
         }
     }
 
@@ -338,12 +345,28 @@ impl Scene {
     }
 }
 
-fn placed_rect(kind: BoxKind, rect: Rect) -> (Option<Rect>, Option<Rect>, Option<usize>) {
+fn placed_rect(
+    kind: BoxKind,
+    rect: Rect,
+    slot: usize,
+) -> (Option<Rect>, Option<Rect>, Option<usize>) {
     match kind {
         BoxKind::Layout => (Some(rect), None, None),
-        BoxKind::New => (None, Some(rect), None),
-        BoxKind::Keep => (Some(rect), Some(rect), Some(0)),
-        BoxKind::Move | BoxKind::Remove => (Some(rect), None, Some(0)),
+        BoxKind::New => (None, Some(rect), Some(slot)),
+        BoxKind::Keep => (Some(rect), Some(rect), Some(slot)),
+        BoxKind::Move | BoxKind::Remove => (Some(rect), None, Some(slot)),
+    }
+}
+
+fn rescale_rects(element: &mut BoxElement, from: Size, to: Size) {
+    if from == to {
+        return;
+    }
+    if let Some(src) = element.src {
+        element.src = Some(Rect::from_grid(src.to_grid(from), to));
+    }
+    if let Some(tgt) = element.tgt {
+        element.tgt = Some(Rect::from_grid(tgt.to_grid(from), to));
     }
 }
 
@@ -364,7 +387,18 @@ fn virtual_frame(ratio: Option<&str>) -> Option<Size> {
     })
 }
 
-fn retarget_boxes(boxes: &mut [BoxElement], change: RefChange) {
+fn retarget_boxes(boxes: &mut Vec<BoxElement>, change: RefChange) {
+    if let RefChange::Removed(removed) = change {
+        boxes.retain(|element| element.from_image != Some(removed));
+        for element in boxes {
+            if let Some(index) = element.from_image
+                && index > removed
+            {
+                element.from_image = Some(index - 1);
+            }
+        }
+        return;
+    }
     for element in boxes {
         element.from_image = element.from_image.and_then(|index| change.map_index(index));
     }
@@ -521,21 +555,27 @@ mod tests {
         let mut square_scene = Scene::empty();
         square_scene.aspect_ratio = Some("1:1".into());
         square_scene.set_source(ImageRef::new("sq.png", 2000, 2000));
+        square_scene.add_reference(ImageRef::new("extra.png", 400, 200));
         let placed = rect(400, 400, 200, 200);
         square_scene.add_box(placed, BoxKind::Keep);
+        let survivor = rect(10, 10, 20, 20);
+        square_scene.boxes.push(BoxElement {
+            id: BoxId::parse("box_2").unwrap(),
+            kind: BoxKind::Keep,
+            desc: String::new(),
+            src: Some(survivor),
+            tgt: Some(survivor),
+            from_image: Some(1),
+        });
         square_scene.clear_source();
         assert_eq!(
             square_scene.frame(),
             Some(crate::geometry::Size { w: 1000, h: 1000 })
         );
-        let mapped = grid_scaled(
-            placed,
-            crate::geometry::Size { w: 2000, h: 2000 },
-            crate::geometry::Size { w: 1000, h: 1000 },
-        );
-        let kept = square_scene.boxes[0].src.unwrap();
-        assert_eq!(kept, mapped);
-        assert_eq!(square_scene.boxes[0].tgt.unwrap(), mapped);
+        assert_eq!(square_scene.boxes.len(), 1);
+        assert_eq!(square_scene.boxes[0].from_image, Some(0));
+        assert_eq!(square_scene.boxes[0].src, Some(survivor));
+        assert_eq!(square_scene.boxes[0].tgt, Some(survivor));
     }
 
     #[test]
@@ -597,5 +637,134 @@ mod tests {
         };
         assert_eq!(element.src, Some(expected));
         assert_eq!(element.tgt, Some(expected));
+    }
+
+    #[test]
+    fn new_box_on_a_later_slot_records_that_slot() {
+        let mut scene = Scene::empty();
+        scene.set_source(ImageRef::new("a.png", 100, 100));
+        scene.add_reference(ImageRef::new("b.png", 400, 200));
+        let id = scene.add_box_on(rect(10, 10, 20, 20), BoxKind::New, 1);
+        let element = scene.boxes.iter().find(|element| element.id == id).unwrap();
+        assert_eq!(element.from_image, Some(1));
+        assert_eq!(element.tgt, Some(rect(10, 10, 20, 20)));
+        assert!(element.src.is_none());
+
+        let mut layout = Scene::empty();
+        layout.aspect_ratio = Some("1:1".into());
+        layout.add_box(rect(0, 0, 10, 10), BoxKind::Layout);
+        assert_eq!(layout.boxes[0].from_image, None);
+    }
+
+    fn keep_on(scene: &mut Scene, id: &str, slot: usize, spot: Rect) {
+        scene.boxes.push(BoxElement {
+            id: BoxId::parse(id).unwrap(),
+            kind: BoxKind::Keep,
+            desc: String::new(),
+            src: Some(spot),
+            tgt: Some(spot),
+            from_image: Some(slot),
+        });
+    }
+
+    #[test]
+    fn a_box_on_the_second_tile_survives_replacing_the_source() {
+        let mut scene = Scene::empty();
+        scene.set_source(ImageRef::new("a.png", 100, 100));
+        scene.add_reference(ImageRef::new("b.png", 400, 200));
+        let spot = rect(10, 10, 10, 10);
+        scene.add_box(spot, BoxKind::Keep);
+        keep_on(&mut scene, "box_2", 1, spot);
+        scene.set_source(ImageRef::new("c.png", 200, 200));
+        let source_box = scene
+            .boxes
+            .iter()
+            .find(|element| element.from_image == Some(0))
+            .unwrap();
+        let other = scene
+            .boxes
+            .iter()
+            .find(|element| element.from_image == Some(1))
+            .unwrap();
+        assert_eq!(other.src, Some(spot));
+        assert_eq!(
+            source_box.src,
+            Some(grid_scaled(
+                spot,
+                Size { w: 100, h: 100 },
+                Size { w: 200, h: 200 },
+            ))
+        );
+    }
+
+    #[test]
+    fn moving_the_source_keeps_both_rectangles() {
+        let mut scene = Scene::empty();
+        scene.set_source(ImageRef::new("a.png", 100, 100));
+        scene.add_reference(ImageRef::new("b.png", 400, 200));
+        let spot = rect(10, 10, 10, 10);
+        scene.add_box(spot, BoxKind::Keep);
+        keep_on(&mut scene, "box_2", 1, spot);
+        scene.move_reference(0, 1);
+        let on_source = scene
+            .boxes
+            .iter()
+            .find(|element| element.id.as_str() == "box_1")
+            .unwrap();
+        let on_extra = scene
+            .boxes
+            .iter()
+            .find(|element| element.id.as_str() == "box_2")
+            .unwrap();
+        assert_eq!(on_source.src, Some(spot));
+        assert_eq!(on_source.from_image, Some(1));
+        assert_eq!(on_extra.src, Some(spot));
+        assert_eq!(on_extra.from_image, Some(0));
+    }
+
+    #[test]
+    fn removing_a_middle_tile_deletes_its_box_and_shifts_the_next() {
+        let mut scene = Scene::empty();
+        scene.set_source(ImageRef::new("a.png", 100, 100));
+        scene.add_reference(ImageRef::new("b.png", 100, 100));
+        scene.add_reference(ImageRef::new("c.png", 100, 100));
+        scene.prose = "use <ref_image_2>".into();
+        let spot = rect(10, 10, 10, 10);
+        keep_on(&mut scene, "gone_1", 1, spot);
+        keep_on(&mut scene, "stay_1", 2, spot);
+        scene.remove_reference(1);
+        assert!(
+            scene
+                .boxes
+                .iter()
+                .all(|element| element.id.as_str() != "gone_1")
+        );
+        assert_eq!(scene.boxes.len(), 1);
+        assert_eq!(scene.boxes[0].id.as_str(), "stay_1");
+        assert_eq!(scene.boxes[0].from_image, Some(1));
+        assert_eq!(scene.boxes[0].src, Some(spot));
+        assert_eq!(scene.prose, "use <ref_image_1>");
+    }
+
+    #[test]
+    fn collapse_move_boxes_leaves_a_move_on_another_tile() {
+        let mut scene = Scene::empty();
+        let src = rect(10, 10, 20, 20);
+        let tgt = rect(40, 40, 20, 20);
+        for (id, slot) in [("box_1", 0), ("box_2", 1)] {
+            scene.boxes.push(BoxElement {
+                id: BoxId::parse(id).unwrap(),
+                kind: BoxKind::Move,
+                desc: String::new(),
+                src: Some(src),
+                tgt: Some(tgt),
+                from_image: Some(slot),
+            });
+        }
+        scene.collapse_move_boxes();
+        assert_eq!(scene.boxes[0].src, Some(tgt));
+        assert_eq!(scene.boxes[0].tgt, Some(tgt));
+        assert_eq!(scene.boxes[1].src, Some(src));
+        assert_eq!(scene.boxes[1].tgt, Some(tgt));
     }
 }
