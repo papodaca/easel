@@ -15,6 +15,10 @@ pub struct FieldError {
 pub enum ProviderError {
     #[error("authentication failed")]
     Auth,
+    #[error("blocked by safety")]
+    Blocked,
+    #[error("model not found")]
+    ModelNotFound,
     #[error("{}", credits_message(hint))]
     OutOfCredits {
         #[serde(default)]

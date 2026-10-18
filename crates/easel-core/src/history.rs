@@ -34,6 +34,8 @@ pub struct Entry {
     pub state: JobState,
     pub poll_url: Option<String>,
     pub cost: Option<f64>,
+    pub provider: String,
+    pub model_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,7 +70,10 @@ struct StoredRequest {
 struct Meta {
     state: JobState,
     model_id: String,
+    #[serde(default)]
     provider: String,
+    #[serde(default)]
+    interaction_id: String,
     created_at: String,
     cost: Option<f64>,
     prompt: Option<String>,
@@ -140,13 +145,14 @@ impl HistoryStore {
         let meta = Meta {
             state: state.clone(),
             model_id: request.model_id.clone(),
-            provider: "bfl".into(),
+            provider: provider_name(&request.model_id),
             created_at: request.created_at.clone(),
             cost: submitted.quote.map(|quote| quote.cost),
             prompt: None,
             duration: None,
             poll_url: Some(submitted.poll_url.to_string()),
             error: None,
+            interaction_id: String::new(),
         };
         self.write_meta(id, &meta)?;
         self.upsert_row(IndexRow {
@@ -161,6 +167,8 @@ impl HistoryStore {
             state: meta.state,
             poll_url: meta.poll_url,
             cost: meta.cost,
+            provider: meta.provider,
+            model_id: meta.model_id,
         })
     }
 
@@ -207,6 +215,87 @@ impl HistoryStore {
             state: meta.state,
             bytes: dir_bytes(&dir)?,
             cost: meta.cost,
+        })?;
+        Ok(())
+    }
+
+    /// Write a finished Google image without a poll row.
+    pub fn complete_inline(
+        &self,
+        id: &JobId,
+        request: &JobRequest,
+        interaction_id: &str,
+        result_bytes: &[u8],
+        mime: &str,
+        thumb_bytes: &[u8],
+    ) -> Result<(), StoreError> {
+        let dir = self.prepare_dir(id)?;
+        self.write_request(&dir, request)?;
+        let file_name = match mime {
+            "image/jpeg" => "result.jpg",
+            "image/webp" => "result.webp",
+            _ => "result.png",
+        };
+        write_private(&dir.join(file_name), result_bytes)?;
+        write_private(&dir.join("thumb.jpg"), thumb_bytes)?;
+        let state = JobState::Done {
+            result_path: file_name.into(),
+            cost: None,
+        };
+        let meta = Meta {
+            state: state.clone(),
+            model_id: request.model_id.clone(),
+            provider: provider_name(&request.model_id),
+            created_at: request.created_at.clone(),
+            cost: None,
+            prompt: None,
+            duration: None,
+            poll_url: None,
+            error: None,
+            interaction_id: interaction_id.to_owned(),
+        };
+        self.write_meta(id, &meta)?;
+        self.upsert_row(IndexRow {
+            id: id.as_str().to_string(),
+            created_at: request.created_at.clone(),
+            state,
+            bytes: dir_bytes(&dir)?,
+            cost: None,
+        })?;
+        Ok(())
+    }
+
+    /// Write a failed Google row that was never polled. `fail` cannot create this row.
+    pub fn fail_unpolled(
+        &self,
+        id: &JobId,
+        request: &JobRequest,
+        error: &ProviderError,
+    ) -> Result<(), StoreError> {
+        let dir = self.prepare_dir(id)?;
+        self.write_request(&dir, request)?;
+        let state = JobState::Failed {
+            error: error.clone(),
+        };
+        let meta = Meta {
+            state: state.clone(),
+            model_id: request.model_id.clone(),
+            provider: provider_name(&request.model_id),
+            created_at: request.created_at.clone(),
+            cost: None,
+            prompt: None,
+            duration: None,
+            poll_url: None,
+            error: Some(error.clone()),
+            interaction_id: String::new(),
+        };
+        self.write_meta(id, &meta)?;
+        self.upsert_row(IndexRow {
+            id: id.as_str().to_string(),
+            created_at: request.created_at.clone(),
+            state,
+            bytes: dir_bytes(&dir)?,
+            cost: None,
         })?;
         Ok(())
     }
@@ -336,6 +425,8 @@ impl HistoryStore {
                 state: meta.state,
                 poll_url: meta.poll_url,
                 cost: meta.cost,
+                provider: meta.provider,
+                model_id: meta.model_id,
             });
         }
         Ok(entries)
@@ -370,6 +461,29 @@ impl HistoryStore {
 
     fn entry_dir(&self, id: &JobId) -> Result<PathBuf, StoreError> {
         Ok(self.root.join(id.as_str()))
+    }
+
+    fn prepare_dir(&self, id: &JobId) -> Result<PathBuf, StoreError> {
+        let dir = self.entry_dir(id)?;
+        fs::create_dir_all(&dir).map_err(io_err)?;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(io_err)?;
+        Ok(dir)
+    }
+
+    fn write_request(&self, dir: &std::path::Path, request: &JobRequest) -> Result<(), StoreError> {
+        let stored = StoredRequest {
+            model_id: request.model_id.clone(),
+            compiled_prompt: request.compiled_prompt.clone(),
+            params: serde_json::Value::Object(request.params.clone().into_iter().collect()),
+            images: request.images.iter().map(EncodedImage::summary).collect(),
+            box_snapshot: request.box_snapshot.clone(),
+            created_at: request.created_at.clone(),
+        };
+        write_private(
+            &dir.join("request.json"),
+            &serde_json::to_vec_pretty(&stored)
+                .map_err(|err| StoreError::Protocol(err.to_string()))?,
+        )
     }
 
     fn write_meta(&self, id: &JobId, meta: &Meta) -> Result<(), StoreError> {
@@ -449,6 +563,22 @@ fn dir_bytes(dir: &Path) -> Result<u64, StoreError> {
         }
     }
     Ok(total)
+}
+
+fn provider_name(model_id: &str) -> String {
+    use crate::model_spec::ProviderId;
+    use crate::providers::ModelRegistry;
+
+    ModelRegistry::specs()
+        .iter()
+        .find(|spec| spec.id == model_id)
+        .map(|spec| match spec.provider {
+            ProviderId::Bfl => "bfl",
+            ProviderId::Krea => "krea",
+            ProviderId::Google => "google",
+        })
+        .unwrap_or("")
+        .to_owned()
 }
 
 fn io_err(error: impl std::fmt::Display) -> StoreError {
@@ -746,5 +876,86 @@ mod tests {
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(failed.is_err());
         assert_eq!(fs::read(root.join("history.json")).unwrap(), before);
+    }
+
+    #[test]
+    fn a_bfl_begin_still_records_provider_bfl() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        let id = JobId::parse("bfljob").unwrap();
+        store
+            .begin(&id, &request_with_images(), &submitted("bfljob"))
+            .unwrap();
+        let meta: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join("bfljob/meta.json")).unwrap()).unwrap();
+        assert_eq!(meta["provider"], "bfl");
+        assert!(meta["poll_url"].is_string());
+    }
+
+    #[test]
+    fn complete_writes_a_missing_interaction_id_back_as_empty() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        let id = JobId::parse("oldjob").unwrap();
+        store
+            .begin(&id, &request_with_images(), &submitted("oldjob"))
+            .unwrap();
+        let path = root.join("oldjob/meta.json");
+        let mut meta: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        meta.as_object_mut().unwrap().remove("interaction_id");
+        fs::write(&path, serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
+        store
+            .complete(
+                &id,
+                &png_bytes(8),
+                "image/png",
+                b"thumb",
+                &Completion::default(),
+            )
+            .unwrap();
+        let written: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["interaction_id"], "");
+        assert_eq!(written["model_id"], "flux-3-image");
+    }
+
+    #[test]
+    fn inline_png_and_jpeg_keep_the_payload_bytes() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        let png_id = JobId::parse("gpng").unwrap();
+        let png = png_bytes(4);
+        let interaction = "i".repeat(70);
+        store
+            .complete_inline(
+                &png_id,
+                &request_with_images(),
+                &interaction,
+                &png,
+                "image/png",
+                b"thumb",
+            )
+            .unwrap();
+        assert_eq!(fs::read(root.join("gpng/result.png")).unwrap(), png);
+        assert!(!root.join("gpng").join(&interaction).exists());
+        let meta: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join("gpng/meta.json")).unwrap()).unwrap();
+        assert_eq!(meta["interaction_id"], interaction);
+        assert!(meta["poll_url"].is_null());
+        assert_ne!(png_id.as_str(), interaction);
+
+        let jpeg_id = JobId::parse("gjpeg").unwrap();
+        let jpeg = b"jpeg-payload".to_vec();
+        store
+            .complete_inline(
+                &jpeg_id,
+                &request_with_images(),
+                "",
+                &jpeg,
+                "image/jpeg",
+                b"thumb",
+            )
+            .unwrap();
+        assert_eq!(fs::read(root.join("gjpeg/result.jpg")).unwrap(), jpeg);
     }
 }

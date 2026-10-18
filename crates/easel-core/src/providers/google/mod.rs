@@ -257,8 +257,58 @@ fn refused_poll(submitted: &crate::providers::Submitted) -> crate::http::HttpReq
     }
 }
 
-fn inline_only() -> crate::error::ProviderError {
-    crate::error::ProviderError::Protocol("google returns the image on the submit response".into())
+fn google_failure(response: &crate::http::HttpResponse) -> Option<crate::error::ProviderError> {
+    use crate::error::ProviderError;
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&response.body).unwrap_or(serde_json::Value::Null);
+    let code = value
+        .get("error")
+        .and_then(|error| error.get("status").and_then(|status| status.as_str()))
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(|error| error.get("code").and_then(|code| code.as_str()))
+        })
+        .unwrap_or("");
+    match (response.status, code) {
+        (
+            400,
+            "safety"
+            | "image_safety"
+            | "image_prohibited_content"
+            | "image_recitation"
+            | "image_other",
+        ) => Some(ProviderError::Blocked),
+        (401, _) => Some(ProviderError::Auth),
+        (404, "model_not_found") => Some(ProviderError::ModelNotFound),
+        _ => None,
+    }
+}
+
+fn decode_inline(response: &crate::http::HttpResponse) -> Option<crate::providers::InlineImage> {
+    if response.status != 200 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&response.body).ok()?;
+    let data = value.get("output_image")?.get("data")?.as_str()?;
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).ok()?;
+    let mime = value
+        .get("output_image")
+        .and_then(|image| image.get("mime_type"))
+        .and_then(|mime| mime.as_str())
+        .unwrap_or("image/png")
+        .to_owned();
+    let interaction_id = value
+        .get("id")
+        .and_then(|id| id.as_str())
+        .unwrap_or("")
+        .to_owned();
+    Some(crate::providers::InlineImage {
+        bytes,
+        mime,
+        interaction_id,
+    })
 }
 
 macro_rules! impl_google {
@@ -301,16 +351,30 @@ macro_rules! impl_google {
 
             fn parse_submit(
                 &self,
-                _response: &crate::http::HttpResponse,
+                response: &crate::http::HttpResponse,
             ) -> Result<crate::providers::Submitted, crate::error::ProviderError> {
-                Err(inline_only())
+                if let Some(error) = google_failure(response) {
+                    return Err(error);
+                }
+                Err(crate::error::ProviderError::Protocol(
+                    "missing output_image".into(),
+                ))
+            }
+
+            fn inline_image(
+                &self,
+                response: &crate::http::HttpResponse,
+            ) -> Option<crate::providers::InlineImage> {
+                decode_inline(response)
             }
 
             fn parse_poll(
                 &self,
                 _response: &crate::http::HttpResponse,
             ) -> crate::providers::PollOutcome {
-                crate::providers::PollOutcome::Failed(inline_only())
+                crate::providers::PollOutcome::Failed(crate::error::ProviderError::Protocol(
+                    "google returns the image on the submit response".into(),
+                ))
             }
         }
     };

@@ -21,6 +21,7 @@ struct Slot {
     token: u64,
     state: JobState,
     request: JobRequest,
+    local_id: Option<easel_core::providers::JobId>,
     submitted: Option<Submitted>,
     elapsed: Duration,
     bytes: Option<Vec<u8>>,
@@ -85,6 +86,7 @@ impl JobRunner {
             token,
             state: JobState::Queued,
             request,
+            local_id: None,
             submitted: None,
             elapsed: Duration::ZERO,
             bytes: None,
@@ -170,7 +172,8 @@ impl JobRunner {
                 id: slot
                     .submitted
                     .as_ref()
-                    .map(|submitted| submitted.job_id.clone()),
+                    .map(|submitted| submitted.job_id.clone())
+                    .or_else(|| slot.local_id.clone()),
                 state: slot.state.clone(),
                 cost: slot.cost,
                 status: slot.status.clone(),
@@ -207,6 +210,11 @@ impl JobRunner {
             let Some(poll_url) = entry.poll_url.clone() else {
                 continue;
             };
+            if entry.provider != "bfl" {
+                let error = ProviderError::Protocol("cannot resume this provider".into());
+                let _ = self.history.fail(&entry.id, &error);
+                continue;
+            }
             if !ProviderId::Bfl.allows_url(&poll_url) {
                 let error = ProviderError::Protocol("unexpected result host".into());
                 let _ = self.history.fail(&entry.id, &error);
@@ -230,6 +238,7 @@ impl JobRunner {
                     progress: None,
                 },
                 request: empty_request(),
+                local_id: None,
                 submitted: Some(Submitted {
                     job_id: entry.id,
                     poll_url: url,
@@ -413,6 +422,14 @@ impl JobRunner {
             }
         };
         self.note_headers(token, &response, cx);
+        let inline = self
+            .providers
+            .get(&token)
+            .and_then(|provider| provider.inline_image(&response));
+        if let Some(image) = inline {
+            self.finish_inline(token, image, cx);
+            return;
+        }
         let parsed = self
             .providers
             .get(&token)
@@ -438,7 +455,13 @@ impl JobRunner {
                     .providers
                     .get(&token)
                     .is_some_and(|provider| provider.spec().beta);
-                if beta && matches!(error, ProviderError::Auth) {
+                if matches!(
+                    error,
+                    ProviderError::Blocked | ProviderError::Auth | ProviderError::ModelNotFound
+                ) && !beta
+                {
+                    self.finish_unpolled(token, error, cx);
+                } else if beta && matches!(error, ProviderError::Auth) {
                     self.probe_beta(token, cx);
                 } else {
                     self.fail(token, error, cx);
@@ -446,6 +469,68 @@ impl JobRunner {
             }
             None => self.fail(token, ProviderError::Protocol("unknown model".into()), cx),
         }
+    }
+
+    fn finish_inline(
+        &mut self,
+        token: u64,
+        image: easel_core::providers::InlineImage,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dead(token) {
+            return;
+        }
+        let Some(request) = self.slot_mut(token).map(|slot| slot.request.clone()) else {
+            return;
+        };
+        let id = mint_job_id();
+        let file_name = match image.mime.as_str() {
+            "image/jpeg" => "result.jpg",
+            "image/webp" => "result.webp",
+            _ => "result.png",
+        };
+        let thumb = easel_core::image_prep::thumbnail(&image.bytes, 256).unwrap_or_default();
+        if let Err(error) = self.history.complete_inline(
+            &id,
+            &request,
+            &image.interaction_id,
+            &image.bytes,
+            &image.mime,
+            &thumb,
+        ) {
+            self.fail(token, ProviderError::Protocol(error.to_string()), cx);
+            return;
+        }
+        if let Some(slot) = self.slot_mut(token) {
+            slot.local_id = Some(id);
+            slot.bytes = Some(image.bytes);
+            let state = std::mem::replace(&mut slot.state, JobState::Queued);
+            slot.state = advance(
+                state,
+                JobEvent::InlineReady {
+                    result_path: format!("history/{file_name}"),
+                },
+            );
+            slot.status = "Done".into();
+        }
+        cx.notify();
+        self.pump(cx);
+    }
+
+    fn finish_unpolled(&mut self, token: u64, error: ProviderError, cx: &mut Context<Self>) {
+        if self.dead(token) {
+            return;
+        }
+        let Some(request) = self.slot_mut(token).map(|slot| slot.request.clone()) else {
+            return;
+        };
+        let id = mint_job_id();
+        if self.history.fail_unpolled(&id, &request, &error).is_ok()
+            && let Some(slot) = self.slot_mut(token)
+        {
+            slot.local_id = Some(id);
+        }
+        self.fail(token, error, cx);
     }
 
     fn probe_beta(&mut self, token: u64, cx: &mut Context<Self>) {
@@ -893,6 +978,17 @@ impl JobRunner {
     }
 }
 
+fn mint_job_id() -> easel_core::providers::JobId {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let tick = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    easel_core::providers::JobId::parse(&format!("g{nanos}{tick}")).expect("local job id")
+}
+
 fn empty_request() -> JobRequest {
     JobRequest {
         model_id: "flux-3-image".into(),
@@ -1128,6 +1224,241 @@ mod tests {
                 .any(|state| matches!(state, JobState::Failed { .. })),
             "{states:?}"
         );
+    }
+
+    fn open_google(
+        cx: &mut TestAppContext,
+        script: Vec<Result<HttpResponse, TransportError>>,
+    ) -> Harness {
+        let transport = Arc::new(FakeTransport::scripted(script));
+        let keys: Arc<dyn KeyResolver> = Arc::new(
+            MapKeys::default()
+                .insert(ProviderId::Bfl, "bfl-test-key-xyz")
+                .insert(ProviderId::Google, "gemini-test-key"),
+        );
+        let root = temp_dir("google-job");
+        let history = Arc::new(HistoryStore::open(&root).unwrap());
+        let runner = cx.update({
+            let transport = transport.clone() as Arc<dyn HttpTransport>;
+            let history = history.clone();
+            move |cx| {
+                cx.new(|_| {
+                    JobRunner::new(
+                        easel_core::providers::resolve_model,
+                        transport,
+                        keys,
+                        history,
+                    )
+                })
+            }
+        });
+        Harness {
+            runner,
+            transport,
+            history,
+            root,
+        }
+    }
+
+    fn google_request() -> JobRequest {
+        let mut request = request();
+        request.model_id = "gemini-nano-banana-2.1".into();
+        request
+    }
+
+    fn image_response(mime: &str, bytes: &[u8], interaction: &str) -> String {
+        let data = EncodedImage {
+            media_type: mime.into(),
+            bytes: bytes.to_vec(),
+            width: 1,
+            height: 1,
+            content_hash: String::new(),
+        }
+        .base64();
+        format!(
+            r#"{{"id":"{interaction}","output_image":{{"mime_type":"{mime}","data":"{data}"}}}}"#
+        )
+    }
+
+    #[gpui::test]
+    fn a_google_png_lands_in_history_without_a_poll(cx: &mut TestAppContext) {
+        let bytes = png();
+        let interaction = "x".repeat(70);
+        let harness = open_google(
+            cx,
+            vec![Ok(http(
+                200,
+                image_response("image/png", &bytes, &interaction),
+            ))],
+        );
+        harness
+            .runner
+            .update(cx, |runner, cx| runner.submit(google_request(), cx));
+        cx.run_until_parked();
+        assert_eq!(harness.transport.seen().len(), 1);
+        assert_eq!(harness.transport.seen()[0].method, Method::Post);
+        let states = harness.runner.read_with(cx, |runner, _| runner.states());
+        assert!(matches!(states[0], JobState::Done { .. }), "{states:?}");
+        let listed = harness.history.list().unwrap();
+        let id = listed[0].id.as_str();
+        assert_ne!(id, interaction);
+        assert_eq!(
+            std::fs::read(harness.root.join(id).join("result.png")).unwrap(),
+            bytes
+        );
+        let meta: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(harness.root.join(id).join("meta.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(meta["interaction_id"], interaction);
+        assert!(meta["poll_url"].is_null());
+        assert_eq!(meta["provider"], "google");
+    }
+
+    #[gpui::test]
+    fn a_google_jpeg_keeps_the_decoded_bytes(cx: &mut TestAppContext) {
+        let bytes = b"\xff\xd8\xffjpeg".to_vec();
+        let harness = open_google(
+            cx,
+            vec![Ok(http(200, image_response("image/jpeg", &bytes, "short")))],
+        );
+        harness
+            .runner
+            .update(cx, |runner, cx| runner.submit(google_request(), cx));
+        cx.run_until_parked();
+        let id = harness.history.list().unwrap()[0].id.as_str().to_owned();
+        assert_eq!(
+            std::fs::read(harness.root.join(&id).join("result.jpg")).unwrap(),
+            bytes
+        );
+    }
+
+    #[gpui::test]
+    fn google_safety_and_auth_failures_write_a_row_and_no_image(cx: &mut TestAppContext) {
+        for (status, body, line) in [
+            (
+                400,
+                r#"{"error":{"status":"image_safety"}}"#,
+                "blocked by safety",
+            ),
+            (
+                400,
+                r#"{"error":{"status":"image_prohibited_content"}}"#,
+                "blocked by safety",
+            ),
+            (
+                401,
+                r#"{"error":{"status":"UNAUTHENTICATED"}}"#,
+                "authentication failed",
+            ),
+            (
+                404,
+                r#"{"error":{"status":"model_not_found"}}"#,
+                "model not found",
+            ),
+        ] {
+            let harness = open_google(cx, vec![Ok(http(status, body))]);
+            harness
+                .runner
+                .update(cx, |runner, cx| runner.submit(google_request(), cx));
+            cx.run_until_parked();
+            assert_eq!(harness.transport.seen().len(), 1, "{line}");
+            assert_eq!(harness.transport.seen()[0].method, Method::Post);
+            let listed = harness.history.list().unwrap();
+            let JobState::Failed { error } = &listed[0].state else {
+                panic!("{line} {:?}", listed);
+            };
+            assert_eq!(error.to_string(), line);
+            let id = listed[0].id.as_str();
+            assert!(harness.root.join(id).join("request.json").is_file());
+            assert!(harness.root.join(id).join("meta.json").is_file());
+            assert!(
+                std::fs::read_dir(harness.root.join(id))
+                    .unwrap()
+                    .all(|entry| {
+                        let name = entry.unwrap().file_name();
+                        let name = name.to_string_lossy();
+                        !name.starts_with("result.")
+                    })
+            );
+            let app = cx.update(|cx| cx.new(|_| crate::app_state::AppState::new()));
+            let strip = cx.update({
+                let runner = harness.runner.clone();
+                let history = harness.history.clone();
+                move |cx| {
+                    cx.new(|cx| {
+                        crate::bottom_strip::BottomStrip::new(app, Some(runner), history, cx)
+                    })
+                }
+            });
+            strip.update(cx, |strip, cx| strip.refresh(cx));
+            let lines = strip.read_with(cx, |strip, _| strip.lines());
+            assert!(lines.iter().any(|text| text == line), "{lines:?}");
+        }
+    }
+
+    #[gpui::test]
+    fn dismiss_during_the_google_post_writes_nothing(cx: &mut TestAppContext) {
+        let harness = open_google(
+            cx,
+            vec![Ok(http(200, image_response("image/png", &png(), "late")))],
+        );
+        harness
+            .runner
+            .update(cx, |runner, cx| runner.submit(google_request(), cx));
+        harness
+            .runner
+            .update(cx, |runner, cx| runner.dismiss(0, cx));
+        cx.run_until_parked();
+        assert!(harness.history.list().unwrap().is_empty());
+    }
+
+    #[gpui::test]
+    fn resume_fails_an_in_flight_google_row_without_http(cx: &mut TestAppContext) {
+        let harness = open_google(cx, Vec::new());
+        let id = easel_core::providers::JobId::parse("resume-google").unwrap();
+        harness
+            .history
+            .begin(
+                &id,
+                &google_request(),
+                &easel_core::providers::Submitted {
+                    job_id: id.clone(),
+                    poll_url: "https://generativelanguage.googleapis.com/v1beta/interactions"
+                        .parse()
+                        .unwrap(),
+                    quote: None,
+                },
+            )
+            .unwrap();
+        harness.runner.update(cx, |runner, cx| runner.resume(cx));
+        cx.run_until_parked();
+        assert!(harness.transport.seen().is_empty());
+        let listed = harness.history.list().unwrap();
+        assert!(matches!(listed[0].state, JobState::Failed { .. }));
+    }
+
+    #[gpui::test]
+    fn resume_rejects_a_bfl_row_whose_poll_host_is_krea(cx: &mut TestAppContext) {
+        let harness = open(cx, "bfl-krea-host", Vec::new());
+        let id = easel_core::providers::JobId::parse("resume-bfl").unwrap();
+        harness
+            .history
+            .begin(
+                &id,
+                &request(),
+                &easel_core::providers::Submitted {
+                    job_id: id.clone(),
+                    poll_url: "https://api.krea.ai/jobs/job-1".parse().unwrap(),
+                    quote: None,
+                },
+            )
+            .unwrap();
+        harness.runner.update(cx, |runner, cx| runner.resume(cx));
+        cx.run_until_parked();
+        assert!(harness.transport.seen().is_empty());
+        let listed = harness.history.list().unwrap();
+        assert!(matches!(listed[0].state, JobState::Failed { .. }));
     }
 
     #[gpui::test]

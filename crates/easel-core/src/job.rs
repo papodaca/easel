@@ -44,6 +44,9 @@ impl PollPolicy {
 pub enum JobEvent {
     SlotFreed,
     Submitted(Submitted),
+    InlineReady {
+        result_path: String,
+    },
     Poll(PollOutcome),
     Downloaded {
         result_path: String,
@@ -71,6 +74,10 @@ pub fn advance(state: JobState, event: JobEvent) -> JobState {
     }
     match (state, event) {
         (JobState::Queued, JobEvent::SlotFreed) => JobState::Submitting,
+        (JobState::Submitting, JobEvent::InlineReady { result_path }) => JobState::Done {
+            result_path,
+            cost: None,
+        },
         (JobState::Submitting | JobState::Queued, JobEvent::Submitted(_)) => JobState::Polling {
             attempt: 0,
             progress: None,

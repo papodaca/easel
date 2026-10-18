@@ -97,6 +97,13 @@ pub struct CostQuote {
     pub output_mp: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineImage {
+    pub bytes: Vec<u8>,
+    pub mime: String,
+    pub interaction_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Submitted {
     pub job_id: JobId,
@@ -265,6 +272,10 @@ pub trait Provider {
     fn poll_request(&self, submitted: &Submitted) -> HttpRequest;
 
     fn parse_submit(&self, response: &HttpResponse) -> Result<Submitted, ProviderError>;
+
+    fn inline_image(&self, _response: &HttpResponse) -> Option<InlineImage> {
+        None
+    }
 
     fn parse_poll(&self, response: &HttpResponse) -> PollOutcome;
 
