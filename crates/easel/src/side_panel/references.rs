@@ -11,6 +11,7 @@ pub struct References {
     refusal: Option<String>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl References {
     pub fn new(app_state: Entity<AppState>, _cx: &mut Context<Self>) -> Self {
         Self {

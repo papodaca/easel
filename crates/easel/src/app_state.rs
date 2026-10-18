@@ -34,6 +34,8 @@ pub struct AppState {
     pub saved_tgt: Option<Rect>,
     pub inspection: Option<crate::jobs::Inspection>,
     pub source_ref: Option<easel_core::session::SourceRef>,
+    pub extra_refs: Vec<Option<easel_core::session::SourceRef>>,
+    pub sheet_note: Option<String>,
     retired_renders: Vec<Arc<RenderImage>>,
     krea_sunset_noted: bool,
     pub model_id: String,
@@ -58,6 +60,8 @@ impl AppState {
             saved_tgt: None,
             inspection: None,
             source_ref: None,
+            extra_refs: Vec::new(),
+            sheet_note: None,
             retired_renders: Vec::new(),
             krea_sunset_noted: false,
             model_id: easel_core::providers::bfl::flux3::Flux3.spec().id.clone(),
@@ -261,27 +265,70 @@ impl AppState {
     }
 
     pub fn remove_reference_slot(&mut self, index: usize, cx: &mut Context<Self>) {
+        let (mut pixels, mut refs) = self.slot_buffers();
+        if index < pixels.len() {
+            let removed = pixels.remove(index);
+            self.retire(removed);
+            refs.remove(index);
+        }
+        self.scene.remove_reference(index);
+        self.write_slots(pixels, refs);
+        self.sheet_note = None;
+        cx.notify();
+    }
+
+    pub fn move_slot(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        let (mut pixels, mut refs) = self.slot_buffers();
+        if from >= pixels.len() || to >= pixels.len() || from == to {
+            return;
+        }
+        let image = pixels.remove(from);
+        pixels.insert(to, image);
+        let reference = refs.remove(from);
+        refs.insert(to, reference);
+        self.scene.move_reference(from, to);
+        self.write_slots(pixels, refs);
+        cx.notify();
+    }
+
+    fn slot_buffers(
+        &self,
+    ) -> (
+        Vec<Option<Arc<DecodedImage>>>,
+        Vec<Option<easel_core::session::SourceRef>>,
+    ) {
         let mut pixels = Vec::new();
+        let mut refs = Vec::new();
         if self.scene.source_image.is_some() {
             pixels.push(self.image.clone());
+            refs.push(self.source_ref.clone());
         }
         pixels.extend(self.extras.iter().cloned().map(Some));
-        let removed = if index < pixels.len() {
-            pixels.remove(index)
-        } else {
-            None
-        };
-        self.retire(removed);
-        self.scene.remove_reference(index);
+        refs.extend(self.extra_refs.iter().cloned());
+        while refs.len() < pixels.len() {
+            refs.push(None);
+        }
+        refs.truncate(pixels.len());
+        (pixels, refs)
+    }
+
+    fn write_slots(
+        &mut self,
+        pixels: Vec<Option<Arc<DecodedImage>>>,
+        refs: Vec<Option<easel_core::session::SourceRef>>,
+    ) {
         let mut pixels = pixels.into_iter();
+        let mut refs = refs.into_iter();
         if self.scene.source_image.is_some() {
             self.image = pixels.next().flatten();
+            self.source_ref = refs.next().flatten();
         } else {
             let previous = self.image.take();
             self.retire(previous);
+            self.source_ref = None;
         }
         self.extras = pixels.flatten().collect();
-        cx.notify();
+        self.extra_refs = refs.collect();
     }
 
     fn retire(&mut self, image: Option<Arc<DecodedImage>>) {

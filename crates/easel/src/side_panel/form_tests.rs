@@ -13,7 +13,7 @@ use serde_json::json;
 use crate::app_state::AppState;
 use crate::net::MapKeys;
 use crate::side_panel::prompt_editor::PromptEditor;
-use crate::side_panel::references::References;
+use crate::side_panel::References;
 use crate::side_panel::schema_form::SchemaForm;
 use crate::side_panel::validation::Validation;
 
@@ -850,6 +850,14 @@ fn paste_sets_the_source_then_adds_a_reference(cx: &mut TestAppContext) {
             .len()),
         1
     );
+}
+
+#[gpui::test]
+fn the_editor_does_not_list_the_images(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    let keys = std::sync::Arc::new(crate::settings::SharedKeys::default());
+    let panel = cx.new(|cx| crate::side_panel::SidePanel::new(state, keys, None, None, cx));
+    assert!(!panel.read_with(&cx, |panel, _| panel.shows_reference_section()));
 }
 
 fn openai_validation(

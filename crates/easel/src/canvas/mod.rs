@@ -765,6 +765,22 @@ impl Canvas {
         row
     }
 
+    fn sheet_note(&self, cx: &App) -> gpui::Div {
+        let Some(note) = self.app_state.read(cx).sheet_note.clone() else {
+            return div();
+        };
+        let anchor = self
+            .tile_view(0)
+            .unwrap_or_else(|| self.viewport.image_rect_in_view());
+        div()
+            .absolute()
+            .left(px(anchor.x))
+            .top(px(anchor.y + anchor.h + 4.0))
+            .text_xs()
+            .text_color(rgb(theme::TEXT_MUTED))
+            .child(note)
+    }
+
     fn apply_tile_action(&mut self, index: usize, name: &str, cx: &mut Context<Self>) {
         match name {
             "Remove" => {
@@ -790,27 +806,8 @@ impl Canvas {
     }
 
     fn move_tile(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
-        self.app_state.update(cx, |app, cx| {
-            let mut pixels = Vec::new();
-            if app.scene.source_image.is_some() {
-                pixels.push(app.image.clone());
-            }
-            pixels.extend(app.extras.iter().cloned().map(Some));
-            if from >= pixels.len() || to >= pixels.len() || from == to {
-                return;
-            }
-            let image = pixels.remove(from);
-            pixels.insert(to, image);
-            app.scene.move_reference(from, to);
-            let mut pixels = pixels.into_iter();
-            if app.scene.source_image.is_some() {
-                app.image = pixels.next().flatten();
-            } else {
-                app.image = None;
-            }
-            app.extras = pixels.flatten().collect();
-            cx.notify();
-        });
+        self.app_state
+            .update(cx, |app, cx| app.move_slot(from, to, cx));
         self.selected_tile = Some(to);
     }
 
@@ -1484,6 +1481,7 @@ impl Render for Canvas {
                     ),
             )
             .child(self.tile_actions(cx))
+            .child(self.sheet_note(cx))
             .child(self.notifications.clone())
     }
 }

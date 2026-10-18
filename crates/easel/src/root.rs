@@ -200,7 +200,7 @@ impl Root {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
-            multiple: false,
+            multiple: true,
             prompt: None,
         });
         let state = self.app_state.clone();
@@ -208,13 +208,9 @@ impl Root {
         cx.spawn(async move |_root, cx| {
             let picked = receiver.await;
             cx.update(|cx| match picked {
-                Ok(Ok(Some(paths))) => image_load::load_paths(
-                    state,
-                    notes,
-                    paths,
-                    image_load::LoadTarget::ReplaceSource,
-                    cx,
-                ),
+                Ok(Ok(Some(paths))) => {
+                    image_load::load_paths(state, notes, paths, image_load::LoadTarget::Paste, cx)
+                }
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
                     notes.update(cx, |notes, cx| {
@@ -371,7 +367,7 @@ impl Render for Root {
                     this.app_state.clone(),
                     this.notifications.clone(),
                     paths.0.iter().cloned().collect(),
-                    image_load::LoadTarget::ReplaceSource,
+                    image_load::LoadTarget::Paste,
                     cx,
                 );
             }))

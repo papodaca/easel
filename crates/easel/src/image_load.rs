@@ -1,10 +1,11 @@
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use easel_core::geometry::Size;
-use gpui::{App, Entity, RenderImage};
+use gpui::{App, Context, Entity, RenderImage};
 use image::{DynamicImage, ImageDecoder, ImageReader, Limits};
 
 use crate::app_state::AppState;
@@ -185,52 +186,89 @@ pub fn load_paths(
     state: Entity<AppState>,
     notifications: Entity<Notifications>,
     paths: Vec<PathBuf>,
-    target: LoadTarget,
+    _target: LoadTarget,
     cx: &mut App,
 ) {
-    let mut paths = paths.into_iter();
-    let Some(first) = paths.next() else {
+    if paths.is_empty() {
         return;
-    };
-    let ignored = paths.count();
-    if ignored > 0 {
-        let noun = if ignored == 1 { "file" } else { "files" };
-        push_toast(
-            &notifications,
-            ToastLevel::Info,
-            format!("Ignored {ignored} {noun}"),
-            cx,
-        );
     }
-    let label = first.display().to_string();
     notifications.update(cx, |notes, cx| notes.set_status("Loading…", cx));
+    let skipped = Arc::new(AtomicUsize::new(0));
+    let max_images = Arc::new(AtomicUsize::new(0));
     cx.spawn(async move |cx| {
-        let read = cx
-            .background_executor()
-            .spawn(async move { std::fs::read(first) })
-            .await;
-        let result = match read {
-            Ok(bytes) => {
-                let origin = Some(easel_core::session::SourceRef {
-                    path: label.clone(),
-                    hash: easel_core::session::content_hash(&bytes),
-                    owned: false,
-                });
-                let decoded = cx
-                    .background_executor()
-                    .spawn(async move { decode_image(&bytes, &label) })
-                    .await;
-                (decoded, origin)
+        for path in paths {
+            let label = path.display().to_string();
+            let read = cx
+                .background_executor()
+                .spawn(async move { std::fs::read(path) })
+                .await;
+            let bytes = match read {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    let detail = err.to_string();
+                    let skipped_note = notifications.clone();
+                    cx.update(|cx| {
+                        push_toast(
+                            &skipped_note,
+                            ToastLevel::Error,
+                            ImageError::Decode {
+                                label: label.clone(),
+                                detail,
+                            }
+                            .to_string(),
+                            cx,
+                        );
+                    });
+                    continue;
+                }
+            };
+            let origin = easel_core::session::SourceRef {
+                path: label.clone(),
+                hash: easel_core::session::content_hash(&bytes),
+                owned: false,
+            };
+            let decoded = cx
+                .background_executor()
+                .spawn(async move { decode_image(&bytes, &label) })
+                .await;
+            match decoded {
+                Ok(image) => {
+                    let skipped = skipped.clone();
+                    let max_images = max_images.clone();
+                    cx.update(|cx| {
+                        state.update(cx, |app, cx| {
+                            max_images.store(
+                                app.spec().capabilities.image_slots.max(),
+                                Ordering::Relaxed,
+                            );
+                            if place_image(app, Arc::new(image), Some(origin), cx) == Place::Skipped
+                            {
+                                skipped.fetch_add(1, Ordering::Relaxed);
+                            }
+                        });
+                    });
+                }
+                Err(error) => {
+                    let notifications = notifications.clone();
+                    cx.update(|cx| {
+                        push_toast(&notifications, ToastLevel::Error, error.to_string(), cx);
+                    });
+                }
             }
-            Err(err) => (
-                Err(ImageError::Decode {
-                    label,
-                    detail: err.to_string(),
-                }),
-                None,
-            ),
-        };
-        cx.update(|cx| apply_load_result(&state, &notifications, result.0, target, result.1, cx));
+        }
+        let skipped = skipped.load(Ordering::Relaxed);
+        let max = max_images.load(Ordering::Relaxed);
+        cx.update(|cx| {
+            state.update(cx, |app, cx| {
+                app.sheet_note = if skipped == 0 {
+                    None
+                } else {
+                    Some(format!("accepts at most {max} images, {skipped} not added"))
+                };
+                cx.notify();
+            });
+            notifications.update(cx, |notes, cx| notes.set_status("Ready", cx));
+        });
     })
     .detach();
 }
@@ -296,8 +334,38 @@ impl DecodeJob {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    Source,
+    Extra,
+    Skipped,
+}
+
+pub fn place_image(
+    state: &mut AppState,
+    image: Arc<DecodedImage>,
+    origin: Option<easel_core::session::SourceRef>,
+    cx: &mut Context<AppState>,
+) -> Place {
+    let count = usize::from(state.scene.source_image.is_some()) + state.scene.references.len();
+    let max = state.spec().capabilities.image_slots.max();
+    if count >= max {
+        return Place::Skipped;
+    }
+    if state.scene.source_image.is_none() {
+        state.set_image(image, cx);
+        state.source_ref = origin;
+        Place::Source
+    } else {
+        let _ = state.add_extra(image, cx);
+        state.extra_refs.push(origin);
+        Place::Extra
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum LoadTarget {
+    #[cfg_attr(not(test), allow(dead_code))]
     ReplaceSource,
     Paste,
 }
@@ -315,18 +383,20 @@ pub fn apply_load_result(
             let width = image.size.w;
             let height = image.size.h;
             state.update(cx, |state, cx| {
-                match target {
-                    LoadTarget::ReplaceSource => state.set_image(Arc::new(image), cx),
-                    LoadTarget::Paste if state.scene.source_image.is_none() => {
+                let max = state.spec().capabilities.image_slots.max();
+                let placed = match target {
+                    LoadTarget::ReplaceSource => {
                         state.set_image(Arc::new(image), cx);
+                        state.source_ref = origin;
+                        Place::Source
                     }
-                    LoadTarget::Paste => {
-                        let _ = state.add_extra(Arc::new(image), cx);
-                    }
-                }
-                if let Some(origin) = origin.clone() {
-                    state.source_ref = Some(origin);
-                }
+                    LoadTarget::Paste => place_image(state, Arc::new(image), origin, cx),
+                };
+                state.sheet_note = if matches!(placed, Place::Skipped) {
+                    Some(format!("accepts at most {max} images, 1 not added"))
+                } else {
+                    None
+                };
             });
             notifications.update(cx, |notes, cx| {
                 notes.set_status(format!("{width}x{height}"), cx);
@@ -487,5 +557,223 @@ mod tests {
         assert_eq!(notes.read_with(cx, |notes, _| notes.toast_count()), 1);
         let level_is_error = notes.read_with(cx, |notes, _| notes.last_toast_is_error());
         assert!(level_is_error);
+    }
+
+    fn color_png(width: u32, height: u32, pixel: [u8; 4]) -> Vec<u8> {
+        let image = image::RgbaImage::from_fn(width, height, |_, _| image::Rgba(pixel));
+        let dynamic = image::DynamicImage::ImageRgba8(image);
+        let mut bytes = Vec::new();
+        dynamic
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    fn decoded(label: &str, bytes: &[u8]) -> Arc<super::DecodedImage> {
+        Arc::new(decode_image(bytes, label).unwrap())
+    }
+
+    fn origin(path: &str) -> easel_core::session::SourceRef {
+        easel_core::session::SourceRef {
+            path: path.into(),
+            hash: path.into(),
+            owned: false,
+        }
+    }
+
+    #[gpui::test]
+    fn files_land_in_slot_order_and_the_request_follows(cx: &mut TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let a = decoded("a.png", &color_png(256, 256, [1, 0, 0, 255]));
+        let b = decoded("b.png", &color_png(256, 256, [0, 1, 0, 255]));
+        state.update(cx, |app, cx| {
+            assert_eq!(
+                super::place_image(app, a, Some(origin("a.png")), cx),
+                super::Place::Source
+            );
+            assert_eq!(
+                super::place_image(app, b, Some(origin("b.png")), cx),
+                super::Place::Extra
+            );
+        });
+        let (source, extra) = state.read_with(cx, |app, _| {
+            (
+                app.scene.source_image.as_ref().unwrap().path.clone(),
+                app.scene.references[0].path.clone(),
+            )
+        });
+        assert_eq!(source, "source");
+        assert_eq!(extra, "reference");
+        let alone = cx.new(|_| AppState::new());
+        let a = decoded("a.png", &color_png(256, 256, [1, 0, 0, 255]));
+        alone.update(cx, |app, cx| {
+            super::place_image(app, a, None, cx);
+        });
+        let hash_a = alone.read_with(cx, |app, _| {
+            crate::jobs::build_request(app).unwrap().images[0]
+                .content_hash
+                .clone()
+        });
+        let hashes = state.read_with(cx, |app, _| {
+            crate::jobs::build_request(app)
+                .unwrap()
+                .images
+                .into_iter()
+                .map(|image| image.content_hash)
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(hashes[0], hash_a);
+        assert_ne!(hashes[1], hash_a);
+
+        let c = decoded("c.png", &color_png(4, 4, [0, 0, 1, 255]));
+        state.update(cx, |app, cx| {
+            super::place_image(app, c, Some(origin("c.png")), cx);
+        });
+        let paths = state.read_with(cx, |app, _| {
+            (
+                app.scene.source_image.as_ref().unwrap().path.clone(),
+                app.scene.references.len(),
+            )
+        });
+        assert_eq!(paths.0, "source");
+        assert_eq!(paths.1, 2);
+    }
+
+    #[gpui::test]
+    fn a_load_past_the_max_names_the_skip_and_remove_clears_it(cx: &mut TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let max = state.read_with(cx, |app, _| app.spec().capabilities.image_slots.max());
+        state.update(cx, |app, cx| {
+            for index in 0..max {
+                let image = decoded("slot.png", &color_png(2, 2, [index as u8, 0, 0, 255]));
+                super::place_image(app, image, None, cx);
+            }
+            let extra = decoded("past.png", &color_png(2, 2, [9, 9, 9, 255]));
+            assert_eq!(
+                super::place_image(app, extra, None, cx),
+                super::Place::Skipped
+            );
+            app.sheet_note = Some(format!("accepts at most {max} images, 1 not added"));
+        });
+        let (count, note) = state.read_with(cx, |app, _| {
+            (
+                usize::from(app.scene.source_image.is_some()) + app.scene.references.len(),
+                app.sheet_note.clone().unwrap(),
+            )
+        });
+        assert_eq!(count, max);
+        assert!(
+            note.contains(&format!("accepts at most {max} images")),
+            "{note}"
+        );
+        assert!(note.contains('1'), "{note}");
+        state.update(cx, |app, cx| app.remove_reference_slot(0, cx));
+        assert!(state.read_with(cx, |app, _| app.sheet_note.is_none()));
+    }
+
+    #[gpui::test]
+    fn a_bad_file_between_two_good_ones_keeps_both(cx: &mut TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let notes = cx.new(|_| Notifications::new());
+        let a = decoded("a.png", &color_png(2, 2, [1, 0, 0, 255]));
+        let b = decoded("b.png", &color_png(3, 3, [0, 1, 0, 255]));
+        state.update(cx, |app, cx| {
+            super::place_image(app, a, None, cx);
+        });
+        let error = decode_image(b"not an image", "bad.png").unwrap_err();
+        cx.update(|cx| {
+            apply_load_result(
+                &state,
+                &notes,
+                Err(error),
+                super::LoadTarget::Paste,
+                None,
+                cx,
+            );
+        });
+        state.update(cx, |app, cx| {
+            super::place_image(app, b, None, cx);
+        });
+        assert_eq!(notes.read_with(cx, |notes, _| notes.toast_count()), 1);
+        let count = state.read_with(cx, |app, _| {
+            usize::from(app.scene.source_image.is_some()) + app.scene.references.len()
+        });
+        assert_eq!(count, 2);
+    }
+
+    #[gpui::test]
+    fn paste_sets_the_source_ref_only_for_the_first_image(cx: &mut TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let first = decoded("a.png", &color_png(2, 2, [1, 0, 0, 255]));
+        let extra = decoded("b.png", &color_png(3, 3, [0, 1, 0, 255]));
+        state.update(cx, |app, cx| {
+            super::place_image(app, first, Some(origin("a.png")), cx);
+            super::place_image(app, extra, Some(origin("b.png")), cx);
+        });
+        let (source, extra_ref) = state.read_with(cx, |app, _| {
+            (
+                app.source_ref.as_ref().unwrap().path.clone(),
+                app.extra_refs[0].as_ref().unwrap().path.clone(),
+            )
+        });
+        assert_eq!(source, "a.png");
+        assert_eq!(extra_ref, "b.png");
+    }
+
+    #[gpui::test]
+    fn remove_on_the_only_tile_clears_the_source(cx: &mut TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let image = decoded("a.png", &color_png(2, 2, [1, 0, 0, 255]));
+        state.update(cx, |app, cx| {
+            super::place_image(app, image, Some(origin("a.png")), cx);
+            app.remove_reference_slot(0, cx);
+        });
+        let cleared = state.read_with(cx, |app, _| {
+            app.image.is_none() && app.scene.source_image.is_none() && app.source_ref.is_none()
+        });
+        assert!(cleared);
+    }
+
+    #[gpui::test]
+    fn move_right_swaps_pixels_refs_and_keeps_rectangles(cx: &mut TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let left = decoded("a.png", &color_png(2, 2, [1, 0, 0, 255]));
+        let right = decoded("b.png", &color_png(4, 2, [0, 0, 1, 255]));
+        state.update(cx, |app, cx| {
+            super::place_image(app, left, Some(origin("a.png")), cx);
+            super::place_image(app, right, Some(origin("b.png")), cx);
+            let spot = easel_core::geometry::Rect {
+                x: 10,
+                y: 10,
+                w: 10,
+                h: 10,
+            };
+            app.scene.add_box(spot, easel_core::scene::BoxKind::Keep);
+            app.scene
+                .add_box_on(spot, easel_core::scene::BoxKind::Keep, 1);
+            app.scene.prose = "<ref_image_0> <ref_image_1>".into();
+            app.move_slot(0, 1, cx);
+        });
+        let (source_ref, extra_ref, prose, rects) = state.read_with(cx, |app, _| {
+            (
+                app.source_ref.as_ref().unwrap().path.clone(),
+                app.extra_refs[0].as_ref().unwrap().path.clone(),
+                app.scene.prose.clone(),
+                app.scene
+                    .boxes
+                    .iter()
+                    .map(|element| element.src.unwrap())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!(source_ref, "b.png");
+        assert_eq!(extra_ref, "a.png");
+        assert_eq!(prose, "<ref_image_1> <ref_image_0>");
+        assert!(rects.iter().all(|rect| rect.x == 10 && rect.y == 10));
+        let width = state.read_with(cx, |app, _| app.image.as_ref().unwrap().size.w);
+        assert_eq!(width, 4);
     }
 }

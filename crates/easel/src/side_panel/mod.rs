@@ -5,6 +5,7 @@ mod schema_form;
 mod validation;
 
 pub use prompt_editor::PromptEditor;
+#[allow(unused_imports)]
 pub use references::References;
 pub use schema_form::SchemaForm;
 pub use validation::Validation;
@@ -62,7 +63,6 @@ pub struct SidePanel {
     app_state: gpui::Entity<AppState>,
     inspector: gpui::Entity<Inspector>,
     prompt: gpui::Entity<PromptEditor>,
-    references: gpui::Entity<References>,
     form: gpui::Entity<SchemaForm>,
     validation: gpui::Entity<Validation>,
     keys: std::sync::Arc<SharedKeys>,
@@ -75,6 +75,11 @@ pub struct SidePanel {
 }
 
 impl SidePanel {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn shows_reference_section(&self) -> bool {
+        false
+    }
+
     pub fn new(
         app_state: gpui::Entity<AppState>,
         keys: std::sync::Arc<SharedKeys>,
@@ -84,7 +89,6 @@ impl SidePanel {
     ) -> Self {
         let inspector = cx.new(|cx| Inspector::new(app_state.clone(), cx));
         let prompt = cx.new(|cx| PromptEditor::new(app_state.clone(), cx));
-        let references = cx.new(|cx| References::new(app_state.clone(), cx));
         let form = cx.new(|cx| SchemaForm::new(app_state.clone(), cx));
         let resolver = std::sync::Arc::new(Resolver(std::sync::Arc::clone(&keys)));
         let validation = cx.new(|cx| Validation::new(app_state.clone(), resolver, cx));
@@ -120,7 +124,6 @@ impl SidePanel {
             app_state,
             inspector,
             prompt,
-            references,
             form,
             validation,
             keys,
@@ -274,7 +277,6 @@ impl Render for SidePanel {
                     .gap(px(12.))
                     .child(self.model.clone())
                     .child(self.inspector.clone())
-                    .child(self.references.clone())
                     .child(self.prompt.clone())
                     .child(self.form.clone())
                     .child(self.validation.clone())
