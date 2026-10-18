@@ -42,6 +42,7 @@ pub struct LiveJob {
     /// Typed prompt from the Generate snapshot. Absent on rows submitted before it existed.
     pub prose: Option<String>,
     pub model_id: String,
+    pub editor: Option<easel_core::history::EditorSnapshot>,
 }
 
 pub struct JobRunner {
@@ -208,6 +209,7 @@ impl JobRunner {
                     .as_ref()
                     .map(|editor| editor.model_id.clone())
                     .unwrap_or_else(|| slot.request.model_id.clone()),
+                editor: slot.editor.clone(),
             })
             .collect()
     }

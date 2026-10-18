@@ -15,6 +15,7 @@ use gpui::{
 use crate::app_state::{AppState, HistoryItem};
 use crate::image_load::decode_image;
 use crate::jobs::{JobRunner, LiveJob, inspection_from, promote};
+use crate::notifications::Notifications;
 use crate::theme;
 use crate::ui::pane_header;
 
@@ -57,6 +58,7 @@ struct Row {
     thumb: Option<Arc<RenderImage>>,
     prompt: String,
     model: String,
+    editor: Option<easel_core::history::EditorSnapshot>,
 }
 
 pub struct BottomStrip {
@@ -71,6 +73,7 @@ pub struct BottomStrip {
     arm_generation: u64,
     thumbs: HashMap<String, Arc<RenderImage>>,
     previews: HashMap<String, Preview>,
+    notes: Option<gpui::Entity<Notifications>>,
 }
 
 impl BottomStrip {
@@ -100,6 +103,7 @@ impl BottomStrip {
             arm_generation: 0,
             thumbs: HashMap::new(),
             previews: HashMap::new(),
+            notes: None,
         }
     }
 
@@ -186,6 +190,7 @@ impl BottomStrip {
             "Promote" => self.promote_selected(cx),
             "Save As" => self.save_selected(cx),
             "Compare" => self.compare_selected(cx),
+            "Restore" => self.restore_selected(cx),
             "Discard" => {
                 self.pending_discard = true;
                 cx.notify();
@@ -243,6 +248,7 @@ impl BottomStrip {
             thumb,
             prompt: self.prompt_for(job.prose, job.id.as_ref()),
             model: self.model_for(Some(job.model_id), job.id.as_ref()),
+            editor: job.editor,
         }
     }
 
@@ -250,6 +256,7 @@ impl BottomStrip {
         let (line, detail) = copy_for(&state, "");
         let bytes = self.history.result_bytes(&id).ok();
         let thumb = self.thumb_for(&id);
+        let editor = self.history.load_editor(&id).ok().flatten();
         Row {
             token: None,
             id: Some(id.clone()),
@@ -259,8 +266,15 @@ impl BottomStrip {
             cost,
             bytes,
             thumb,
-            prompt: self.prompt_for(None, Some(&id)),
-            model: self.model_for(None, Some(&id)),
+            prompt: self.prompt_for(
+                editor.as_ref().map(|editor| editor.prose.clone()),
+                Some(&id),
+            ),
+            model: self.model_for(
+                editor.as_ref().map(|editor| editor.model_id.clone()),
+                Some(&id),
+            ),
+            editor,
         }
     }
 
@@ -317,6 +331,45 @@ impl BottomStrip {
             cx.notify();
         });
         self.close_modal(cx);
+    }
+
+    fn restore_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self
+            .action_index(cx)
+            .and_then(|index| self.rows.get(index))
+            .and_then(|row| row.editor.clone())
+        else {
+            return;
+        };
+        let known = easel_core::providers::ModelRegistry::specs()
+            .iter()
+            .any(|spec| spec.id == editor.model_id);
+        if !known {
+            self.report_status(&format!("Unknown model {}", editor.model_id), cx);
+            return;
+        }
+        self.app_state.update(cx, |app, cx| {
+            app.inspection = None;
+            app.set_model(&editor.model_id, cx);
+            app.values = app.reconcile_values(editor.values.clone());
+            app.scene.prose = editor.prose.clone();
+            if !editor.aspect_ratio.is_empty() {
+                app.set_aspect_ratio(&editor.aspect_ratio, cx);
+            }
+            cx.notify();
+        });
+        self.close_modal(cx);
+    }
+
+    fn report_status(&self, text: &str, cx: &mut Context<Self>) {
+        let Some(notes) = self.notes.clone() else {
+            return;
+        };
+        notes.update(cx, |notes, cx| notes.set_status(text.to_owned(), cx));
+    }
+
+    pub fn set_notes(&mut self, notes: gpui::Entity<Notifications>) {
+        self.notes = Some(notes);
     }
 
     fn save_selected(&mut self, cx: &mut Context<Self>) {
@@ -457,15 +510,19 @@ impl BottomStrip {
         let model = self.rows[index].model.clone();
         let prompt = self.rows[index].prompt.clone();
         let state = self.rows[index].state.clone();
+        let has_editor = self.rows[index].editor.is_some();
         let preview = id.as_ref().and_then(|id| self.result_preview(id));
-        let actions = if self.pending_discard {
+        let mut actions = if self.pending_discard {
             vec!["Confirm".into(), "Cancel".into()]
         } else {
             actions_for(&state)
                 .into_iter()
                 .map(str::to_string)
-                .collect()
+                .collect::<Vec<_>>()
         };
+        if has_editor && !self.pending_discard {
+            actions.insert(0, "Restore".into());
+        }
         let show_detail = detail.len() > line.len();
         Some(HistoryDialog {
             image: preview.as_ref().map(|preview| Arc::clone(&preview.image)),

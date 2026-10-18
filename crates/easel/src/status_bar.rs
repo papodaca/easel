@@ -85,6 +85,11 @@ impl StatusBar {
         self.credits.map(format_credits)
     }
 
+    #[cfg(test)]
+    pub fn status_line(&self, cx: &gpui::App) -> String {
+        self.notifications.read(cx).status().to_string()
+    }
+
     fn poke(&mut self, cx: &mut Context<Self>) {
         if self.provider != ProviderId::Bfl {
             return;
@@ -272,6 +277,7 @@ mod tests {
             bytes: None,
             prose: None,
             model_id: String::new(),
+            editor: None,
         }
     }
 

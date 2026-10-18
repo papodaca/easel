@@ -748,3 +748,128 @@ fn the_modal_shows_the_typed_prompt_when_a_snapshot_exists(cx: &mut TestAppConte
     assert_eq!(dialog.prompt, "make <cat_1> orange");
     assert_eq!(dialog.model, "flux-3");
 }
+
+fn editor_snapshot(prose: &str, model: &str, tolerance: i64, aspect: &str) -> easel_core::history::EditorSnapshot {
+    easel_core::history::EditorSnapshot {
+        prose: prose.into(),
+        model_id: model.into(),
+        values: serde_json::from_value(serde_json::json!({"safety_tolerance": tolerance})).unwrap(),
+        aspect_ratio: aspect.into(),
+    }
+}
+
+fn seed_snapshot(history: &HistoryStore, id: &str, editor: &easel_core::history::EditorSnapshot) {
+    let job = JobId::parse(id).unwrap();
+    history
+        .begin(&job, &request(), &submitted(id, 1.0), Some(editor))
+        .unwrap();
+    history
+        .complete(&job, &png(), "image/png", &png(), &Completion {
+            cost: Some(1.0),
+            prompt: None,
+            duration: None,
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn restore_puts_the_editor_back_and_leaves_the_canvas(cx: &mut TestAppContext) {
+    let (root, strip, history, mut cx) = open_root(cx);
+    let editor = editor_snapshot("use <ref_image_1>", "flux-3-image", 4, "16:9");
+    seed_snapshot(&history, "job1", &editor);
+    let state = strip.read_with(&cx, |strip, _| strip.app_state());
+    let image = Arc::new(crate::image_load::decode_image(&png(), "canvas").unwrap());
+    let image_ptr = Arc::as_ptr(&image);
+    state.update(&mut cx, |app, cx| {
+        app.set_image(image, cx);
+        app.set_model("flux-2-pro", cx);
+        app.scene.prose = "changed".into();
+        app.set_aspect_ratio("1:1", cx);
+        app.inspection = Some(crate::jobs::Inspection {
+            prompt: "compare".into(),
+            suggestion: String::new(),
+            rows: Vec::new(),
+            boxes: Vec::new(),
+            frame: None,
+        });
+        cx.notify();
+    });
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    strip.update(&mut cx, |strip, cx| strip.press("Restore", cx));
+    let (prose, model, tolerance, aspect, inspection, same_image) =
+        state.read_with(&cx, |app, _| {
+            (
+                app.scene.prose.clone(),
+                app.model_id.clone(),
+                app.values.get("safety_tolerance").cloned(),
+                app.scene.aspect_ratio.clone(),
+                app.inspection.clone(),
+                app.image.as_ref().map(Arc::as_ptr) == Some(image_ptr),
+            )
+        });
+    assert_eq!(prose, "use <ref_image_1>");
+    assert_eq!(model, "flux-3-image");
+    assert_eq!(tolerance, Some(serde_json::json!(4)));
+    assert_eq!(aspect.as_deref(), Some("16:9"));
+    assert!(inspection.is_none());
+    assert!(same_image);
+    assert!(root.read_with(&cx, |root, cx| root.app_state.read(cx).history_item.is_none()));
+}
+
+#[gpui::test]
+fn restore_replaces_form_values_when_the_model_is_unchanged(cx: &mut TestAppContext) {
+    let (_root, strip, history, mut cx) = open_root(cx);
+    let editor = editor_snapshot("same model", "flux-3-image", 4, "");
+    seed_snapshot(&history, "job1", &editor);
+    let state = strip.read_with(&cx, |strip, _| strip.app_state());
+    state.update(&mut cx, |app, cx| {
+        app.values.insert("safety_tolerance".into(), serde_json::json!(1));
+        cx.notify();
+    });
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    strip.update(&mut cx, |strip, cx| strip.press("Restore", cx));
+    let tolerance = state.read_with(&cx, |app, _| app.values.get("safety_tolerance").cloned());
+    assert_eq!(tolerance, Some(serde_json::json!(4)));
+    assert_eq!(state.read_with(&cx, |app, _| app.model_id.clone()), "flux-3-image");
+}
+
+#[gpui::test]
+fn restore_of_an_unknown_model_leaves_the_editor(cx: &mut TestAppContext) {
+    let (root, strip, history, mut cx) = open_root(cx);
+    let editor = editor_snapshot("from the snapshot", "missing-model", 4, "16:9");
+    seed_snapshot(&history, "job1", &editor);
+    let state = strip.read_with(&cx, |strip, _| strip.app_state());
+    state.update(&mut cx, |app, cx| {
+        app.scene.prose = "keep this".into();
+        cx.notify();
+    });
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    strip.update(&mut cx, |strip, cx| strip.press("Restore", cx));
+    assert_eq!(state.read_with(&cx, |app, _| app.scene.prose.clone()), "keep this");
+    assert_eq!(state.read_with(&cx, |app, _| app.model_id.clone()), "flux-3-image");
+    assert!(root.read_with(&cx, |root, cx| root.app_state.read(cx).history_item.is_some()));
+    assert!(root.read_with(&cx, |root, cx| root.status_line(cx).contains("missing-model")));
+}
+
+#[gpui::test]
+fn restore_while_compare_is_open_shows_the_editor_again(cx: &mut TestAppContext) {
+    let (_root, strip, history, mut cx) = open_root(cx);
+    let editor = editor_snapshot("back to the editor", "flux-3-image", 4, "16:9");
+    seed_snapshot(&history, "job1", &editor);
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    strip.update(&mut cx, |strip, cx| strip.press("Compare", cx));
+    assert!(strip.read_with(&cx, |strip, cx| {
+        strip.app_state().read(cx).inspection.is_some()
+    }));
+    strip.update(&mut cx, |strip, cx| {
+        strip.show(0, cx);
+        strip.press("Restore", cx);
+    });
+    assert!(strip.read_with(&cx, |strip, cx| {
+        strip.app_state().read(cx).inspection.is_none()
+    }));
+}

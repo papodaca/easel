@@ -134,6 +134,7 @@ impl Root {
         });
         let bottom_strip =
             cx.new(move |cx| BottomStrip::new(strip_state, Some(strip_runner), strip_history, cx));
+        bottom_strip.update(cx, |strip, _| strip.set_notes(notifications.clone()));
         let session_path = crate::jobs::data_dir().join("session.json");
         let image_dir = crate::jobs::data_dir().join("session");
         let watched = app_state.clone();
@@ -467,6 +468,11 @@ impl Root {
     #[cfg(test)]
     pub fn strip(&self) -> gpui::Entity<BottomStrip> {
         self.bottom_strip.clone()
+    }
+
+    #[cfg(test)]
+    pub fn status_line(&self, cx: &gpui::App) -> String {
+        self.status_bar.read(cx).status_line(cx)
     }
 
     fn quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
