@@ -67,35 +67,61 @@ impl Session {
         let scene = app.scene.clone();
         let values = app.values.clone();
         let model_id = app.model_id.clone();
-        let source = app.source_ref.clone();
-        let image = app
+        let source_ref = app.source_ref.clone();
+        let source_image = app
             .image
             .as_ref()
             .map(|image| Arc::clone(&image.rgba_for_export));
+        let extras: Vec<_> = app
+            .extras
+            .iter()
+            .enumerate()
+            .map(|(index, image)| {
+                (
+                    app.extra_refs.get(index).cloned().flatten(),
+                    Arc::clone(&image.rgba_for_export),
+                )
+            })
+            .collect();
         let path = self.path.clone();
         let image_dir = self.image_dir.clone();
         let state = self.app_state.clone();
         cx.spawn(async move |_this, cx| {
-            let owned = if source.is_none() {
-                if let Some(image) = image {
-                    cx.background_executor()
-                        .spawn(async move { own_image(&image_dir, &image) })
-                        .await
-                        .ok()
-                } else {
-                    None
+            let mut source = source_ref;
+            if source.is_none()
+                && let Some(image) = source_image
+            {
+                let dir = image_dir.clone();
+                source = cx
+                    .background_executor()
+                    .spawn(async move { own_image(&dir, &image) })
+                    .await
+                    .ok();
+            }
+            let mut references = Vec::new();
+            let mut owned_extras = Vec::new();
+            for (reference, image) in extras {
+                if let Some(reference) = reference {
+                    references.push(reference);
+                    continue;
                 }
-            } else {
-                None
-            };
-            let source = owned.clone().or(source);
+                let dir = image_dir.clone();
+                if let Ok(owned) = cx
+                    .background_executor()
+                    .spawn(async move { own_image(&dir, &image) })
+                    .await
+                {
+                    owned_extras.push(owned.clone());
+                    references.push(owned);
+                }
+            }
             let file = SessionFile {
                 version: easel_core::session::VERSION,
                 scene,
                 values,
                 model_id,
                 source: source.clone(),
-                references: Vec::new(),
+                references,
             };
             let write = cx
                 .background_executor()
@@ -104,13 +130,22 @@ impl Session {
             if write.is_err() {
                 return;
             }
-            if let Some(owned) = owned {
-                state.update(cx, |app, _| {
-                    if app.source_ref.is_none() {
-                        app.source_ref = Some(owned);
+            state.update(cx, |app, _| {
+                if app.source_ref.is_none()
+                    && let Some(source) = source
+                {
+                    app.source_ref = Some(source);
+                }
+                if app.extra_refs.len() < app.extras.len() {
+                    app.extra_refs.resize(app.extras.len(), None);
+                }
+                let mut owned = owned_extras.into_iter();
+                for reference in &mut app.extra_refs {
+                    if reference.is_none() {
+                        *reference = owned.next();
                     }
-                });
-            }
+                }
+            });
         })
         .detach();
     }
@@ -122,7 +157,7 @@ pub fn restore(state: Entity<AppState>, path: PathBuf, cx: &mut App) {
             .background_executor()
             .spawn(async move { load_restored(&path) })
             .await;
-        let Some((file, image)) = loaded else {
+        let Some((file, mut images)) = loaded else {
             return;
         };
         cx.update(|cx| {
@@ -136,11 +171,30 @@ pub fn restore(state: Entity<AppState>, path: PathBuf, cx: &mut App) {
                 }
                 app.scene = file.scene;
                 app.values = app.reconcile_values(file.values);
-                app.source_ref = file.source;
-                app.image = image;
-                if app.image.is_none() {
-                    app.scene.source_image = None;
-                    app.source_ref = None;
+                let mut refs = Vec::new();
+                if file.source.is_some() || app.scene.source_image.is_some() {
+                    refs.push(file.source);
+                }
+                refs.extend(file.references.into_iter().map(Some));
+                while refs.len() < images.len() {
+                    refs.push(None);
+                }
+                for index in (0..images.len()).rev() {
+                    if images[index].is_none() {
+                        app.scene.remove_reference(index);
+                        images.remove(index);
+                        refs.remove(index);
+                    }
+                }
+                app.image = None;
+                app.extras.clear();
+                app.source_ref = None;
+                app.extra_refs.clear();
+                if app.scene.source_image.is_some() {
+                    app.image = images.first().cloned().flatten();
+                    app.source_ref = refs.first().cloned().flatten();
+                    app.extras = images.into_iter().skip(1).flatten().collect();
+                    app.extra_refs = refs.into_iter().skip(1).collect();
                 }
                 cx.notify();
             });
@@ -149,23 +203,27 @@ pub fn restore(state: Entity<AppState>, path: PathBuf, cx: &mut App) {
     .detach();
 }
 
-fn load_restored(path: &std::path::Path) -> Option<(SessionFile, Option<Arc<DecodedImage>>)> {
+fn load_restored(path: &std::path::Path) -> Option<(SessionFile, Vec<Option<Arc<DecodedImage>>>)> {
     let ReadSession::Loaded { file, .. } = SessionStore::open(path).read().ok()? else {
         return None;
     };
     let file = *file;
-    let image = file.source.as_ref().and_then(|source| {
-        let bytes = std::fs::read(&source.path).ok()?;
-        image_load::decode_image(&bytes, "session").ok()
-    });
-    let image = image.map(Arc::new);
-    if file.source.is_some() && image.is_none() {
-        let mut file = file;
-        file.scene.source_image = None;
-        file.source = None;
-        return Some((file, None));
+    let mut images = Vec::new();
+    if file.source.is_some() || file.scene.source_image.is_some() {
+        images.push(decode_ref(file.source.as_ref()));
     }
-    Some((file, image))
+    for reference in &file.references {
+        images.push(decode_ref(Some(reference)));
+    }
+    Some((file, images))
+}
+
+fn decode_ref(source: Option<&easel_core::session::SourceRef>) -> Option<Arc<DecodedImage>> {
+    let source = source?;
+    let bytes = std::fs::read(&source.path).ok()?;
+    image_load::decode_image(&bytes, "session")
+        .ok()
+        .map(Arc::new)
 }
 
 #[cfg(test)]
@@ -447,6 +505,259 @@ mod tests {
             restored.read_with(cx, |app, _| (app.image.is_some(), app.scene.boxes.len()));
         assert!(has_image);
         assert_eq!(boxes, 1);
+    }
+
+    fn decoded_color(
+        color: [u8; 3],
+        width: u32,
+        height: u32,
+    ) -> Arc<crate::image_load::DecodedImage> {
+        let dynamic = DynamicImage::ImageRgb8(RgbImage::from_pixel(width, height, Rgb(color)));
+        let mut bytes = Vec::new();
+        dynamic
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        Arc::new(crate::image_load::decode_image(&bytes, "tile").unwrap())
+    }
+
+    fn flush_session(
+        cx: &mut TestAppContext,
+        state: &gpui::Entity<AppState>,
+        root: &std::path::Path,
+    ) {
+        let _session = cx.new(|cx| {
+            Session::attach(
+                state.clone(),
+                root.join("session.json"),
+                root.join("session"),
+                cx,
+            )
+        });
+        state.update(cx, |app, cx| {
+            app.scene.prose.push(' ');
+            cx.notify();
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn relaunch_restores_the_source_and_the_extra(cx: &mut TestAppContext) {
+        let root = temp_dir("two");
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |app, cx| {
+            app.set_image(decoded_color([1, 2, 3], 20, 10), cx);
+            app.add_extra(decoded_color([4, 5, 6], 30, 12), cx).unwrap();
+            let spot = Rect {
+                x: 1,
+                y: 2,
+                w: 3,
+                h: 4,
+            };
+            app.scene.add_box(spot, BoxKind::Keep);
+            app.scene.add_box_on(spot, BoxKind::Keep, 1);
+        });
+        flush_session(cx, &state, &root);
+        let restored = cx.new(|_| AppState::new());
+        cx.update(|cx| restore(restored.clone(), root.join("session.json"), cx));
+        cx.run_until_parked();
+        let (source, extra, indexes) = restored.read_with(cx, |app, _| {
+            (
+                app.image.as_ref().unwrap().size,
+                app.extras[0].size,
+                app.scene
+                    .boxes
+                    .iter()
+                    .map(|element| element.from_image)
+                    .collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!(source, easel_core::geometry::Size { w: 20, h: 10 });
+        assert_eq!(extra, easel_core::geometry::Size { w: 30, h: 12 });
+        assert_eq!(indexes, [Some(0), Some(1)]);
+    }
+
+    #[gpui::test]
+    fn a_missing_extra_drops_that_slot_and_shifts_the_next_box(cx: &mut TestAppContext) {
+        let root = temp_dir("missing-extra");
+        let dir = root.join("session");
+        let source = own_image(
+            &dir,
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, Rgb([1, 1, 1]))),
+        )
+        .unwrap();
+        let gone = own_image(
+            &dir,
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(9, 9, Rgb([2, 2, 2]))),
+        )
+        .unwrap();
+        let kept = own_image(
+            &dir,
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(10, 10, Rgb([3, 3, 3]))),
+        )
+        .unwrap();
+        std::fs::remove_file(&gone.path).unwrap();
+        let mut scene = easel_core::scene::Scene::empty();
+        scene.set_source(easel_core::scene::ImageRef::new(&source.path, 8, 8));
+        scene.add_reference(easel_core::scene::ImageRef::new(&gone.path, 9, 9));
+        scene.add_reference(easel_core::scene::ImageRef::new(&kept.path, 10, 10));
+        scene.boxes.push(easel_core::scene::BoxElement {
+            id: easel_core::scene::BoxId::parse("box_1").unwrap(),
+            kind: BoxKind::Keep,
+            desc: String::new(),
+            src: Some(Rect {
+                x: 1,
+                y: 1,
+                w: 2,
+                h: 2,
+            }),
+            tgt: Some(Rect {
+                x: 1,
+                y: 1,
+                w: 2,
+                h: 2,
+            }),
+            from_image: Some(2),
+        });
+        SessionStore::open(root.join("session.json"))
+            .write(&SessionFile {
+                version: 1,
+                scene,
+                values: Default::default(),
+                model_id: String::new(),
+                source: Some(source),
+                references: vec![gone, kept],
+            })
+            .unwrap();
+        let state = cx.new(|_| AppState::new());
+        cx.update(|cx| restore(state.clone(), root.join("session.json"), cx));
+        cx.run_until_parked();
+        let (extras, from_image) = state.read_with(cx, |app, _| {
+            (app.extras.len(), app.scene.boxes[0].from_image)
+        });
+        assert_eq!(extras, 1);
+        assert_eq!(from_image, Some(1));
+    }
+
+    #[gpui::test]
+    fn flush_keeps_an_existing_source_file_and_owns_a_new_extra(cx: &mut TestAppContext) {
+        let root = temp_dir("keep-source");
+        let dir = root.join("session");
+        let image = DynamicImage::ImageRgb8(RgbImage::from_pixel(8, 8, Rgb([1, 2, 3])));
+        let owned = own_image(&dir, &image).unwrap();
+        let before = std::fs::metadata(&owned.path).unwrap().modified().unwrap();
+        let state = cx.new(|_| AppState::new());
+        let source_bytes = std::fs::read(&owned.path).unwrap();
+        let decoded = Arc::new(crate::image_load::decode_image(&source_bytes, "source").unwrap());
+        state.update(cx, |app, cx| {
+            app.set_image(decoded, cx);
+            app.source_ref = Some(owned.clone());
+            app.add_extra(decoded_color([7, 7, 7], 12, 12), cx).unwrap();
+        });
+        flush_session(cx, &state, &root);
+        let after = std::fs::metadata(&owned.path).unwrap().modified().unwrap();
+        assert_eq!(before, after);
+        let file = match SessionStore::open(root.join("session.json"))
+            .read()
+            .unwrap()
+        {
+            easel_core::session::ReadSession::Loaded { file, .. } => file,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(file.source.as_ref().unwrap().path, owned.path);
+        assert_eq!(file.references.len(), 1);
+        assert!(std::path::Path::new(&file.references[0].path).exists());
+    }
+
+    #[gpui::test]
+    fn a_moved_source_restores_in_the_swapped_order(cx: &mut TestAppContext) {
+        let root = temp_dir("swapped");
+        let dir = root.join("session");
+        let left = own_image(
+            &dir,
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(11, 11, Rgb([1, 0, 0]))),
+        )
+        .unwrap();
+        let right = own_image(
+            &dir,
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(13, 13, Rgb([0, 0, 1]))),
+        )
+        .unwrap();
+        let state = cx.new(|_| AppState::new());
+        let left_bytes = std::fs::read(&left.path).unwrap();
+        let right_bytes = std::fs::read(&right.path).unwrap();
+        state.update(cx, |app, cx| {
+            app.set_image(
+                Arc::new(crate::image_load::decode_image(&left_bytes, "left").unwrap()),
+                cx,
+            );
+            app.source_ref = Some(left.clone());
+            app.add_extra(
+                Arc::new(crate::image_load::decode_image(&right_bytes, "right").unwrap()),
+                cx,
+            )
+            .unwrap();
+            app.extra_refs.push(Some(right.clone()));
+            app.move_slot(0, 1, cx);
+        });
+        flush_session(cx, &state, &root);
+        let restored = cx.new(|_| AppState::new());
+        cx.update(|cx| restore(restored.clone(), root.join("session.json"), cx));
+        cx.run_until_parked();
+        let (source, extra) = restored.read_with(cx, |app, _| {
+            (
+                app.source_ref.as_ref().unwrap().path.clone(),
+                app.extra_refs[0].as_ref().unwrap().path.clone(),
+            )
+        });
+        assert_eq!(source, right.path);
+        assert_eq!(extra, left.path);
+    }
+
+    #[gpui::test]
+    fn a_missing_source_promotes_the_extra(cx: &mut TestAppContext) {
+        let root = temp_dir("missing-source");
+        let dir = root.join("session");
+        let source = own_image(
+            &dir,
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(6, 6, Rgb([1, 1, 1]))),
+        )
+        .unwrap();
+        let extra = own_image(
+            &dir,
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(7, 7, Rgb([2, 2, 2]))),
+        )
+        .unwrap();
+        std::fs::remove_file(&source.path).unwrap();
+        let mut scene = easel_core::scene::Scene::empty();
+        scene.set_source(easel_core::scene::ImageRef::new(&source.path, 6, 6));
+        scene.add_reference(easel_core::scene::ImageRef::new(&extra.path, 7, 7));
+        SessionStore::open(root.join("session.json"))
+            .write(&SessionFile {
+                version: 1,
+                scene,
+                values: Default::default(),
+                model_id: String::new(),
+                source: Some(source),
+                references: vec![extra.clone()],
+            })
+            .unwrap();
+        let state = cx.new(|_| AppState::new());
+        cx.update(|cx| restore(state.clone(), root.join("session.json"), cx));
+        cx.run_until_parked();
+        let (size, refs) = state.read_with(cx, |app, _| {
+            (app.image.as_ref().unwrap().size, app.scene.references.len())
+        });
+        assert_eq!(size, easel_core::geometry::Size { w: 7, h: 7 });
+        assert_eq!(refs, 0);
+        assert_eq!(
+            state.read_with(cx, |app, _| app.source_ref.as_ref().unwrap().path.clone()),
+            extra.path
+        );
     }
 
     fn huge_png() -> Vec<u8> {

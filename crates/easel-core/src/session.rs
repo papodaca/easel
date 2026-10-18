@@ -411,6 +411,36 @@ mod tests {
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
     }
 
+    #[test]
+    fn remove_unreferenced_keeps_the_source_and_the_extra() {
+        let root = temp_dir("refs");
+        let dir = root.join("session");
+        let source = own_image(
+            &dir,
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, Rgb([1, 0, 0]))),
+        )
+        .unwrap();
+        let extra = own_image(
+            &dir,
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(5, 5, Rgb([0, 1, 0]))),
+        )
+        .unwrap();
+        let stray = own_image(
+            &dir,
+            &DynamicImage::ImageRgb8(RgbImage::from_pixel(6, 6, Rgb([0, 0, 1]))),
+        )
+        .unwrap();
+        let mut file = sample();
+        file.source = Some(source.clone());
+        file.references = vec![extra.clone()];
+        SessionStore::open(root.join("session.json"))
+            .write(&file)
+            .unwrap();
+        assert!(std::path::Path::new(&source.path).exists());
+        assert!(std::path::Path::new(&extra.path).exists());
+        assert!(!std::path::Path::new(&stray.path).exists());
+    }
+
     fn mode_of(path: &std::path::Path) -> u32 {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
