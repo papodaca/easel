@@ -14,6 +14,8 @@ use crate::app_state::AppState;
 use crate::bottom_strip::BottomStrip;
 use crate::root::Root;
 
+use super::{file_uri, show_items_args};
+
 fn png() -> Vec<u8> {
     std::fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -521,7 +523,7 @@ fn a_single_click_opens_the_modal_after_the_interval(cx: &mut TestAppContext) {
     assert_eq!(dialog.prompt, "a red square");
     assert_eq!(
         dialog.actions,
-        vec!["Promote", "Save As", "Compare", "Discard"]
+        vec!["Promote", "Save As", "Reveal", "Compare", "Discard"]
     );
     assert!(cx.debug_bounds("history-action-Promote").is_some());
     assert!(cx.debug_bounds("strip-Promote").is_none());
@@ -632,6 +634,7 @@ fn an_unsupported_result_keeps_the_failed_line_and_an_empty_image(cx: &mut TestA
     let dialog = strip.update(&mut cx, |strip, cx| strip.dialog(cx).expect("modal"));
     assert!(dialog.image.is_none());
     assert!(dialog.line.contains("unsupported"));
+    assert!(dialog.actions.contains(&"Reveal".to_string()));
 }
 
 #[gpui::test]
@@ -872,4 +875,84 @@ fn restore_while_compare_is_open_shows_the_editor_again(cx: &mut TestAppContext)
     assert!(strip.read_with(&cx, |strip, cx| {
         strip.app_state().read(cx).inspection.is_none()
     }));
+}
+
+#[gpui::test]
+fn reveal_asks_for_show_items_and_stays_open(cx: &mut TestAppContext) {
+    let (root, strip, history, mut cx) = open_root(cx);
+    seed_done(&history, "job1");
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    strip.update(&mut cx, |strip, _| {
+        strip.set_reveal(Arc::new(move |uri, startup| {
+            record.lock().expect("calls").push((uri.to_owned(), startup.to_owned()));
+            Ok(())
+        }));
+    });
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    strip.update(&mut cx, |strip, cx| strip.press("Reveal", cx));
+    let calls = seen.lock().expect("calls").clone();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].0.starts_with("file://"), "{}", calls[0].0);
+    assert!(calls[0].0.ends_with("/job1/result.png"), "{}", calls[0].0);
+    assert_eq!(calls[0].1, "");
+    assert!(root.read_with(&cx, |root, cx| root.app_state.read(cx).history_item.is_some()));
+}
+
+#[gpui::test]
+fn a_failed_reveal_is_reported_and_starts_nothing_else(cx: &mut TestAppContext) {
+    let (root, strip, history, mut cx) = open_root(cx);
+    seed_done(&history, "job1");
+    let seen = Arc::new(std::sync::Mutex::new(0u32));
+    let record = Arc::clone(&seen);
+    strip.update(&mut cx, |strip, _| {
+        strip.set_reveal(Arc::new(move |_uri, _startup| {
+            *record.lock().expect("calls") += 1;
+            Err("file manager is not available".into())
+        }));
+    });
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    strip.update(&mut cx, |strip, cx| strip.press("Reveal", cx));
+    assert_eq!(*seen.lock().expect("calls"), 1);
+    assert!(root.read_with(&cx, |root, cx| {
+        root.status_line(cx).contains("file manager is not available")
+            && root.app_state.read(cx).history_item.is_some()
+    }));
+}
+
+#[test]
+fn reveal_percent_encodes_a_space_in_the_file_uri() {
+    let dir = temp_dir("space dir");
+    let history = Arc::new(HistoryStore::open(dir.join("history")).unwrap());
+    seed_done(&history, "job1");
+    let path = history
+        .result_path(&JobId::parse("job1").unwrap())
+        .unwrap();
+    let uri = file_uri(&path);
+    assert!(uri.contains("%20"), "{uri}");
+    assert!(!uri.contains(' '));
+    assert!(uri.ends_with("/job1/result.png"), "{uri}");
+    let args = show_items_args(&uri, "");
+    assert_eq!(args[5], "string:\"\"");
+    assert!(args[4].contains("%20"));
+    assert!(args[4].starts_with("array:string:\"file://"));
+    assert!(args[4].ends_with('"'));
+}
+
+#[test]
+fn show_items_sends_one_uri_and_an_empty_startup_id() {
+    let args = show_items_args("file:///tmp/result.png", "");
+    assert_eq!(
+        args,
+        vec![
+            "--session",
+            "--dest=org.freedesktop.FileManager1",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1.ShowItems",
+            "array:string:\"file:///tmp/result.png\"",
+            "string:\"\"",
+        ]
+    );
 }

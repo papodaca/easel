@@ -376,15 +376,22 @@ impl HistoryStore {
         self.write_index(&rows)
     }
 
-    pub fn result_bytes(&self, id: &JobId) -> Result<Vec<u8>, StoreError> {
-        let dir = self.entry_dir(id)?;
+    pub fn result_path(&self, id: &JobId) -> Option<PathBuf> {
+        let dir = self.entry_dir(id).ok()?;
         for name in ["result.png", "result.jpg", "result.webp", "result.bin"] {
             let path = dir.join(name);
             if path.exists() {
-                return fs::read(path).map_err(io_err);
+                return Some(path);
             }
         }
-        Err(StoreError::Io("result file is missing".into()))
+        None
+    }
+
+    pub fn result_bytes(&self, id: &JobId) -> Result<Vec<u8>, StoreError> {
+        let path = self
+            .result_path(id)
+            .ok_or_else(|| StoreError::Io("result file is missing".into()))?;
+        fs::read(path).map_err(io_err)
     }
 
     pub fn thumb_bytes(&self, id: &JobId) -> Option<Vec<u8>> {
@@ -1116,5 +1123,31 @@ mod tests {
         assert!(store.list().unwrap().is_empty());
         assert!(store.load_editor(&id).unwrap().is_none());
         assert!(!root.join("nowrite/request.json").exists());
+    }
+
+    #[test]
+    fn result_path_probes_png_then_jpeg_then_webp_then_bin() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        let missing = JobId::parse("nofile").unwrap();
+        store
+            .begin(&missing, &request_with_images(), &submitted("nofile"), None)
+            .unwrap();
+        assert!(store.result_path(&missing).is_none());
+
+        let id = JobId::parse("binjob").unwrap();
+        store
+            .begin(&id, &request_with_images(), &submitted("binjob"), None)
+            .unwrap();
+        fs::write(root.join("binjob/result.bin"), b"GIF89a").unwrap();
+        assert_eq!(
+            store.result_path(&id).unwrap(),
+            root.join("binjob/result.bin")
+        );
+        fs::write(root.join("binjob/result.png"), b"png").unwrap();
+        assert_eq!(
+            store.result_path(&id).unwrap(),
+            root.join("binjob/result.png")
+        );
     }
 }

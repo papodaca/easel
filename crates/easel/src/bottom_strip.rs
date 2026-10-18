@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::io::ErrorKind;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -74,6 +76,7 @@ pub struct BottomStrip {
     thumbs: HashMap<String, Arc<RenderImage>>,
     previews: HashMap<String, Preview>,
     notes: Option<gpui::Entity<Notifications>>,
+    reveal: Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>,
 }
 
 impl BottomStrip {
@@ -104,6 +107,7 @@ impl BottomStrip {
             thumbs: HashMap::new(),
             previews: HashMap::new(),
             notes: None,
+            reveal: Arc::new(dbus_show_items),
         }
     }
 
@@ -189,6 +193,7 @@ impl BottomStrip {
         match action {
             "Promote" => self.promote_selected(cx),
             "Save As" => self.save_selected(cx),
+            "Reveal" => self.reveal_selected(cx),
             "Compare" => self.compare_selected(cx),
             "Restore" => self.restore_selected(cx),
             "Discard" => {
@@ -372,6 +377,31 @@ impl BottomStrip {
         self.notes = Some(notes);
     }
 
+    #[cfg(test)]
+    pub fn set_reveal(
+        &mut self,
+        reveal: Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>,
+    ) {
+        self.reveal = reveal;
+    }
+
+    fn reveal_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .action_index(cx)
+            .and_then(|index| self.rows.get(index))
+            .and_then(|row| row.id.clone())
+        else {
+            return;
+        };
+        let Some(path) = self.history.result_path(&id) else {
+            return;
+        };
+        let uri = file_uri(&path);
+        if let Err(error) = (self.reveal)(&uri, "") {
+            self.report_status(&error, cx);
+        }
+    }
+
     fn save_selected(&mut self, cx: &mut Context<Self>) {
         let Some(row) = self.action_index(cx).and_then(|index| self.rows.get(index)) else {
             return;
@@ -511,6 +541,9 @@ impl BottomStrip {
         let prompt = self.rows[index].prompt.clone();
         let state = self.rows[index].state.clone();
         let has_editor = self.rows[index].editor.is_some();
+        let has_file = id
+            .as_ref()
+            .is_some_and(|id| self.history.result_path(id).is_some());
         let preview = id.as_ref().and_then(|id| self.result_preview(id));
         let mut actions = if self.pending_discard {
             vec!["Confirm".into(), "Cancel".into()]
@@ -522,6 +555,14 @@ impl BottomStrip {
         };
         if has_editor && !self.pending_discard {
             actions.insert(0, "Restore".into());
+        }
+        if has_file && !self.pending_discard {
+            let at = actions
+                .iter()
+                .position(|label| label == "Save As")
+                .map(|index| index + 1)
+                .unwrap_or(actions.len());
+            actions.insert(at, "Reveal".into());
         }
         let show_detail = detail.len() > line.len();
         Some(HistoryDialog {
@@ -694,6 +735,52 @@ fn copy_for(state: &JobState, status: &str) -> (String, String) {
         }
         JobState::Expired => ("Expired".into(), String::new()),
         JobState::Dismissed => ("Dismissed".into(), String::new()),
+    }
+}
+
+fn file_uri(path: &std::path::Path) -> String {
+    let mut uri = String::from("file://");
+    for byte in path.to_string_lossy().bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                uri.push(byte as char);
+            }
+            _ => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    uri
+}
+
+fn show_items_args(uri: &str, startup_id: &str) -> Vec<String> {
+    vec![
+        "--session".into(),
+        "--dest=org.freedesktop.FileManager1".into(),
+        "/org/freedesktop/FileManager1".into(),
+        "org.freedesktop.FileManager1.ShowItems".into(),
+        format!("array:string:\"{uri}\""),
+        format!("string:\"{startup_id}\""),
+    ]
+}
+
+fn dbus_show_items(uri: &str, startup_id: &str) -> Result<(), String> {
+    let output = Command::new("dbus-send")
+        .args(show_items_args(uri, startup_id))
+        .output();
+    match output {
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            Err("File manager is not available".into())
+        }
+        Err(error) => Err(error.to_string()),
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let text = String::from_utf8_lossy(&output.stderr);
+            let text = text.trim();
+            if text.is_empty() {
+                Err("Could not show the file".into())
+            } else {
+                Err(text.to_string())
+            }
+        }
     }
 }
 
