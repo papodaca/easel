@@ -1062,3 +1062,180 @@ fn fidelity_stays_hidden_without_an_image_and_keeps_its_value(cx: &mut TestAppCo
         json!("low")
     );
 }
+
+fn xai_validation(
+    cx: &mut VisualTestContext,
+    state: gpui::Entity<AppState>,
+) -> gpui::Entity<Validation> {
+    let keys: Arc<dyn crate::net::KeyResolver> =
+        Arc::new(MapKeys::default().insert(ProviderId::Xai, "xai-key"));
+    cx.new(|cx| Validation::new(state, keys, cx))
+}
+
+fn select_view(
+    form: &gpui::Entity<SchemaForm>,
+    cx: &VisualTestContext,
+    key: &str,
+) -> (Vec<String>, String) {
+    form.read_with(cx, |form, cx| {
+        let select = form.select(key).expect(key).read(cx);
+        let options = select
+            .options()
+            .iter()
+            .map(|option| option.to_string())
+            .collect();
+        let value = select.value().as_str().unwrap_or("").to_owned();
+        (options, value)
+    })
+}
+
+fn flux_submit(app: &AppState) -> easel_core::http::HttpRequest {
+    use easel_core::providers::{Provider, ReferenceStep};
+
+    let request = crate::jobs::build_request(app).expect("request");
+    let images = easel_core::providers::bfl::flux3::Flux3
+        .reference_steps(&request.images)
+        .into_iter()
+        .filter_map(|step| match step {
+            ReferenceStep::Inline(image) => Some(image),
+            ReferenceStep::Upload { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    easel_core::providers::bfl::flux3::Flux3.build_submit(&request, &images)
+}
+
+fn attach_prepared(app: &mut AppState, cx: &mut gpui::Context<AppState>, extras: usize) {
+    app.set_image(source_image(), cx);
+    for _ in 0..extras {
+        app.scene
+            .add_reference(easel_core::scene::ImageRef::new("ref", 64, 64));
+        app.extras.push(source_image());
+    }
+}
+
+#[gpui::test]
+fn xai_form_starts_at_auto_1k_and_auto(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("grok-imagine-image-2.0", cx);
+    });
+    let (aspects, aspect) = select_view(&form, &cx, "aspect_ratio");
+    let (resolutions, resolution) = select_view(&form, &cx, "resolution");
+    let (qualities, quality) = select_view(&form, &cx, "quality");
+    assert_eq!(
+        aspects,
+        [
+            "auto", "1:1", "3:4", "4:3", "9:16", "16:9", "2:3", "3:2", "9:19.5", "19.5:9", "9:20",
+            "20:9", "1:2", "2:1", "21:9", "5:2",
+        ]
+    );
+    assert_eq!(resolutions, ["1k", "1.5k", "2k"]);
+    assert_eq!(qualities, ["low", "medium", "auto"]);
+    assert_eq!(aspect, "auto");
+    assert_eq!(resolution, "1k");
+    assert_eq!(quality, "auto");
+}
+
+#[gpui::test]
+fn xai_five_images_generate_and_six_refuse(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("grok-imagine-image-2.0", cx);
+        app.scene.prose = "a harbor".into();
+        attach_prepared(app, cx, 4);
+    });
+    let validation = xai_validation(&mut cx, state.clone());
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+
+    state.update(&mut cx, |app, cx| {
+        app.scene
+            .add_reference(easel_core::scene::ImageRef::new("ref", 64, 64));
+        app.extras.push(source_image());
+        cx.notify();
+    });
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "At most 5 images."),
+        "{messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("will be sent"))
+    );
+    assert!(validation.read_with(&cx, |validation, cx| validation.send_notice(cx).is_none()));
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn xai_empty_prompt_disables_generate(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("grok-imagine-image-2.0", cx);
+        app.scene.prose.clear();
+    });
+    let validation = xai_validation(&mut cx, state);
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages.iter().any(|message| message == "Prompt is empty"),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn switching_to_xai_keeps_only_listed_values(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("gemini-nano-banana-2.1", cx);
+        app.values.insert("resolution".into(), json!("2K"));
+        app.values.insert("quality".into(), json!("low"));
+        app.values.insert("aspect_ratio".into(), json!("16:9"));
+        app.set_model("grok-imagine-image-2.0", cx);
+    });
+    assert_eq!(select_view(&form, &cx, "resolution").1, "1k");
+    assert_eq!(select_view(&form, &cx, "quality").1, "low");
+    assert_eq!(select_view(&form, &cx, "aspect_ratio").1, "16:9");
+    assert_eq!(stored(&state, &cx, "resolution"), Some(json!("1k")));
+    assert_eq!(stored(&state, &cx, "quality"), Some(json!("low")));
+    assert_eq!(stored(&state, &cx, "aspect_ratio"), Some(json!("16:9")));
+
+    state.update(&mut cx, |app, cx| {
+        app.set_model("gpt-image-2.5-flare", cx);
+        app.values.insert("quality".into(), json!("max"));
+        app.set_model("grok-imagine-image-2.0", cx);
+    });
+    assert_eq!(select_view(&form, &cx, "quality").1, "auto");
+    assert_eq!(stored(&state, &cx, "quality"), Some(json!("auto")));
+}
+
+#[gpui::test]
+fn switching_back_to_flux_keeps_the_prompt_canvas_and_request(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    let image = decoded(image::RgbaImage::from_pixel(
+        256,
+        256,
+        image::Rgba([20, 40, 60, 255]),
+    ));
+    state.update(&mut cx, |app, cx| {
+        app.scene.prose = "keep this prompt".into();
+        app.set_image(image, cx);
+    });
+    let before = state.read_with(&cx, |app, _| flux_submit(app));
+    state.update(&mut cx, |app, cx| {
+        app.set_model("grok-imagine-image-2.0", cx);
+        app.set_model("flux-3-image", cx);
+    });
+    let (prose, canvas, after) = state.read_with(&cx, |app, _| {
+        (
+            app.scene.prose.clone(),
+            app.image.is_some() && app.scene.source_image.is_some(),
+            flux_submit(app),
+        )
+    });
+    assert_eq!(prose, "keep this prompt");
+    assert!(canvas);
+    assert_eq!(after, before);
+}

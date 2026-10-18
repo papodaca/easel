@@ -76,6 +76,10 @@ impl Validation {
                 &prompt, &urls, prepared,
             ));
         }
+        if provider == ProviderId::Xai {
+            let prepared = usize::from(app.image.is_some()) + app.extras.len();
+            messages.extend(easel_core::providers::xai::refusal_messages(prepared));
+        }
         messages
     }
 
@@ -84,6 +88,11 @@ impl Validation {
         let prepared = usize::from(app.image.is_some()) + app.extras.len();
         if app.spec().provider == ProviderId::OpenAi
             && prepared > easel_core::providers::openai::IMAGE_CAP
+        {
+            return None;
+        }
+        if app.spec().provider == ProviderId::Xai
+            && prepared > easel_core::providers::xai::IMAGE_CAP
         {
             return None;
         }

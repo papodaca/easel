@@ -27,6 +27,8 @@ const RESOLUTIONS: &[&str] = &["1k", "1.5k", "2k"];
 
 const QUALITIES: &[&str] = &["low", "medium", "auto"];
 
+pub const IMAGE_CAP: usize = 5;
+
 static SPEC: std::sync::LazyLock<ModelSpec> = std::sync::LazyLock::new(spec);
 
 impl GrokImagine {
@@ -130,6 +132,15 @@ fn spec() -> ModelSpec {
             ],
             cross_rules: Vec::new(),
         },
+    }
+}
+
+#[must_use]
+pub fn refusal_messages(prepared: usize) -> Vec<String> {
+    if prepared > IMAGE_CAP {
+        vec![format!("At most {IMAGE_CAP} images.")]
+    } else {
+        Vec::new()
     }
 }
 
@@ -501,6 +512,15 @@ mod tests {
         assert_eq!(edited["quality"], "auto");
         assert_eq!(edited["resolution"], "1.5k");
         assert_eq!(edited["aspect_ratio"], "19.5:9");
+    }
+
+    #[test]
+    fn six_prepared_images_are_refused() {
+        assert!(super::refusal_messages(5).is_empty());
+        assert_eq!(
+            super::refusal_messages(6),
+            vec!["At most 5 images.".to_string()]
+        );
     }
 
     #[test]
