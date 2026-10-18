@@ -12,4 +12,5 @@ pub mod providers;
 pub mod scene;
 pub mod schema;
 pub mod session;
+pub mod sheet;
 pub mod text;

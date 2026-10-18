@@ -371,20 +371,7 @@ fn rescale_rects(element: &mut BoxElement, from: Size, to: Size) {
 }
 
 fn virtual_frame(ratio: Option<&str>) -> Option<Size> {
-    let ratio = ratio?;
-    if ratio.is_empty() || ratio == "auto" {
-        return None;
-    }
-    let (width, height) = ratio.split_once(':')?;
-    let width: u32 = width.parse().ok()?;
-    let height: u32 = height.parse().ok()?;
-    if width == 0 || height == 0 {
-        return None;
-    }
-    Some(Size {
-        w: 1000,
-        h: 1000 * height / width,
-    })
+    crate::sheet::virtual_frame(ratio)
 }
 
 fn retarget_boxes(boxes: &mut Vec<BoxElement>, change: RefChange) {
