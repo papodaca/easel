@@ -29,6 +29,34 @@ use crate::theme;
 use crate::ui::{Button, pane_header};
 use crate::widgets::Select;
 
+fn apply_provider(state: &gpui::Entity<AppState>, name: &str, cx: &mut gpui::App) {
+    let Some(provider) = easel_core::providers::ModelRegistry::providers()
+        .iter()
+        .copied()
+        .find(|provider| provider.display_name() == name)
+    else {
+        return;
+    };
+    state.update(cx, |app, cx| {
+        let Some(id) = app.model_for_provider(provider) else {
+            return;
+        };
+        app.set_model(&id, cx);
+    });
+}
+
+fn apply_model(state: &gpui::Entity<AppState>, name: &str, cx: &mut gpui::App) {
+    let provider = state.read(cx).spec().provider;
+    let Some(spec) = easel_core::providers::ModelRegistry::specs()
+        .iter()
+        .find(|spec| spec.provider == provider && spec.display_name == name)
+    else {
+        return;
+    };
+    let id = spec.id.clone();
+    state.update(cx, |app, cx| app.set_model(&id, cx));
+}
+
 pub struct SidePanel {
     app_state: gpui::Entity<AppState>,
     inspector: gpui::Entity<Inspector>,
@@ -36,6 +64,7 @@ pub struct SidePanel {
     references: gpui::Entity<References>,
     form: gpui::Entity<SchemaForm>,
     validation: gpui::Entity<Validation>,
+    provider: gpui::Entity<Select>,
     model: gpui::Entity<Select>,
     runner: Option<gpui::Entity<crate::jobs::JobRunner>>,
     scroll: ScrollHandle,
@@ -56,57 +85,96 @@ impl SidePanel {
         let form = cx.new(|cx| SchemaForm::new(app_state.clone(), cx));
         let resolver = std::sync::Arc::new(crate::settings::Resolver(keys));
         let validation = cx.new(|cx| Validation::new(app_state.clone(), resolver, cx));
-        let names = easel_core::providers::ModelRegistry::specs()
+        let provider_names = easel_core::providers::ModelRegistry::providers()
             .iter()
-            .map(|spec| gpui::SharedString::from(spec.display_name.clone()))
+            .map(|provider| gpui::SharedString::from(provider.display_name()))
             .collect();
-        let model = cx.new(|cx| {
-            let mut select = Select::new(names, cx);
-            select.set_value(
-                serde_json::Value::String(app_state.read(cx).spec().display_name.clone()),
-                cx,
-            );
+        let provider = cx.new(|cx| {
+            let mut select = Select::new(provider_names, cx);
             let state = app_state.clone();
             select.on_change(
                 Box::new(move |value, _window, cx| {
                     let Some(name) = value.as_str() else {
                         return;
                     };
-                    let Some(spec) = easel_core::providers::ModelRegistry::specs()
-                        .iter()
-                        .find(|spec| spec.display_name == name)
-                    else {
-                        return;
-                    };
-                    let id = spec.id.clone();
-                    state.update(cx, |app, cx| app.set_model(&id, cx));
+                    apply_provider(&state, name, cx);
                 }),
                 cx,
             );
             select
         });
-        let watched = app_state.clone();
-        let model_watch = model.clone();
-        cx.observe(&watched, move |_, app, cx| {
-            let name = app.read(cx).spec().display_name.clone();
-            model_watch.update(cx, |select, cx| {
-                select.set_value(serde_json::Value::String(name), cx);
-            });
-        })
-        .detach();
-        Self {
+        let model = cx.new(|cx| {
+            let mut select = Select::new(Vec::new(), cx);
+            let state = app_state.clone();
+            select.on_change(
+                Box::new(move |value, _window, cx| {
+                    let Some(name) = value.as_str() else {
+                        return;
+                    };
+                    apply_model(&state, name, cx);
+                }),
+                cx,
+            );
+            select
+        });
+        let mut panel = Self {
             app_state,
             inspector,
             prompt,
             references,
             form,
             validation,
+            provider,
             model,
             runner,
             scroll: ScrollHandle::new(),
             thumb: Bounds::default(),
             thumb_grab: None,
-        }
+        };
+        panel.sync_menus(cx);
+        let watched = panel.app_state.clone();
+        cx.observe(&watched, |this, _, cx| this.sync_menus(cx))
+            .detach();
+        panel
+    }
+
+    fn sync_menus(&mut self, cx: &mut Context<Self>) {
+        let spec = self.app_state.read(cx).spec();
+        let provider_name = spec.provider.display_name().to_owned();
+        let model_name = spec.display_name.clone();
+        let provider = spec.provider;
+        let models: Vec<gpui::SharedString> = easel_core::providers::ModelRegistry::specs()
+            .iter()
+            .filter(|spec| spec.provider == provider)
+            .map(|spec| gpui::SharedString::from(spec.display_name.clone()))
+            .collect();
+        self.provider.update(cx, |select, cx| {
+            select.set_value(serde_json::Value::String(provider_name), cx);
+        });
+        self.model.update(cx, |select, cx| {
+            select.set_options(models, cx);
+            select.set_value(serde_json::Value::String(model_name), cx);
+        });
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn choose_provider(&mut self, name: &str, cx: &mut Context<Self>) {
+        apply_provider(&self.app_state, name, cx);
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn choose_model(&mut self, name: &str, cx: &mut Context<Self>) {
+        apply_model(&self.app_state, name, cx);
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn provider_menu(&self) -> &gpui::Entity<Select> {
+        &self.provider
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn model_menu(&self) -> &gpui::Entity<Select> {
+        &self.model
     }
 
     fn scroll_by_thumb(&mut self, y: Pixels, window: &mut Window, cx: &mut Context<Self>) {
@@ -184,11 +252,12 @@ impl Render for SidePanel {
             )
         } else {
             (
-                pane_header("Editor").child(self.model.clone()),
+                pane_header("Editor").child(self.provider.clone()),
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(12.))
+                    .child(self.model.clone())
                     .child(self.inspector.clone())
                     .child(self.references.clone())
                     .child(self.prompt.clone())

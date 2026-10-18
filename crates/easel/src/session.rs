@@ -132,6 +132,7 @@ pub fn restore(state: Entity<AppState>, path: PathBuf, cx: &mut App) {
                     .any(|spec| spec.id == file.model_id)
                 {
                     app.model_id = file.model_id.clone();
+                    app.remember_model();
                 }
                 app.scene = file.scene;
                 app.values = app.reconcile_values(file.values);

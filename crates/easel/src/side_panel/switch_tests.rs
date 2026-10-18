@@ -1,10 +1,16 @@
+use std::sync::Arc;
+
 use easel_core::geometry::Rect;
 use easel_core::scene::{BoxKind, ImageRef};
+use easel_core::session::{SessionFile, SessionStore};
 use gpui::{TestAppContext, prelude::*};
 use serde_json::json;
 
 use crate::app_state::AppState;
 use crate::jobs::build_request;
+use crate::session::restore;
+use crate::settings::SharedKeys;
+use crate::side_panel::SidePanel;
 
 fn app(cx: &mut TestAppContext) -> gpui::Entity<AppState> {
     cx.update(|cx| cx.new(|_| AppState::new()))
@@ -137,4 +143,179 @@ fn google_compile_drops_a_box_tag_and_does_not_require_flux_fields(cx: &mut Test
         errors.iter().all(|error| error.key != "safety_tolerance"),
         "{errors:?}"
     );
+}
+
+fn editor(cx: &mut TestAppContext) -> (gpui::Entity<AppState>, gpui::Entity<SidePanel>) {
+    let state = app(cx);
+    let keys = Arc::new(SharedKeys::default());
+    let panel = cx.update({
+        let state = state.clone();
+        move |cx| cx.new(|cx| SidePanel::new(state, keys, None, cx))
+    });
+    (state, panel)
+}
+
+fn labels(cx: &TestAppContext, select: gpui::Entity<crate::widgets::Select>) -> Vec<String> {
+    select.read_with(cx, |select, _| {
+        select
+            .options()
+            .iter()
+            .map(|option| option.to_string())
+            .collect()
+    })
+}
+
+fn selected(cx: &TestAppContext, select: gpui::Entity<crate::widgets::Select>) -> String {
+    select.read_with(cx, |select, _| {
+        select.value().as_str().unwrap_or("").to_owned()
+    })
+}
+
+#[gpui::test]
+fn the_header_lists_providers_and_the_body_lists_their_models(cx: &mut TestAppContext) {
+    let (_state, panel) = editor(cx);
+    let providers = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.provider_menu().clone()),
+    );
+    assert!(providers.contains(&"Google".to_string()));
+    assert!(providers.contains(&"Black Forest Labs".to_string()));
+    assert!(providers.contains(&"Krea".to_string()));
+    assert!(!providers.iter().any(|name| name == "FLUX 3"));
+    assert_eq!(
+        selected(
+            cx,
+            panel.read_with(cx, |panel, _| panel.provider_menu().clone())
+        ),
+        "Black Forest Labs"
+    );
+
+    panel.update(cx, |panel, cx| panel.choose_provider("Google", cx));
+    let models = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.model_menu().clone()),
+    );
+    assert_eq!(
+        models,
+        ["Nano Banana 2.1", "Nano Banana 2 Lite", "Nano Banana Pro",]
+    );
+    assert!(!models.iter().any(|name| name == "FLUX 3"));
+    assert_eq!(
+        selected(
+            cx,
+            panel.read_with(cx, |panel, _| panel.model_menu().clone())
+        ),
+        "Nano Banana 2.1"
+    );
+
+    panel.update(cx, |panel, cx| panel.choose_provider("Krea", cx));
+    let models = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.model_menu().clone()),
+    );
+    assert_eq!(models, ["Krea 3", "Krea 2 Large"]);
+    assert_eq!(
+        selected(
+            cx,
+            panel.read_with(cx, |panel, _| panel.model_menu().clone())
+        ),
+        "Krea 3"
+    );
+
+    panel.update(cx, |panel, cx| panel.choose_provider("Google", cx));
+    panel.update(cx, |panel, cx| panel.choose_model("Nano Banana Pro", cx));
+    panel.update(cx, |panel, cx| panel.choose_provider("Krea", cx));
+    panel.update(cx, |panel, cx| panel.choose_provider("Google", cx));
+    assert_eq!(
+        selected(
+            cx,
+            panel.read_with(cx, |panel, _| panel.model_menu().clone())
+        ),
+        "Nano Banana Pro"
+    );
+}
+
+#[gpui::test]
+fn switching_to_lite_keeps_the_prompt_and_drops_wide_ratio_and_grounding(cx: &mut TestAppContext) {
+    let (state, panel) = editor(cx);
+    state.update(cx, |app, cx| {
+        app.scene.prose = "keep this prompt".into();
+        app.set_model("gemini-nano-banana-2.1", cx);
+        app.values.insert("grounding".into(), json!(true));
+        app.values.insert("aspect_ratio".into(), json!("1:8"));
+        app.values.insert("resolution".into(), json!("2K"));
+    });
+    panel.update(cx, |panel, cx| panel.choose_model("Nano Banana 2 Lite", cx));
+    let (prose, values, fields) = state.read_with(cx, |app, _| {
+        (
+            app.scene.prose.clone(),
+            app.values.clone(),
+            app.spec()
+                .schema
+                .fields
+                .iter()
+                .map(|field| field.key.clone())
+                .collect::<Vec<_>>(),
+        )
+    });
+    assert_eq!(prose, "keep this prompt");
+    assert!(!fields.iter().any(|key| key == "grounding"));
+    assert!(!values.contains_key("grounding"));
+    assert_ne!(values.get("aspect_ratio"), Some(&json!("1:8")));
+    assert_eq!(values.get("resolution"), Some(&json!("1K")));
+    let ratios = state.read_with(cx, |app, _| {
+        app.spec()
+            .schema
+            .fields
+            .iter()
+            .find(|field| field.key == "aspect_ratio")
+            .and_then(|field| match &field.kind {
+                easel_core::schema::FieldKind::Select { options } => Some(options.clone()),
+                _ => None,
+            })
+    });
+    assert!(!ratios.unwrap().iter().any(|ratio| ratio == "1:8"));
+}
+
+#[gpui::test]
+fn a_restored_pro_session_shows_google_and_nano_banana_pro(cx: &mut TestAppContext) {
+    let root = std::env::temp_dir().join(format!(
+        "easel-restore-pro-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let file = SessionFile {
+        version: 1,
+        scene: easel_core::scene::Scene::empty(),
+        values: std::collections::BTreeMap::new(),
+        model_id: "gemini-3-pro-image".into(),
+        source: None,
+        references: Vec::new(),
+    };
+    SessionStore::open(root.join("session.json"))
+        .write(&file)
+        .unwrap();
+    let (state, panel) = editor(cx);
+    cx.update(|cx| restore(state, root.join("session.json"), cx));
+    cx.run_until_parked();
+    assert_eq!(
+        selected(
+            cx,
+            panel.read_with(cx, |panel, _| panel.provider_menu().clone())
+        ),
+        "Google"
+    );
+    assert_eq!(
+        selected(
+            cx,
+            panel.read_with(cx, |panel, _| panel.model_menu().clone())
+        ),
+        "Nano Banana Pro"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use easel_core::geometry::Rect;
@@ -37,11 +37,12 @@ pub struct AppState {
     retired_renders: Vec<Arc<RenderImage>>,
     krea_sunset_noted: bool,
     pub model_id: String,
+    last_by_provider: HashMap<easel_core::model_spec::ProviderId, String>,
 }
 
 impl AppState {
     pub fn new() -> Self {
-        Self {
+        let mut app = Self {
             settings_open: false,
             quit_requested: false,
             image: None,
@@ -60,7 +61,33 @@ impl AppState {
             retired_renders: Vec::new(),
             krea_sunset_noted: false,
             model_id: easel_core::providers::bfl::flux3::Flux3.spec().id.clone(),
-        }
+            last_by_provider: HashMap::new(),
+        };
+        app.remember_model();
+        app
+    }
+
+    pub fn remember_model(&mut self) {
+        let Some(spec) = easel_core::providers::ModelRegistry::specs()
+            .iter()
+            .copied()
+            .find(|spec| spec.id == self.model_id)
+        else {
+            return;
+        };
+        self.last_by_provider.insert(spec.provider, spec.id.clone());
+    }
+
+    pub fn model_for_provider(
+        &self,
+        provider: easel_core::model_spec::ProviderId,
+    ) -> Option<String> {
+        self.last_by_provider.get(&provider).cloned().or_else(|| {
+            easel_core::providers::ModelRegistry::specs()
+                .iter()
+                .find(|spec| spec.provider == provider)
+                .map(|spec| spec.id.clone())
+        })
     }
 
     pub fn spec(&self) -> &'static easel_core::model_spec::ModelSpec {
@@ -89,6 +116,7 @@ impl AppState {
             }
         }
         self.model_id = spec.id.clone();
+        self.remember_model();
         self.values = values;
         if !spec.capabilities.supports_boxes && self.tool == Tool::Box {
             self.tool = Tool::Select;
