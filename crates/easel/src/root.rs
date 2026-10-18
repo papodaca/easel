@@ -1,12 +1,12 @@
 use gpui::{
     App, Context, ExternalPaths, FocusHandle, Focusable, IntoElement, MouseButton, ParentElement,
-    PathPromptOptions, Render, ResizeEdge, Styled, Window, div, prelude::*, px, rgb,
+    PathPromptOptions, Render, ResizeEdge, Styled, Window, div, img, prelude::*, px, rgb,
 };
 
 use crate::actions::{ActualSize, CloseSettings, Fit, Open, Paste, Quit, SaveAs, Settings};
 use crate::app_state::AppState;
 use crate::assets;
-use crate::bottom_strip::BottomStrip;
+use crate::bottom_strip::{BottomStrip, HistoryDialog};
 use crate::canvas::Canvas;
 use crate::chrome::{self, TitleBar};
 use crate::image_load::{self, prompt_failure_text};
@@ -38,6 +38,36 @@ pub struct Root {
 
 impl Root {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        Self::with_history(Self::open_store(), cx)
+    }
+
+    #[cfg(test)]
+    pub fn test_open(
+        history: std::sync::Arc<easel_core::history::HistoryStore>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_history(history, cx)
+    }
+
+    fn open_store() -> std::sync::Arc<easel_core::history::HistoryStore> {
+        match easel_core::history::HistoryStore::open(crate::jobs::data_dir().join("history")) {
+            Ok(store) => std::sync::Arc::new(store),
+            Err(error) => {
+                log::warn!("history store: {error}");
+                std::sync::Arc::new(
+                    easel_core::history::HistoryStore::open(
+                        std::env::temp_dir().join("easel-history"),
+                    )
+                    .expect("temporary history store"),
+                )
+            }
+        }
+    }
+
+    fn with_history(
+        history: std::sync::Arc<easel_core::history::HistoryStore>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let app_state = cx.new(|_cx| AppState::new());
         let notifications = cx.new(|_cx| Notifications::new());
         let title_bar = cx.new(|_cx| TitleBar::new());
@@ -53,20 +83,6 @@ impl Root {
         let settings = cx.new(move |cx| {
             SettingsPanel::open(settings_notes, settings_transport, settings_keys, cx)
         });
-        let history = match easel_core::history::HistoryStore::open(
-            crate::jobs::data_dir().join("history"),
-        ) {
-            Ok(store) => std::sync::Arc::new(store),
-            Err(error) => {
-                log::warn!("history store: {error}");
-                std::sync::Arc::new(
-                    easel_core::history::HistoryStore::open(
-                        std::env::temp_dir().join("easel-history"),
-                    )
-                    .expect("temporary history store"),
-                )
-            }
-        };
         let credit_transport = std::sync::Arc::clone(&transport);
         let runner_transport = transport;
         let runner_keys = std::sync::Arc::new(Resolver(std::sync::Arc::clone(&keys)));
@@ -187,6 +203,120 @@ impl Root {
                             .overflow_y_scroll()
                             .p(px(16.))
                             .child(self.settings.clone()),
+                    ),
+            )
+    }
+
+    fn history_modal(&self, dialog: HistoryDialog) -> impl IntoElement {
+        let strip = self.bottom_strip.clone();
+        let image = dialog.image.clone();
+        let mut details = vec![dialog.line.clone()];
+        if let Some(cost) = dialog.cost {
+            details.push(format!("{cost:.2}"));
+        }
+        if !dialog.detail.is_empty() {
+            details.push(dialog.detail.clone());
+        }
+        if !dialog.model.is_empty() {
+            details.push(dialog.model.clone());
+        }
+        if let Some((width, height)) = dialog.pixel_size {
+            details.push(format!("{width} x {height}"));
+        }
+        let actions = dialog.actions.clone();
+        let confirming = dialog.confirming;
+        let prompt = dialog.prompt;
+        div()
+            .id("history-scrim")
+            .debug_selector(|| "history-scrim".into())
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme::color(0x11111b, 0.72))
+            .on_mouse_down(MouseButton::Left, {
+                let strip = strip.clone();
+                move |_, _, cx| {
+                    strip.update(cx, |strip, cx| strip.dismiss_modal(cx));
+                }
+            })
+            .child(
+                div()
+                    .id("history-dialog")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .flex()
+                    .flex_col()
+                    .w(px(480.))
+                    .max_h(px(640.))
+                    .bg(rgb(theme::PANEL))
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .rounded_md()
+                    .overflow_hidden()
+                    .text_color(rgb(theme::TEXT))
+                    .child(pane_header("History").child({
+                        let strip = strip.clone();
+                        Button::ghost("history-close", "Close").on_click(move |_, _, cx| {
+                            strip.update(cx, |strip, cx| strip.dismiss_modal(cx));
+                        })
+                    }))
+                    .child(
+                        div()
+                            .id("history-body")
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .gap(px(12.))
+                            .overflow_y_scroll()
+                            .p(px(16.))
+                            .child(
+                                div()
+                                    .id("history-image")
+                                    .debug_selector(|| "history-image".into())
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .w_full()
+                                    .h(px(220.))
+                                    .children(
+                                        image.map(|image| img(image).max_w_full().max_h_full()),
+                                    ),
+                            )
+                            .children(details.into_iter().map(|line| {
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme::TEXT_MUTED))
+                                    .child(line)
+                            }))
+                            .child(div().text_sm().child(prompt))
+                            .when(confirming, |body| {
+                                body.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme::TEXT_MUTED))
+                                        .child("Discard this result?"),
+                                )
+                            })
+                            .child(div().flex().flex_row().flex_wrap().gap(px(6.)).children(
+                                actions.into_iter().map(|label| {
+                                    let name = label.clone();
+                                    let strip = strip.clone();
+                                    div()
+                                        .debug_selector(|| format!("history-action-{label}"))
+                                        .child(
+                                            Button::ghost(format!("history-{name}"), label)
+                                                .on_click(move |_, _, cx| {
+                                                    strip.update(cx, |strip, cx| {
+                                                        strip.press(&name, cx);
+                                                    });
+                                                }),
+                                        )
+                                }),
+                            )),
                     ),
             )
     }
@@ -321,12 +451,22 @@ impl Root {
     }
 
     fn close_settings(&mut self, _: &CloseSettings, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.app_state.read(cx).settings_open {
+        if self.app_state.read(cx).settings_open {
+            self.app_state
+                .update(cx, |state, cx| state.set_settings_open(false, cx));
+            self.set_status("Ready", cx);
             return;
         }
-        self.app_state
-            .update(cx, |state, cx| state.set_settings_open(false, cx));
-        self.set_status("Ready", cx);
+        if self.app_state.read(cx).history_item.is_some() {
+            self.bottom_strip
+                .update(cx, |strip, cx| strip.dismiss_modal(cx));
+            self.set_status("Ready", cx);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn strip(&self) -> gpui::Entity<BottomStrip> {
+        self.bottom_strip.clone()
     }
 
     fn quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
@@ -407,7 +547,12 @@ impl Render for Root {
                     )
                     .child(self.bottom_strip.clone()),
             )
-            .child(self.status_bar.clone())
+            .child(self.status_bar.clone());
+        let history_dialog = self.bottom_strip.update(cx, |strip, cx| strip.dialog(cx));
+        let content = content
+            .when_some(history_dialog, |root, dialog| {
+                root.child(self.history_modal(dialog))
+            })
             .when(self.app_state.read(cx).settings_open, |root| {
                 root.child(self.settings_modal(cx))
             });

@@ -39,6 +39,9 @@ pub struct LiveJob {
     pub cost: Option<f64>,
     pub status: String,
     pub bytes: Option<Vec<u8>>,
+    /// Typed prompt from the Generate snapshot. Absent on rows submitted before it existed.
+    pub prose: Option<String>,
+    pub model_id: String,
 }
 
 pub struct JobRunner {
@@ -199,6 +202,12 @@ impl JobRunner {
                 cost: slot.cost,
                 status: slot.status.clone(),
                 bytes: slot.bytes.clone(),
+                prose: slot.editor.as_ref().map(|editor| editor.prose.clone()),
+                model_id: slot
+                    .editor
+                    .as_ref()
+                    .map(|editor| editor.model_id.clone())
+                    .unwrap_or_else(|| slot.request.model_id.clone()),
             })
             .collect()
     }

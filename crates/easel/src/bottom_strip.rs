@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use easel_core::history::HistoryStore;
 use easel_core::job::JobState;
@@ -11,14 +12,38 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, canvas, div, img, point, prelude::*, px, rgb,
 };
 
-use crate::app_state::AppState;
+use crate::app_state::{AppState, HistoryItem};
 use crate::image_load::decode_image;
 use crate::jobs::{JobRunner, LiveJob, inspection_from, promote};
 use crate::theme;
-use crate::ui::{Button, pane_header};
+use crate::ui::pane_header;
 
 const CARD_LIMIT: usize = 2 * 1024;
 const DETAIL_LIMIT: usize = 16 * 1024;
+const OPEN_AFTER: Duration = Duration::from_millis(400);
+
+struct ArmedClick {
+    item: HistoryItem,
+    generation: u64,
+}
+
+struct Preview {
+    image: Arc<RenderImage>,
+    width: u32,
+    height: u32,
+}
+
+pub struct HistoryDialog {
+    pub image: Option<Arc<RenderImage>>,
+    pub pixel_size: Option<(u32, u32)>,
+    pub line: String,
+    pub detail: String,
+    pub cost: Option<f64>,
+    pub model: String,
+    pub prompt: String,
+    pub actions: Vec<String>,
+    pub confirming: bool,
+}
 
 struct Row {
     token: Option<u64>,
@@ -30,6 +55,8 @@ struct Row {
     cost: Option<f64>,
     bytes: Option<Vec<u8>>,
     thumb: Option<Arc<RenderImage>>,
+    prompt: String,
+    model: String,
 }
 
 pub struct BottomStrip {
@@ -40,7 +67,10 @@ pub struct BottomStrip {
     bounds: Vec<Bounds<Pixels>>,
     selected: Option<usize>,
     pending_discard: bool,
+    armed: Option<ArmedClick>,
+    arm_generation: u64,
     thumbs: HashMap<String, Arc<RenderImage>>,
+    previews: HashMap<String, Preview>,
 }
 
 impl BottomStrip {
@@ -66,13 +96,27 @@ impl BottomStrip {
             bounds: Vec::new(),
             selected: None,
             pending_discard: false,
+            armed: None,
+            arm_generation: 0,
             thumbs: HashMap::new(),
+            previews: HashMap::new(),
         }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn app_state(&self) -> gpui::Entity<AppState> {
         self.app_state.clone()
+    }
+
+    #[cfg(test)]
+    pub fn show(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.rebuild(cx);
+        self.open_row(index, cx);
+    }
+
+    #[cfg(test)]
+    pub fn history(&self) -> Arc<HistoryStore> {
+        Arc::clone(&self.history)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -99,6 +143,7 @@ impl BottomStrip {
             .unwrap_or_default()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn actions(&self) -> Vec<String> {
         if self.pending_discard {
             return vec!["Confirm".into(), "Cancel".into()];
@@ -126,6 +171,7 @@ impl BottomStrip {
         )
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.rows.len() {
             return;
@@ -188,13 +234,15 @@ impl BottomStrip {
         let thumb = job.id.as_ref().and_then(|id| self.thumb_for(id));
         Row {
             token: Some(job.token),
-            id: job.id,
+            id: job.id.clone(),
             state: job.state,
             line,
             detail,
             cost: job.cost,
             bytes: job.bytes,
             thumb,
+            prompt: self.prompt_for(job.prose, job.id.as_ref()),
+            model: self.model_for(Some(job.model_id), job.id.as_ref()),
         }
     }
 
@@ -204,13 +252,15 @@ impl BottomStrip {
         let thumb = self.thumb_for(&id);
         Row {
             token: None,
-            id: Some(id),
+            id: Some(id.clone()),
             state,
             line,
             detail,
             cost,
             bytes,
             thumb,
+            prompt: self.prompt_for(None, Some(&id)),
+            model: self.model_for(None, Some(&id)),
         }
     }
 
@@ -227,19 +277,26 @@ impl BottomStrip {
     }
 
     fn promote_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(bytes) = self.selected_bytes() else {
+        let Some(index) = self.action_index(cx) else {
+            return;
+        };
+        self.promote_index(index, cx);
+    }
+
+    fn promote_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(bytes) = self.bytes_at(index) else {
             return;
         };
         let state = self.app_state.clone();
         let ok = state.update(cx, |app, cx| promote(app, &bytes, cx)).is_ok();
         if ok {
-            cx.notify();
+            self.close_modal(cx);
         }
     }
 
     fn compare_selected(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self
-            .selected
+            .action_index(cx)
             .and_then(|index| self.rows.get(index))
             .and_then(|row| row.id.clone())
         else {
@@ -259,10 +316,11 @@ impl BottomStrip {
             app.inspection = Some(inspection);
             cx.notify();
         });
+        self.close_modal(cx);
     }
 
     fn save_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(row) = self.selected.and_then(|index| self.rows.get(index)) else {
+        let Some(row) = self.action_index(cx).and_then(|index| self.rows.get(index)) else {
             return;
         };
         let Some(bytes) = row.bytes.clone().or_else(|| {
@@ -296,7 +354,7 @@ impl BottomStrip {
     }
 
     fn confirm_discard(&mut self, cx: &mut Context<Self>) {
-        let Some(index) = self.selected else {
+        let Some(index) = self.action_index(cx) else {
             return;
         };
         let Some(row) = self.rows.get(index) else {
@@ -313,12 +371,12 @@ impl BottomStrip {
         self.pending_discard = false;
         self.selected = None;
         self.rebuild(cx);
-        cx.notify();
+        self.close_modal(cx);
     }
 
     fn dismiss_selected(&mut self, cx: &mut Context<Self>) {
         let Some(token) = self
-            .selected
+            .action_index(cx)
             .and_then(|index| self.rows.get(index))
             .and_then(|row| row.token)
         else {
@@ -328,17 +386,212 @@ impl BottomStrip {
             runner.update(cx, |runner, cx| runner.dismiss_token(token, cx));
         }
         self.rebuild(cx);
+        self.sync_modal(cx);
         cx.notify();
     }
 
-    fn selected_bytes(&self) -> Option<Vec<u8>> {
-        let row = self.selected.and_then(|index| self.rows.get(index))?;
+    fn bytes_at(&self, index: usize) -> Option<Vec<u8>> {
+        let row = self.rows.get(index)?;
         if let Some(bytes) = &row.bytes {
             return Some(bytes.clone());
         }
         row.id
             .as_ref()
             .and_then(|id| self.history.result_bytes(id).ok())
+    }
+
+    fn action_index(&self, cx: &Context<Self>) -> Option<usize> {
+        if let Some(item) = self.app_state.read(cx).history_item.clone() {
+            return self.row_for(&item);
+        }
+        self.selected
+    }
+
+    fn row_for(&self, item: &HistoryItem) -> Option<usize> {
+        self.rows.iter().position(|row| {
+            (item.token.is_some() && row.token == item.token)
+                || (item.id.is_some() && row.id == item.id)
+        })
+    }
+
+    pub fn dismiss_modal(&mut self, cx: &mut Context<Self>) {
+        self.cancel_arm();
+        self.close_modal(cx);
+    }
+
+    fn close_modal(&mut self, cx: &mut Context<Self>) {
+        self.pending_discard = false;
+        self.app_state
+            .update(cx, |app, cx| app.set_history_item(None, cx));
+        cx.notify();
+    }
+
+    fn sync_modal(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = self.app_state.read(cx).history_item.clone() else {
+            return;
+        };
+        let Some(index) = self.row_for(&item) else {
+            self.close_modal(cx);
+            return;
+        };
+        let row = &self.rows[index];
+        let next = HistoryItem {
+            token: row.token.or(item.token),
+            id: row.id.clone().or(item.id.clone()),
+        };
+        if next != item {
+            self.app_state
+                .update(cx, |app, cx| app.set_history_item(Some(next), cx));
+        }
+    }
+
+    pub fn dialog(&mut self, cx: &mut Context<Self>) -> Option<HistoryDialog> {
+        self.rebuild(cx);
+        self.sync_modal(cx);
+        let item = self.app_state.read(cx).history_item.clone()?;
+        let index = self.row_for(&item)?;
+        let id = self.rows[index].id.clone();
+        let line = self.rows[index].line.clone();
+        let detail = self.rows[index].detail.clone();
+        let cost = self.rows[index].cost;
+        let model = self.rows[index].model.clone();
+        let prompt = self.rows[index].prompt.clone();
+        let state = self.rows[index].state.clone();
+        let preview = id.as_ref().and_then(|id| self.result_preview(id));
+        let actions = if self.pending_discard {
+            vec!["Confirm".into(), "Cancel".into()]
+        } else {
+            actions_for(&state)
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        };
+        let show_detail = detail.len() > line.len();
+        Some(HistoryDialog {
+            image: preview.as_ref().map(|preview| Arc::clone(&preview.image)),
+            pixel_size: preview.map(|preview| (preview.width, preview.height)),
+            line,
+            detail: if show_detail { detail } else { String::new() },
+            cost,
+            model,
+            prompt,
+            actions,
+            confirming: self.pending_discard,
+        })
+    }
+
+    fn prompt_for(&self, prose: Option<String>, id: Option<&JobId>) -> String {
+        if let Some(prose) = prose {
+            return prose;
+        }
+        let Some(id) = id else {
+            return String::new();
+        };
+        if let Some(editor) = self.history.load_editor(id).ok().flatten() {
+            return editor.prose;
+        }
+        self.history
+            .load_request(id)
+            .map(|loaded| loaded.compiled_prompt)
+            .unwrap_or_default()
+    }
+
+    fn model_for(&self, model: Option<String>, id: Option<&JobId>) -> String {
+        if let Some(model) = model.filter(|model| !model.is_empty()) {
+            return model;
+        }
+        let Some(id) = id else {
+            return String::new();
+        };
+        if let Some(editor) = self.history.load_editor(id).ok().flatten() {
+            return editor.model_id;
+        }
+        self.history
+            .load_request(id)
+            .map(|loaded| loaded.model_id)
+            .unwrap_or_default()
+    }
+
+    fn result_preview(&mut self, id: &JobId) -> Option<Preview> {
+        if let Some(preview) = self.previews.get(id.as_str()) {
+            return Some(Preview {
+                image: Arc::clone(&preview.image),
+                width: preview.width,
+                height: preview.height,
+            });
+        }
+        let bytes = self.history.result_bytes(id).ok()?;
+        let decoded = decode_image(&bytes, "result").ok()?;
+        let preview = Preview {
+            image: Arc::clone(&decoded.render),
+            width: decoded.size.w,
+            height: decoded.size.h,
+        };
+        self.previews.insert(
+            id.as_str().to_string(),
+            Preview {
+                image: Arc::clone(&preview.image),
+                width: preview.width,
+                height: preview.height,
+            },
+        );
+        Some(preview)
+    }
+
+    fn open_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(row) = self.rows.get(index) else {
+            return;
+        };
+        let item = HistoryItem {
+            token: row.token,
+            id: row.id.clone(),
+        };
+        self.pending_discard = false;
+        self.armed = None;
+        self.selected = Some(index);
+        self.app_state
+            .update(cx, |app, cx| app.set_history_item(Some(item), cx));
+        cx.notify();
+    }
+
+    fn arm_open(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(row) = self.rows.get(index) else {
+            return;
+        };
+        self.arm_generation += 1;
+        let generation = self.arm_generation;
+        let item = HistoryItem {
+            token: row.token,
+            id: row.id.clone(),
+        };
+        self.armed = Some(ArmedClick {
+            item: item.clone(),
+            generation,
+        });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(OPEN_AFTER).await;
+            this.update(cx, |this, cx| {
+                let still = this
+                    .armed
+                    .as_ref()
+                    .is_some_and(|armed| armed.generation == generation && armed.item == item);
+                if !still {
+                    return;
+                }
+                this.armed = None;
+                this.rebuild(cx);
+                if let Some(index) = this.row_for(&item) {
+                    this.open_row(index, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn cancel_arm(&mut self) {
+        self.arm_generation += 1;
+        self.armed = None;
     }
 }
 
@@ -400,7 +653,6 @@ impl Render for BottomStrip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.rebuild(cx);
         let selected = self.selected;
-        let pending = self.pending_discard;
         let view = cx.entity();
         let mut entries = Vec::new();
         for (index, row) in self.rows.iter().enumerate() {
@@ -431,17 +683,24 @@ impl Render for BottomStrip {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                            if event.click_count >= 2 {
-                                this.select(index, cx);
-                                this.press("Promote", cx);
+                            let same = this
+                                .armed
+                                .as_ref()
+                                .is_some_and(|armed| this.row_for(&armed.item) == Some(index));
+                            if event.click_count >= 2 || same {
+                                this.cancel_arm();
+                                this.promote_index(index, cx);
                             } else {
-                                this.select(index, cx);
+                                this.arm_open(index, cx);
                             }
                         }),
                     )
                     .on_mouse_down(
                         MouseButton::Right,
-                        cx.listener(move |this, _, _, cx| this.select(index, cx)),
+                        cx.listener(move |this, _, _, cx| {
+                            this.cancel_arm();
+                            this.open_row(index, cx);
+                        }),
                     )
                     .child(
                         canvas(
@@ -473,7 +732,6 @@ impl Render for BottomStrip {
                     ),
             );
         }
-        let actions = self.actions();
         div()
             .flex()
             .flex_col()
@@ -499,38 +757,6 @@ impl Render for BottomStrip {
                     .overflow_y_scroll()
                     .children(entries),
             )
-            .when(selected.is_some(), |strip| {
-                strip.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .gap(px(6.))
-                        .w_full()
-                        .px(px(8.))
-                        .py(px(6.))
-                        .border_t_1()
-                        .border_color(rgb(theme::BORDER))
-                        .when(pending, |row| {
-                            row.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(theme::TEXT_MUTED))
-                                    .child("Discard this result?"),
-                            )
-                        })
-                        .children(actions.into_iter().map(|label| {
-                            let name = label.clone();
-                            let view = view.clone();
-                            Button::ghost(format!("strip-{name}"), label).on_click(
-                                move |_, _, cx| {
-                                    view.update(cx, |strip, cx| strip.press(&name, cx));
-                                },
-                            )
-                        })),
-                )
-            })
     }
 }
 

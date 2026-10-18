@@ -270,6 +270,8 @@ mod tests {
             cost: None,
             status: status.into(),
             bytes: None,
+            prose: None,
+            model_id: String::new(),
         }
     }
 

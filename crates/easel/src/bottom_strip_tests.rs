@@ -5,10 +5,14 @@ use easel_core::history::{Completion, HistoryStore};
 use easel_core::job::{EncodedImage, JobRequest};
 use easel_core::providers::{CostQuote, JobId, Submitted};
 use easel_core::scene::BoxKind;
-use gpui::{MouseButton, MouseDownEvent, Modifiers, TestAppContext, VisualTestContext, prelude::*};
+use gpui::{
+    Focusable as _, MouseButton, MouseDownEvent, Modifiers, TestAppContext, VisualTestContext,
+    WindowOptions, prelude::*, px,
+};
 
 use crate::app_state::AppState;
 use crate::bottom_strip::BottomStrip;
+use crate::root::Root;
 
 fn png() -> Vec<u8> {
     std::fs::read(concat!(
@@ -113,6 +117,63 @@ fn open(cx: &mut TestAppContext) -> (gpui::Entity<AppState>, gpui::Entity<Bottom
     (state, strip, history, visual)
 }
 
+fn draw(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+}
+
+fn down(button: MouseButton, position: gpui::Point<gpui::Pixels>, click_count: usize) -> MouseDownEvent {
+    MouseDownEvent {
+        button,
+        position,
+        modifiers: Modifiers::default(),
+        click_count,
+        first_mouse: false,
+    }
+}
+
+fn state_has_image(root: &gpui::Entity<Root>, cx: &VisualTestContext) -> bool {
+    root.read_with(cx, |root, cx| root.app_state.read(cx).image.is_some())
+}
+
+fn open_root(
+    cx: &mut TestAppContext,
+) -> (
+    gpui::Entity<Root>,
+    gpui::Entity<BottomStrip>,
+    Arc<HistoryStore>,
+    VisualTestContext,
+) {
+    let root_dir = temp_dir("root");
+    let history = Arc::new(HistoryStore::open(root_dir.join("history")).unwrap());
+    let window = cx.update({
+        let history = Arc::clone(&history);
+        move |cx| {
+            crate::actions::bind_keys(cx);
+            cx.open_window(WindowOptions::default(), |window, cx| {
+                let root = cx.new(|cx| Root::test_open(history, cx));
+                root.focus_handle(cx).focus(window, cx);
+                root
+            })
+            .unwrap()
+        }
+    });
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let root = window.root(&mut visual).unwrap();
+    let strip = root.read_with(&visual, |root, _| root.strip());
+    (root, strip, history, visual)
+}
+
+fn open_modal(cx: &mut VisualTestContext, strip: &gpui::Entity<BottomStrip>) {
+    draw(cx);
+    let point = strip.read_with(cx, |strip, _| strip.entry_point(0));
+    cx.simulate_event(down(MouseButton::Left, point, 1));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+}
+
 #[gpui::test]
 fn promote_keeps_the_box_count(cx: &mut TestAppContext) {
     let (state, strip, history, mut cx) = open(cx);
@@ -162,25 +223,17 @@ fn discard_confirms_before_removing_the_entry(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn click_shows_actions_and_double_click_promotes(cx: &mut TestAppContext) {
-    let (state, strip, history, mut cx) = open(cx);
+    let (root, strip, history, mut cx) = open_root(cx);
     seed_done(&history, "job1");
     strip.update(&mut cx, |strip, cx| strip.refresh(cx));
-    cx.run_until_parked();
+    draw(&mut cx);
     let point = strip.read_with(&cx, |strip, _| strip.entry_point(0));
-    cx.simulate_click(point, Modifiers::default());
-    let actions = strip.read_with(&cx, |strip, _| strip.actions());
-    assert_eq!(
-        actions,
-        vec!["Promote", "Save As", "Compare", "Discard"]
-    );
-    cx.simulate_event(MouseDownEvent {
-        button: MouseButton::Left,
-        position: point,
-        modifiers: Modifiers::default(),
-        click_count: 2,
-        first_mouse: false,
-    });
-    assert!(state.read_with(&cx, |app, _| app.image.is_some()));
+    cx.simulate_event(down(MouseButton::Left, point, 1));
+    draw(&mut cx);
+    assert!(root.read_with(&cx, |root, cx| root.app_state.read(cx).history_item.is_none()));
+    cx.simulate_event(down(MouseButton::Left, point, 1));
+    assert!(state_has_image(&root, &cx));
+    assert!(root.read_with(&cx, |root, cx| root.app_state.read(cx).history_item.is_none()));
 }
 
 #[gpui::test]
@@ -451,4 +504,247 @@ fn promote_replaces_the_source_and_leaves_the_other_tile(cx: &mut TestAppContext
         }
     );
     assert_eq!(extra, easel_core::geometry::Size { w: 40, h: 40 });
+}
+
+#[gpui::test]
+fn a_single_click_opens_the_modal_after_the_interval(cx: &mut TestAppContext) {
+    let (_root, strip, history, mut cx) = open_root(cx);
+    seed_done(&history, "job1");
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    draw(&mut cx);
+    let dialog = strip.update(&mut cx, |strip, cx| strip.dialog(cx).expect("modal"));
+    assert!(dialog.image.is_some());
+    assert!(dialog.pixel_size.is_some());
+    assert_eq!(dialog.cost, Some(1.25));
+    assert_eq!(dialog.model, "flux-3-image");
+    assert_eq!(dialog.prompt, "a red square");
+    assert_eq!(
+        dialog.actions,
+        vec!["Promote", "Save As", "Compare", "Discard"]
+    );
+    assert!(cx.debug_bounds("history-action-Promote").is_some());
+    assert!(cx.debug_bounds("strip-Promote").is_none());
+}
+
+#[gpui::test]
+fn a_right_click_opens_the_modal_without_promoting(cx: &mut TestAppContext) {
+    let (root, strip, history, mut cx) = open_root(cx);
+    seed_done(&history, "job1");
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    draw(&mut cx);
+    let point = strip.read_with(&cx, |strip, _| strip.entry_point(0));
+    cx.simulate_event(down(MouseButton::Right, point, 1));
+    assert!(root.read_with(&cx, |root, cx| root.app_state.read(cx).history_item.is_some()));
+    assert!(!state_has_image(&root, &cx));
+}
+
+#[gpui::test]
+fn escape_closes_settings_before_the_history_modal(cx: &mut TestAppContext) {
+    let (root, strip, history, mut cx) = open_root(cx);
+    seed_done(&history, "job1");
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    cx.update(|window, cx| {
+        window.dispatch_action(Box::new(crate::actions::Settings), cx);
+    });
+    assert!(root.read_with(&cx, |root, cx| root.app_state.read(cx).settings_open));
+    cx.update(|window, cx| {
+        window.dispatch_action(Box::new(crate::actions::CloseSettings), cx);
+    });
+    assert!(!root.read_with(&cx, |root, cx| root.app_state.read(cx).settings_open));
+    assert!(root.read_with(&cx, |root, cx| root.app_state.read(cx).history_item.is_some()));
+    cx.update(|window, cx| {
+        window.dispatch_action(Box::new(crate::actions::CloseSettings), cx);
+    });
+    assert!(root.read_with(&cx, |root, cx| root.app_state.read(cx).history_item.is_none()));
+
+    open_modal(&mut cx, &strip);
+    draw(&mut cx);
+    cx.simulate_click(gpui::point(px(2.), px(2.)), Modifiers::default());
+    assert!(root.read_with(&cx, |root, cx| root.app_state.read(cx).history_item.is_none()));
+}
+
+#[gpui::test]
+fn modal_actions_follow_the_opened_job(cx: &mut TestAppContext) {
+    let (strip, runner, mut cx) = open_runner(cx, "retarget", Vec::new());
+    let history = strip.read_with(&cx, |strip, _| strip.history());
+    seed_done(&history, "job1");
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    let opened = strip.read_with(&cx, |strip, cx| {
+        strip.app_state().read(cx).history_item.clone()
+    });
+    runner.update(&mut cx, |runner, cx| runner.submit(request(), cx));
+    cx.run_until_parked();
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    let still = strip.read_with(&cx, |strip, cx| {
+        strip.app_state().read(cx).history_item.clone()
+    });
+    assert_eq!(still.as_ref().and_then(|item| item.id.as_ref().map(|id| id.as_str().to_string())), Some("job1".into()));
+    assert_eq!(opened.unwrap().id.unwrap().as_str(), "job1");
+    strip.update(&mut cx, |strip, cx| strip.press("Promote", cx));
+    assert!(strip.read_with(&cx, |strip, cx| strip.app_state().read(cx).image.is_some()));
+    assert!(strip.read_with(&cx, |strip, cx| {
+        strip.app_state().read(cx).history_item.is_none()
+    }));
+}
+
+#[gpui::test]
+fn a_failed_row_opens_without_an_image_or_reveal(cx: &mut TestAppContext) {
+    let (_state, strip, history, mut cx) = open(cx);
+    let job = JobId::parse("job1").unwrap();
+    history
+        .begin(&job, &request(), &submitted("job1", 1.0), None)
+        .unwrap();
+    history
+        .fail(
+            &job,
+            &easel_core::error::ProviderError::Protocol("provider said no".into()),
+        )
+        .unwrap();
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    let dialog = strip.update(&mut cx, |strip, cx| strip.dialog(cx).expect("modal"));
+    assert!(dialog.image.is_none());
+    assert_eq!(dialog.actions, vec!["Discard".to_string()]);
+    assert!(dialog.line.contains("provider said no"));
+}
+
+#[gpui::test]
+fn an_unsupported_result_keeps_the_failed_line_and_an_empty_image(cx: &mut TestAppContext) {
+    let (_state, strip, history, mut cx) = open(cx);
+    let job = JobId::parse("gifjob").unwrap();
+    history
+        .begin(&job, &request(), &submitted("gifjob", 1.0), None)
+        .unwrap();
+    history
+        .complete(
+            &job,
+            b"GIF89a-not-really",
+            "image/png",
+            b"t",
+            &Completion::default(),
+        )
+        .unwrap();
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    let dialog = strip.update(&mut cx, |strip, cx| strip.dialog(cx).expect("modal"));
+    assert!(dialog.image.is_none());
+    assert!(dialog.line.contains("unsupported"));
+}
+
+#[gpui::test]
+fn an_in_flight_row_opens_with_dismiss_only(cx: &mut TestAppContext) {
+    let (strip, runner, mut cx) = open_runner(cx, "inflight-modal", Vec::new());
+    runner.update(&mut cx, |runner, cx| runner.submit(request(), cx));
+    strip.update(&mut cx, |strip, cx| {
+        strip.refresh(cx);
+        strip.show(0, cx);
+    });
+    let dialog = strip.update(&mut cx, |strip, cx| strip.dialog(cx).expect("modal"));
+    assert_eq!(dialog.actions, vec!["Dismiss".to_string()]);
+    assert!(dialog.image.is_none());
+}
+
+#[gpui::test]
+fn a_queued_dismiss_closes_the_modal(cx: &mut TestAppContext) {
+    let (strip, runner, mut cx) = open_runner(cx, "queued-dismiss", Vec::new());
+    runner.update(&mut cx, |runner, cx| runner.submit(request(), cx));
+    strip.update(&mut cx, |strip, cx| {
+        strip.refresh(cx);
+        strip.show(0, cx);
+        strip.press("Dismiss", cx);
+    });
+    assert!(strip.read_with(&cx, |strip, cx| {
+        strip.app_state().read(cx).history_item.is_none()
+    }));
+}
+
+#[gpui::test]
+fn dismiss_that_leaves_a_history_row_keeps_the_modal(cx: &mut TestAppContext) {
+    let (strip, runner, mut cx) = open_runner(
+        cx,
+        "dismiss-keeps",
+        vec![Ok(http(200, submit_body("kept")))],
+    );
+    runner.update(&mut cx, |runner, cx| runner.submit(request(), cx));
+    cx.run_until_parked();
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    let before = strip.read_with(&cx, |strip, cx| {
+        strip.app_state().read(cx).history_item.clone().unwrap().id
+    });
+    strip.update(&mut cx, |strip, cx| strip.press("Dismiss", cx));
+    let after = strip.read_with(&cx, |strip, cx| {
+        strip.app_state().read(cx).history_item.clone().and_then(|item| item.id)
+    });
+    assert_eq!(before, after);
+    assert!(after.is_some());
+    let history = strip.read_with(&cx, |strip, _| strip.history());
+    assert_eq!(history.list().unwrap().len(), 1);
+}
+
+#[gpui::test]
+fn discard_confirm_removes_the_entry_and_cancel_leaves_the_modal(cx: &mut TestAppContext) {
+    let (_root, strip, history, mut cx) = open_root(cx);
+    seed_done(&history, "job1");
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    strip.update(&mut cx, |strip, cx| strip.press("Discard", cx));
+    assert!(strip.read_with(&cx, |strip, _| strip.confirm_visible()));
+    strip.update(&mut cx, |strip, cx| strip.press("Cancel", cx));
+    assert_eq!(history.list().unwrap().len(), 1);
+    assert!(strip.read_with(&cx, |strip, cx| strip.app_state().read(cx).history_item.is_some()));
+    strip.update(&mut cx, |strip, cx| {
+        strip.press("Discard", cx);
+        strip.press("Confirm", cx);
+    });
+    assert!(history.list().unwrap().is_empty());
+    assert!(strip.read_with(&cx, |strip, cx| strip.app_state().read(cx).history_item.is_none()));
+}
+
+#[gpui::test]
+fn promote_and_compare_close_the_modal_and_save_as_does_not(cx: &mut TestAppContext) {
+    let (_root, strip, history, mut cx) = open_root(cx);
+    seed_done(&history, "job1");
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    strip.update(&mut cx, |strip, cx| strip.press("Save As", cx));
+    assert!(strip.read_with(&cx, |strip, cx| strip.app_state().read(cx).history_item.is_some()));
+    strip.update(&mut cx, |strip, cx| strip.press("Compare", cx));
+    assert!(strip.read_with(&cx, |strip, cx| {
+        strip.app_state().read(cx).inspection.is_some()
+            && strip.app_state().read(cx).history_item.is_none()
+    }));
+
+    open_modal(&mut cx, &strip);
+    strip.update(&mut cx, |strip, cx| strip.press("Promote", cx));
+    assert!(strip.read_with(&cx, |strip, cx| {
+        strip.app_state().read(cx).image.is_some()
+            && strip.app_state().read(cx).history_item.is_none()
+    }));
+}
+
+#[gpui::test]
+fn the_modal_shows_the_typed_prompt_when_a_snapshot_exists(cx: &mut TestAppContext) {
+    let (_state, strip, history, mut cx) = open(cx);
+    let job = JobId::parse("snap").unwrap();
+    let editor = easel_core::history::EditorSnapshot {
+        prose: "make <cat_1> orange".into(),
+        model_id: "flux-3".into(),
+        values: std::collections::BTreeMap::new(),
+        aspect_ratio: "16:9".into(),
+    };
+    history
+        .begin(&job, &request(), &submitted("snap", 1.0), Some(&editor))
+        .unwrap();
+    history
+        .complete(&job, &png(), "image/png", &png(), &Completion::default())
+        .unwrap();
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    let dialog = strip.update(&mut cx, |strip, cx| strip.dialog(cx).expect("modal"));
+    assert_eq!(dialog.prompt, "make <cat_1> orange");
+    assert_eq!(dialog.model, "flux-3");
 }

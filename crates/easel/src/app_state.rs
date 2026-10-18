@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use easel_core::geometry::Rect;
-use easel_core::providers::Provider;
 use easel_core::providers::bfl::flux3::Flux3;
+use easel_core::providers::{JobId, Provider};
 use easel_core::scene::{BoxId, BoxKind, ImageRef, Scene};
 use gpui::{Context, EventEmitter, RenderImage};
 use serde_json::Value;
@@ -17,8 +17,16 @@ pub enum Tool {
     Box,
 }
 
+/// The history row the modal is showing. A queued job has a token and no id yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryItem {
+    pub token: Option<u64>,
+    pub id: Option<JobId>,
+}
+
 pub struct AppState {
     pub settings_open: bool,
+    pub history_item: Option<HistoryItem>,
     pub quit_requested: bool,
     pub image: Option<Arc<DecodedImage>>,
     pub extras: Vec<Arc<DecodedImage>>,
@@ -46,6 +54,7 @@ impl AppState {
     pub fn new() -> Self {
         let mut app = Self {
             settings_open: false,
+            history_item: None,
             quit_requested: false,
             image: None,
             extras: Vec::new(),
@@ -347,6 +356,14 @@ impl AppState {
 
     pub fn take_retired_renders(&mut self) -> Vec<Arc<RenderImage>> {
         std::mem::take(&mut self.retired_renders)
+    }
+
+    pub fn set_history_item(&mut self, item: Option<HistoryItem>, cx: &mut Context<Self>) {
+        if self.history_item == item {
+            return;
+        }
+        self.history_item = item;
+        cx.notify();
     }
 
     pub fn set_settings_open(&mut self, open: bool, cx: &mut Context<Self>) {
