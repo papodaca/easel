@@ -163,6 +163,32 @@ impl Canvas {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
+    pub fn box_mark_view(&self, index: usize, cx: &App) -> Option<ViewRect> {
+        let frame = self.inspection_frame(cx);
+        let app = self.app_state.read(cx);
+        let boxes = match &app.inspection {
+            Some(inspection) => &inspection.boxes,
+            None => &app.scene.boxes,
+        };
+        let element = boxes.get(index)?;
+        let rect = element.src.or(element.tgt)?;
+        Some(rect_view(
+            &self.layout,
+            &self.sizes,
+            &self.viewport,
+            element.from_image,
+            rect,
+            frame,
+        ))
+    }
+
+    #[cfg(test)]
+    pub fn nudge(&mut self, dx: f32, dy: f32) {
+        self.viewport.pan_by(Point { x: dx, y: dy });
+        self.user_zoomed = true;
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn app_state(&self) -> &gpui::Entity<AppState> {
         &self.app_state
     }
@@ -341,10 +367,16 @@ impl Canvas {
                         &self.viewport,
                         element.from_image,
                         rect,
+                        self.inspection_frame(cx),
                     ),
                 ))
             })
             .collect()
+    }
+
+    fn inspection_frame(&self, cx: &App) -> Option<Size> {
+        let inspection = self.app_state.read(cx).inspection.as_ref()?;
+        Some(inspection.frame.unwrap_or(Size { w: 1000, h: 1000 }))
     }
 
     fn pointer_hit(&self, local: Point) -> PointerHit {
@@ -847,6 +879,7 @@ fn paint_marks(
     viewport: &Viewport,
     boxes: &[easel_core::scene::BoxElement],
     opacity: f32,
+    forced: Option<Size>,
     window: &mut Window,
 ) {
     for element in boxes {
@@ -865,6 +898,7 @@ fn paint_marks(
                     fill,
                     outline,
                     BorderStyle::Dashed,
+                    forced,
                     window,
                 );
             }
@@ -879,6 +913,7 @@ fn paint_marks(
                     fill,
                     outline,
                     BorderStyle::Solid,
+                    forced,
                     window,
                 );
             }
@@ -892,6 +927,7 @@ fn paint_marks(
                     src,
                     tgt,
                     outline,
+                    forced,
                     window,
                 );
             }
@@ -906,6 +942,7 @@ fn paint_marks(
                 fill,
                 outline,
                 BorderStyle::Solid,
+                forced,
                 window,
             );
         }
@@ -935,6 +972,7 @@ fn paint_labels(
     sizes: &[Size],
     viewport: &Viewport,
     boxes: &[easel_core::scene::BoxElement],
+    forced: Option<Size>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -945,7 +983,7 @@ fn paint_labels(
         let Some(rect) = label_rect(element) else {
             continue;
         };
-        let view = rect_view(layout, sizes, viewport, element.from_image, rect);
+        let view = rect_view(layout, sizes, viewport, element.from_image, rect, forced);
         let text = SharedString::from(element.id.as_str().to_string());
         let run = TextRun {
             len: text.len(),
@@ -977,9 +1015,10 @@ fn paint_handles(
     viewport: &Viewport,
     slot: Option<usize>,
     rect: Rect,
+    forced: Option<Size>,
     window: &mut Window,
 ) {
-    let view = rect_view(layout, sizes, viewport, slot, rect);
+    let view = rect_view(layout, sizes, viewport, slot, rect, forced);
     let anchors = [
         (view.x, view.y),
         (view.x + view.w / 2.0, view.y),
@@ -1016,9 +1055,10 @@ fn paint_mark(
     fill: gpui::Rgba,
     outline: gpui::Rgba,
     style: BorderStyle,
+    forced: Option<Size>,
     window: &mut Window,
 ) {
-    let view = rect_view(layout, sizes, viewport, slot, rect);
+    let view = rect_view(layout, sizes, viewport, slot, rect, forced);
     window.paint_quad(quad(
         Bounds {
             origin: point(origin.x + px(view.x), origin.y + px(view.y)),
@@ -1041,10 +1081,11 @@ fn paint_arrow(
     src: Rect,
     tgt: Rect,
     color: gpui::Rgba,
+    forced: Option<Size>,
     window: &mut Window,
 ) {
-    let src = rect_view(layout, sizes, viewport, slot, src);
-    let tgt = rect_view(layout, sizes, viewport, slot, tgt);
+    let src = rect_view(layout, sizes, viewport, slot, src, forced);
+    let tgt = rect_view(layout, sizes, viewport, slot, tgt, forced);
     let from = point(
         origin.x + px(src.x + src.w / 2.0),
         origin.y + px(src.y + src.h / 2.0),
@@ -1082,7 +1123,17 @@ fn rect_view(
     viewport: &Viewport,
     slot: Option<usize>,
     rect: Rect,
+    forced: Option<Size>,
 ) -> ViewRect {
+    if let Some(frame) = forced.filter(|frame| frame.w > 0 && frame.h > 0) {
+        let tile = layout.tiles.first().copied().unwrap_or(ViewRect {
+            x: 0.0,
+            y: 0.0,
+            w: layout.content.w as f32,
+            h: layout.content.h as f32,
+        });
+        return content_to_view(viewport, tile_local(tile, frame, rect));
+    }
     let content = if let Some(index) = slot {
         match (layout.tiles.get(index), sizes.get(index)) {
             (Some(tile), Some(size)) if size.w > 0 && size.h > 0 => tile_local(*tile, *size, rect),
@@ -1278,6 +1329,7 @@ impl Render for Canvas {
         let layout = self.layout.clone();
         let sizes = self.sizes.clone();
         let boxes_live = self.app_state.read(cx).spec().capabilities.supports_boxes;
+        let inspect_frame = self.inspection_frame(cx);
         let draft_slot = match &self.drag {
             Drag::Drawing { slot, .. } | Drag::DrawingTarget { slot, .. } => *slot,
             _ => None,
@@ -1368,6 +1420,7 @@ impl Render for Canvas {
                             layout,
                             sizes,
                             boxes_live,
+                            inspect_frame,
                         )
                     },
                     |bounds,
@@ -1381,6 +1434,7 @@ impl Render for Canvas {
                         layout,
                         sizes,
                         boxes_live,
+                        inspect_frame,
                     ),
                      window,
                      cx| {
@@ -1414,6 +1468,7 @@ impl Render for Canvas {
                             &viewport,
                             &painted,
                             if boxes_live { 1.0 } else { 0.4 },
+                            inspect_frame,
                             window,
                         );
                         paint_labels(
@@ -1422,6 +1477,7 @@ impl Render for Canvas {
                             &sizes,
                             &viewport,
                             &painted,
+                            inspect_frame,
                             window,
                             cx,
                         );
@@ -1436,6 +1492,7 @@ impl Render for Canvas {
                                 theme::color(theme::BOX_NEW, theme::BOX_FILL_ALPHA),
                                 theme::color(theme::BOX_NEW, 1.0),
                                 BorderStyle::Solid,
+                                inspect_frame,
                                 window,
                             );
                         }
@@ -1447,6 +1504,7 @@ impl Render for Canvas {
                                 &viewport,
                                 slot,
                                 rect,
+                                inspect_frame,
                                 window,
                             );
                         }
@@ -1615,5 +1673,92 @@ mod tests {
             (before.x - after.x).abs() < 1e-2 && (before.y - after.y).abs() < 1e-2,
             "cursor image point moved from {before:?} to {after:?}"
         );
+    }
+
+    #[gpui::test]
+    fn compare_draws_saved_boxes_on_the_first_tile_only(cx: &mut TestAppContext) {
+        let (window, mut cx) = open(cx);
+        let canvas = window.root(&mut cx).unwrap();
+        canvas.update(&mut cx, |canvas, cx| {
+            canvas.app_state().update(cx, |app, cx| {
+                let bytes = std::fs::read(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/pixel.png"
+                ))
+                .unwrap();
+                let mut first = decode_image(&bytes, "a.png").unwrap();
+                first.size = Size { w: 100, h: 100 };
+                let mut second = decode_image(&bytes, "b.png").unwrap();
+                second.size = Size { w: 400, h: 200 };
+                app.set_image(Arc::new(first), cx);
+                app.add_extra(Arc::new(second), cx).unwrap();
+                app.scene.add_box(
+                    easel_core::geometry::Rect {
+                        x: 0,
+                        y: 0,
+                        w: 10,
+                        h: 10,
+                    },
+                    easel_core::scene::BoxKind::Keep,
+                );
+                app.inspection = Some(crate::jobs::Inspection {
+                    prompt: String::new(),
+                    suggestion: String::new(),
+                    rows: Vec::new(),
+                    boxes: vec![easel_core::scene::BoxElement {
+                        id: easel_core::scene::BoxId::parse("old_1").unwrap(),
+                        kind: easel_core::scene::BoxKind::Keep,
+                        desc: String::new(),
+                        src: Some(easel_core::geometry::Rect {
+                            x: 0,
+                            y: 0,
+                            w: 40,
+                            h: 20,
+                        }),
+                        tgt: Some(easel_core::geometry::Rect {
+                            x: 0,
+                            y: 0,
+                            w: 40,
+                            h: 20,
+                        }),
+                        from_image: Some(1),
+                    }],
+                    frame: Some(Size { w: 80, h: 40 }),
+                });
+                cx.notify();
+            });
+        });
+        let (tile0, tile1, mark) = canvas.read_with(&cx, |canvas, cx| {
+            (
+                canvas.tile_view(0).unwrap(),
+                canvas.tile_view(1).unwrap(),
+                canvas.box_mark_view(0, cx).unwrap(),
+            )
+        });
+        assert!((mark.w - tile0.w / 2.0).abs() < 1.0, "{mark:?} {tile0:?}");
+        assert!((mark.h - tile0.h / 2.0).abs() < 1.0, "{mark:?} {tile0:?}");
+        assert!((mark.x - tile0.x).abs() < 1.0);
+        assert!(mark.x + mark.w <= tile1.x + 1.0, "{mark:?} {tile1:?}");
+        let before = tile1.y;
+        canvas.update(&mut cx, |canvas, _| canvas.nudge(0.0, 30.0));
+        let (tile0_after, tile1_after, mark_after) = canvas.read_with(&cx, |canvas, cx| {
+            (
+                canvas.tile_view(0).unwrap(),
+                canvas.tile_view(1).unwrap(),
+                canvas.box_mark_view(0, cx).unwrap(),
+            )
+        });
+        assert!((tile0_after.y - (tile0.y + 30.0)).abs() < 1.0);
+        assert!((tile1_after.y - (before + 30.0)).abs() < 1.0);
+        assert!((mark_after.y - (mark.y + 30.0)).abs() < 1.0);
+        canvas.update(&mut cx, |canvas, cx| {
+            canvas.app_state().update(cx, |app, cx| {
+                app.inspection = None;
+                cx.notify();
+            });
+        });
+        let live = canvas.read_with(&cx, |canvas, cx| canvas.box_mark_view(0, cx).unwrap());
+        let tile0 = canvas.read_with(&cx, |canvas, _| canvas.tile_view(0).unwrap());
+        assert!((live.w - tile0.w * 0.1).abs() < 1.0, "{live:?} {tile0:?}");
     }
 }

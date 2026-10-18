@@ -63,3 +63,50 @@ fn generate_submits_the_scene_to_the_runner(cx: &mut TestAppContext) {
     assert_eq!(states.len(), 1, "{states:?}");
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[gpui::test]
+fn an_empty_sheet_submits_no_image_and_stays_empty(cx: &mut TestAppContext) {
+    let root = temp_dir();
+    let history = Arc::new(HistoryStore::open(root.join("history")).unwrap());
+    let transport: Arc<dyn HttpTransport> = Arc::new(FakeTransport::scripted(Vec::new()));
+    let keys = Arc::new(SharedKeys::default());
+    keys.set_session(ProviderId::Bfl, "test-key");
+    let runner = cx.update({
+        let transport = Arc::clone(&transport);
+        let history = Arc::clone(&history);
+        let keys = Arc::clone(&keys);
+        move |cx| {
+            cx.new(|_| {
+                JobRunner::new(
+                    easel_core::providers::resolve_model,
+                    transport,
+                    Arc::new(Resolver(keys)),
+                    history,
+                )
+            })
+        }
+    });
+    let (state, panel) = cx.update(|cx| {
+        let state = cx.new(|_| AppState::new());
+        let panel = cx.new({
+            let state = state.clone();
+            let runner = runner.clone();
+            move |cx| SidePanel::new(state, keys, Some(runner), None, cx)
+        });
+        (state, panel)
+    });
+    state.update(cx, |app, cx| {
+        app.scene.prose = "a red square".into();
+        cx.notify();
+    });
+    panel.update(cx, |panel, cx| panel.generate(cx));
+    let request = runner.read_with(cx, |runner, _| runner.first_request().unwrap());
+    assert!(request.images.is_empty());
+    let id = easel_core::providers::JobId::parse("job-empty").unwrap();
+    history
+        .complete_inline(&id, &request, "", "", b"png", "image/png", b"thumb")
+        .unwrap();
+    assert!(state.read_with(cx, |app, _| app.image.is_none()));
+    assert_eq!(history.list().unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(root);
+}

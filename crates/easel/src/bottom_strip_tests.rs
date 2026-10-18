@@ -394,3 +394,61 @@ fn the_strip_replaces_the_quote_with_the_settled_cost(cx: &mut TestAppContext) {
     let settled = strip.read_with(&cx, |strip, _| strip.costs());
     assert!((settled[0].unwrap() - 4.5).abs() < 1e-9, "{settled:?}");
 }
+
+#[gpui::test]
+fn promote_replaces_the_source_and_leaves_the_other_tile(cx: &mut TestAppContext) {
+    let state = cx.new(|_| AppState::new());
+    let bytes = png();
+    state.update(cx, |app, cx| {
+        let source = crate::image_load::decode_image(&bytes, "source").unwrap();
+        let mut extra = crate::image_load::decode_image(&bytes, "extra").unwrap();
+        extra.size = easel_core::geometry::Size { w: 40, h: 40 };
+        app.set_image(Arc::new(source), cx);
+        app.add_extra(Arc::new(extra), cx).unwrap();
+        let src = Rect {
+            x: 10,
+            y: 10,
+            w: 20,
+            h: 20,
+        };
+        let tgt = Rect {
+            x: 40,
+            y: 40,
+            w: 20,
+            h: 20,
+        };
+        let first = app.scene.add_box(src, BoxKind::Move);
+        app.scene
+            .update_box(&first, |element| element.tgt = Some(tgt));
+        let second = app.scene.add_box_on(src, BoxKind::Move, 1);
+        app.scene
+            .update_box(&second, |element| element.tgt = Some(tgt));
+        crate::jobs::promote(app, &bytes, cx).unwrap();
+    });
+    let (src0, src1, extra) = state.read_with(cx, |app, _| {
+        (
+            app.scene.boxes[0].src.unwrap(),
+            app.scene.boxes[1].src.unwrap(),
+            app.extras[0].size,
+        )
+    });
+    assert_eq!(
+        src0,
+        Rect {
+            x: 40,
+            y: 40,
+            w: 20,
+            h: 20,
+        }
+    );
+    assert_eq!(
+        src1,
+        Rect {
+            x: 10,
+            y: 10,
+            w: 20,
+            h: 20,
+        }
+    );
+    assert_eq!(extra, easel_core::geometry::Size { w: 40, h: 40 });
+}

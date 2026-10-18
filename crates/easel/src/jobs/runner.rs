@@ -110,6 +110,11 @@ impl JobRunner {
         }
     }
 
+    #[cfg(test)]
+    pub fn first_request(&self) -> Option<JobRequest> {
+        self.slots.first().map(|slot| slot.request.clone())
+    }
+
     pub fn watch_krea_sunset(
         &mut self,
         app: gpui::Entity<crate::app_state::AppState>,

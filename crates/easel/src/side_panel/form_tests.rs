@@ -12,8 +12,8 @@ use serde_json::json;
 
 use crate::app_state::AppState;
 use crate::net::MapKeys;
-use crate::side_panel::prompt_editor::PromptEditor;
 use crate::side_panel::References;
+use crate::side_panel::prompt_editor::PromptEditor;
 use crate::side_panel::schema_form::SchemaForm;
 use crate::side_panel::validation::Validation;
 

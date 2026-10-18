@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use easel_core::geometry::Size;
 use easel_core::history::LoadedRequest;
 use easel_core::scene::BoxElement;
 use gpui::Context;
@@ -13,6 +14,7 @@ pub struct Inspection {
     pub suggestion: String,
     pub rows: Vec<(String, String)>,
     pub boxes: Vec<BoxElement>,
+    pub frame: Option<Size>,
 }
 
 pub fn promote(app: &mut AppState, bytes: &[u8], cx: &mut Context<AppState>) -> Result<(), String> {
@@ -45,5 +47,13 @@ pub fn inspection_from(loaded: &LoadedRequest) -> Inspection {
         suggestion: String::new(),
         rows,
         boxes: loaded.box_snapshot.clone(),
+        frame: loaded
+            .images
+            .first()
+            .map(|image| Size {
+                w: image.width,
+                h: image.height,
+            })
+            .filter(|size| size.w > 0 && size.h > 0),
     }
 }
