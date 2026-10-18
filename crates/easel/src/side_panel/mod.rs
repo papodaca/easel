@@ -24,7 +24,8 @@ use gpui::{
 pub use inspector::Inspector;
 
 use crate::app_state::AppState;
-use crate::settings::SharedKeys;
+use crate::net::KeyResolver;
+use crate::settings::{Resolver, SettingsPanel, SharedKeys};
 use crate::theme;
 use crate::ui::{Button, pane_header};
 use crate::widgets::Select;
@@ -64,6 +65,7 @@ pub struct SidePanel {
     references: gpui::Entity<References>,
     form: gpui::Entity<SchemaForm>,
     validation: gpui::Entity<Validation>,
+    keys: std::sync::Arc<SharedKeys>,
     provider: gpui::Entity<Select>,
     model: gpui::Entity<Select>,
     runner: Option<gpui::Entity<crate::jobs::JobRunner>>,
@@ -77,20 +79,17 @@ impl SidePanel {
         app_state: gpui::Entity<AppState>,
         keys: std::sync::Arc<SharedKeys>,
         runner: Option<gpui::Entity<crate::jobs::JobRunner>>,
+        settings: Option<gpui::Entity<SettingsPanel>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let inspector = cx.new(|cx| Inspector::new(app_state.clone(), cx));
         let prompt = cx.new(|cx| PromptEditor::new(app_state.clone(), cx));
         let references = cx.new(|cx| References::new(app_state.clone(), cx));
         let form = cx.new(|cx| SchemaForm::new(app_state.clone(), cx));
-        let resolver = std::sync::Arc::new(crate::settings::Resolver(keys));
+        let resolver = std::sync::Arc::new(Resolver(std::sync::Arc::clone(&keys)));
         let validation = cx.new(|cx| Validation::new(app_state.clone(), resolver, cx));
-        let provider_names = easel_core::providers::ModelRegistry::providers()
-            .iter()
-            .map(|provider| gpui::SharedString::from(provider.display_name()))
-            .collect();
         let provider = cx.new(|cx| {
-            let mut select = Select::new(provider_names, cx);
+            let mut select = Select::new(Vec::new(), cx);
             let state = app_state.clone();
             select.on_change(
                 Box::new(move |value, _window, cx| {
@@ -124,6 +123,7 @@ impl SidePanel {
             references,
             form,
             validation,
+            keys,
             provider,
             model,
             runner,
@@ -135,6 +135,10 @@ impl SidePanel {
         let watched = panel.app_state.clone();
         cx.observe(&watched, |this, _, cx| this.sync_menus(cx))
             .detach();
+        if let Some(settings) = settings {
+            cx.observe(&settings, |this, _, cx| this.sync_menus(cx))
+                .detach();
+        }
         panel
     }
 
@@ -148,7 +152,15 @@ impl SidePanel {
             .filter(|spec| spec.provider == provider)
             .map(|spec| gpui::SharedString::from(spec.display_name.clone()))
             .collect();
+        let resolver = Resolver(std::sync::Arc::clone(&self.keys));
+        let providers: Vec<gpui::SharedString> = easel_core::providers::ModelRegistry::providers()
+            .iter()
+            .copied()
+            .filter(|provider| resolver.key_for(*provider).is_some())
+            .map(|provider| gpui::SharedString::from(provider.display_name()))
+            .collect();
         self.provider.update(cx, |select, cx| {
+            select.set_options(providers, cx);
             select.set_value(serde_json::Value::String(provider_name), cx);
         });
         self.model.update(cx, |select, cx| {

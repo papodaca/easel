@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use easel_core::geometry::Rect;
+use easel_core::model_spec::ProviderId;
 use easel_core::scene::{BoxKind, ImageRef};
 use easel_core::session::{SessionFile, SessionStore};
 use gpui::{TestAppContext, prelude::*};
@@ -8,8 +9,10 @@ use serde_json::json;
 
 use crate::app_state::AppState;
 use crate::jobs::build_request;
+use crate::net::{FakeTransport, HttpTransport};
+use crate::notifications::Notifications;
 use crate::session::restore;
-use crate::settings::SharedKeys;
+use crate::settings::{SettingsPanel, SharedKeys};
 use crate::side_panel::SidePanel;
 
 fn app(cx: &mut TestAppContext) -> gpui::Entity<AppState> {
@@ -146,11 +149,17 @@ fn google_compile_drops_a_box_tag_and_does_not_require_flux_fields(cx: &mut Test
 }
 
 fn editor(cx: &mut TestAppContext) -> (gpui::Entity<AppState>, gpui::Entity<SidePanel>) {
+    editor_with(cx, Arc::new(SharedKeys::default()))
+}
+
+fn editor_with(
+    cx: &mut TestAppContext,
+    keys: Arc<SharedKeys>,
+) -> (gpui::Entity<AppState>, gpui::Entity<SidePanel>) {
     let state = app(cx);
-    let keys = Arc::new(SharedKeys::default());
     let panel = cx.update({
         let state = state.clone();
-        move |cx| cx.new(|cx| SidePanel::new(state, keys, None, cx))
+        move |cx| cx.new(|cx| SidePanel::new(state, keys, None, None, cx))
     });
     (state, panel)
 }
@@ -173,7 +182,12 @@ fn selected(cx: &TestAppContext, select: gpui::Entity<crate::widgets::Select>) -
 
 #[gpui::test]
 fn the_header_lists_providers_and_the_body_lists_their_models(cx: &mut TestAppContext) {
-    let (_state, panel) = editor(cx);
+    let _env = ProviderEnvGuard::clear();
+    let keys = Arc::new(SharedKeys::default());
+    keys.set_session(ProviderId::Bfl, "bfl-key");
+    keys.set_session(ProviderId::Google, "google-key");
+    keys.set_session(ProviderId::Krea, "krea-key");
+    let (_state, panel) = editor_with(cx, keys);
     let providers = labels(
         cx,
         panel.read_with(cx, |panel, _| panel.provider_menu().clone()),
@@ -181,6 +195,7 @@ fn the_header_lists_providers_and_the_body_lists_their_models(cx: &mut TestAppCo
     assert!(providers.contains(&"Google".to_string()));
     assert!(providers.contains(&"Black Forest Labs".to_string()));
     assert!(providers.contains(&"Krea".to_string()));
+    assert!(!providers.iter().any(|name| name == "OpenAI"));
     assert!(!providers.iter().any(|name| name == "FLUX 3"));
     assert_eq!(
         selected(
@@ -233,6 +248,83 @@ fn the_header_lists_providers_and_the_body_lists_their_models(cx: &mut TestAppCo
         ),
         "Nano Banana Pro"
     );
+}
+
+struct ProviderEnvGuard {
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl ProviderEnvGuard {
+    fn clear() -> Self {
+        let names = [
+            "BFL_API_KEY",
+            "KREA_API_KEY",
+            "GEMINI_API_KEY",
+            "OPENAI_API_KEY",
+        ];
+        let saved = names
+            .iter()
+            .map(|name| (*name, std::env::var(name).ok()))
+            .collect();
+        for name in names {
+            unsafe { std::env::remove_var(name) };
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for ProviderEnvGuard {
+    fn drop(&mut self) {
+        for (name, value) in self.saved.drain(..) {
+            if let Some(value) = value {
+                unsafe { std::env::set_var(name, value) };
+            }
+        }
+    }
+}
+
+fn without_provider_env<T>(body: impl FnOnce() -> T) -> T {
+    let _guard = ProviderEnvGuard::clear();
+    body()
+}
+
+#[gpui::test]
+fn a_provider_appears_after_its_key_is_saved(cx: &mut TestAppContext) {
+    without_provider_env(|| a_provider_appears_after_its_key_is_saved_inner(cx));
+}
+
+fn a_provider_appears_after_its_key_is_saved_inner(cx: &mut TestAppContext) {
+    let keys = Arc::new(SharedKeys::default());
+    let (panel, settings) = cx.update({
+        let keys = Arc::clone(&keys);
+        move |cx| {
+            let state = cx.new(|_| AppState::new());
+            let notes = cx.new(|_| Notifications::new());
+            let transport: Arc<dyn HttpTransport> = Arc::new(FakeTransport::scripted(Vec::new()));
+            let settings = cx.new({
+                let keys = Arc::clone(&keys);
+                move |cx| SettingsPanel::open(notes, transport, keys, cx)
+            });
+            let panel = cx.new({
+                let settings = settings.clone();
+                move |cx| SidePanel::new(state, keys, None, Some(settings), cx)
+            });
+            (panel, settings)
+        }
+    });
+    cx.run_until_parked();
+    let providers = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.provider_menu().clone()),
+    );
+    assert!(providers.is_empty(), "{providers:?}");
+    keys.set_session(ProviderId::Google, "google-key");
+    settings.update(cx, |_, cx| cx.notify());
+    let providers = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.provider_menu().clone()),
+    );
+    assert_eq!(providers, ["Google".to_string()]);
 }
 
 #[gpui::test]

@@ -50,7 +50,7 @@ fn generate_submits_the_scene_to_the_runner(cx: &mut TestAppContext) {
         let panel = cx.new({
             let state = state.clone();
             let runner = runner.clone();
-            move |cx| SidePanel::new(state, keys, Some(runner), cx)
+            move |cx| SidePanel::new(state, keys, Some(runner), None, cx)
         });
         (state, panel)
     });

@@ -274,6 +274,20 @@ pub fn save_key(
     }
 }
 
+fn env_key_present(provider: ProviderId) -> bool {
+    std::env::var(provider.env_var())
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn source_note(provider: ProviderId, otherwise: &'static str) -> &'static str {
+    if env_key_present(provider) {
+        "Source: environment"
+    } else {
+        otherwise
+    }
+}
+
 fn normalize_key(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     let visible = !trimmed.is_empty()
@@ -339,7 +353,7 @@ impl SettingsPanel {
                 ProviderRow {
                     provider,
                     draft,
-                    note: "Source: none".into(),
+                    note: source_note(provider, "Source: none").into(),
                     field_message: gpui::SharedString::default(),
                     revealed: false,
                 }
@@ -366,14 +380,17 @@ impl SettingsPanel {
                                 && normalize_key(&text).is_ok()
                             {
                                 this.keys.memory.write(provider, &text).ok();
-                                this.row_mut(provider).note = "Source: credential store".into();
+                                this.row_mut(provider).note =
+                                    source_note(provider, "Source: credential store").into();
                             }
                         }
                         Ok(None) => {}
                         Err(_) => {
-                            this.row_mut(provider).note =
-                                "Credential store is unavailable. Keys stay in memory for this session."
-                                    .into();
+                            if !env_key_present(provider) {
+                                this.row_mut(provider).note =
+                                    "Credential store is unavailable. Keys stay in memory for this session."
+                                        .into();
+                            }
                         }
                     }
                 }
@@ -499,12 +516,16 @@ impl SettingsPanel {
             this.update(cx, |this, cx| {
                 if stored {
                     keys.memory.write(provider, &key).ok();
-                    this.row_mut(provider).note = "Source: credential store".into();
+                    this.row_mut(provider).note =
+                        source_note(provider, "Source: credential store").into();
                 } else {
                     keys.memory.delete(provider).ok();
                     keys.lock_session().set(provider, key);
-                    this.row_mut(provider).note =
-                        "Credential store is unavailable. The key is kept for this session.".into();
+                    this.row_mut(provider).note = source_note(
+                        provider,
+                        "Credential store is unavailable. The key is kept for this session.",
+                    )
+                    .into();
                 }
                 cx.notify();
             })
@@ -520,7 +541,7 @@ impl SettingsPanel {
         self.keys.lock_session().clear(provider);
         let row = self.row_mut(provider);
         row.draft.update(cx, |input, cx| input.set_text("", cx));
-        row.note = "Source: none".into();
+        row.note = source_note(provider, "Source: none").into();
         cx.spawn(async move |_, _| {
             delete.await.ok();
         })

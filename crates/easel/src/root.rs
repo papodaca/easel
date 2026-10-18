@@ -106,8 +106,16 @@ impl Root {
         let panel_state = app_state.clone();
         let strip_state = app_state.clone();
         let settings_view = settings.clone();
-        let side_panel =
-            cx.new(move |cx| SidePanel::new(panel_state, keys, Some(panel_runner), cx));
+        let side_settings = settings.clone();
+        let side_panel = cx.new(move |cx| {
+            SidePanel::new(
+                panel_state,
+                keys,
+                Some(panel_runner),
+                Some(side_settings),
+                cx,
+            )
+        });
         let bottom_strip =
             cx.new(move |cx| BottomStrip::new(strip_state, Some(strip_runner), strip_history, cx));
         let session_path = crate::jobs::data_dir().join("session.json");

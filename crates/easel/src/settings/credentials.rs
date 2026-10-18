@@ -13,6 +13,51 @@ fn env_with(value: &str) -> std::collections::HashMap<String, String> {
     std::collections::HashMap::from([(ProviderId::Bfl.env_var().to_owned(), value.to_owned())])
 }
 
+struct EnvVarGuard {
+    name: &'static str,
+    saved: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(name: &'static str, value: &str) -> Self {
+        let saved = std::env::var(name).ok();
+        unsafe { std::env::set_var(name, value) };
+        Self { name, saved }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.saved.take() {
+            Some(value) => unsafe { std::env::set_var(self.name, value) },
+            None => unsafe { std::env::remove_var(self.name) },
+        }
+    }
+}
+
+#[gpui::test]
+fn an_env_key_shows_source_environment(cx: &mut TestAppContext) {
+    use gpui::prelude::*;
+
+    use crate::net::FakeTransport;
+    use crate::notifications::Notifications;
+    use crate::settings::SettingsPanel;
+
+    let _guard = EnvVarGuard::set(ProviderId::Google.env_var(), "env-google-key");
+    let notes = cx.new(|_| Notifications::new());
+    let transport = Arc::new(FakeTransport::scripted(Vec::new()));
+    let panel = cx.new(move |cx| SettingsPanel::new(notes, transport, cx));
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.row_note(ProviderId::Google).to_owned()),
+        "Source: environment"
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.row_note(ProviderId::Google).to_owned()),
+        "Source: environment"
+    );
+}
+
 #[test]
 fn openai_env_beats_the_store() {
     let store = MemoryStore::default();

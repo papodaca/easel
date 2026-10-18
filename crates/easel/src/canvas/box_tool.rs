@@ -61,7 +61,7 @@ fn open(cx: &mut TestAppContext) -> (gpui::WindowHandle<Surface>, VisualTestCont
             let toolbar = cx.new(|_| Toolbar::new(app_state.clone()));
             let canvas = cx.new(|cx| Canvas::new(app_state.clone(), notes.clone(), cx));
             let keys = Arc::new(SharedKeys::default());
-            let side_panel = cx.new(|cx| SidePanel::new(app_state.clone(), keys, None, cx));
+            let side_panel = cx.new(|cx| SidePanel::new(app_state.clone(), keys, None, None, cx));
             let surface = cx.new(|_| Surface {
                 app_state,
                 toolbar,
