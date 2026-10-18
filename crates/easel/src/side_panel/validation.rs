@@ -8,6 +8,17 @@ use crate::net::KeyResolver;
 use crate::theme;
 use crate::ui::section_label;
 
+pub(crate) fn missing_key_line(provider: ProviderId) -> String {
+    let name = match provider {
+        ProviderId::Bfl => "BFL",
+        ProviderId::Krea => "Krea",
+        ProviderId::Google => "Google",
+        ProviderId::OpenAi => "OpenAI",
+        ProviderId::Xai => "xAI",
+    };
+    format!("No {name} API key — open Settings")
+}
+
 pub struct Validation {
     app_state: Entity<AppState>,
     keys: Arc<dyn KeyResolver>,
@@ -34,13 +45,7 @@ impl Validation {
             .collect::<Vec<_>>();
         let provider = app.spec().provider;
         if self.keys.key_for(provider).is_none() {
-            let name = match provider {
-                ProviderId::Bfl => "BFL",
-                ProviderId::Krea => "Krea",
-                ProviderId::Google => "Google",
-                ProviderId::OpenAi => "OpenAI",
-            };
-            messages.push(format!("No {name} API key — open Settings"));
+            messages.push(missing_key_line(provider));
         }
         if provider == ProviderId::Google
             && let Ok(request) = crate::jobs::build_request(app)

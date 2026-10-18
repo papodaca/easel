@@ -222,6 +222,47 @@ fn a_missing_key_disables_generate_until_a_session_key_exists(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn a_missing_xai_key_disables_generate_until_a_key_exists(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.scene.prose = "a red square".into();
+        app.set_aspect_ratio("1:1", cx);
+    });
+    assert_eq!(
+        crate::side_panel::validation::missing_key_line(ProviderId::Xai),
+        "No xAI API key — open Settings"
+    );
+    let keys: Arc<dyn crate::net::KeyResolver> = Arc::new(MapKeys::default());
+    let validation = cx.new(|cx| Validation::new(state.clone(), keys, cx));
+    let provider = state.read_with(&cx, |app, _| app.spec().provider);
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == &crate::side_panel::validation::missing_key_line(provider)),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    let keys: Arc<dyn crate::net::KeyResolver> =
+        Arc::new(MapKeys::default().insert(ProviderId::Xai, "xai-key"));
+    let validation = cx.new(|cx| Validation::new(state.clone(), keys, cx));
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    let keys: Arc<dyn crate::net::KeyResolver> = Arc::new(
+        MapKeys::default()
+            .insert(provider, "session-key")
+            .insert(ProviderId::Xai, "xai-key"),
+    );
+    let validation = cx.new(|cx| Validation::new(state, keys, cx));
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert!(validation.read_with(&cx, |validation, cx| {
+        !validation
+            .messages(cx)
+            .iter()
+            .any(|message| message.contains("API key"))
+    }));
+}
+
+#[gpui::test]
 fn insert_tag_writes_the_bracketed_id_at_the_cursor(cx: &mut TestAppContext) {
     let (state, mut cx) = open(cx);
     state.update(&mut cx, |app, _| {

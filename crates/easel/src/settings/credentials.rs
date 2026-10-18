@@ -76,6 +76,24 @@ fn openai_env_beats_the_store() {
 }
 
 #[test]
+fn xai_env_beats_the_store_keyed_by_base_url() {
+    let store = MemoryStore::default();
+    store.write(ProviderId::Xai, "store-key").expect("write");
+    assert!(store.stores_under(ProviderId::Xai.base_url()));
+    assert_eq!(ProviderId::Xai.base_url(), "https://api.x.ai");
+    let mut session = SessionKeys::default();
+    session.set(ProviderId::Xai, "session-key");
+    let env = std::collections::HashMap::from([(
+        ProviderId::Xai.env_var().to_owned(),
+        "env-key".to_owned(),
+    )]);
+    let resolved = resolve_key(ProviderId::Xai, &env, &store, &session).expect("env");
+    assert_eq!(resolved.0.as_str(), "env-key");
+    assert_eq!(resolved.1, Source::Env);
+    assert_eq!(ProviderId::Xai.env_var(), "XAI_API_KEY");
+}
+
+#[test]
 fn krea_env_beats_the_store_keyed_by_base_url() {
     let store = MemoryStore::default();
     store.write(ProviderId::Krea, "store-key").expect("write");
@@ -426,6 +444,55 @@ async fn openai_settings_probe_uses_get_models(cx: &mut TestAppContext) {
         );
         assert_eq!(
             panel.read_with(cx, |panel, _| panel.row_note(ProviderId::OpenAi).to_owned()),
+            note
+        );
+    }
+}
+
+#[gpui::test]
+async fn xai_settings_probe_uses_get_api_key(cx: &mut TestAppContext) {
+    use easel_core::http::{HttpResponse, Method};
+    use easel_core::model_spec::AuthScheme;
+    use gpui::prelude::*;
+
+    use crate::net::FakeTransport;
+    use crate::notifications::Notifications;
+    use crate::settings::{SettingsPanel, key_probe};
+
+    let probe = key_probe(ProviderId::Xai);
+    assert_eq!(probe.method, Method::Get);
+    assert_eq!(probe.url, "https://api.x.ai/v1/api-key");
+    assert_eq!(probe.auth, Some(ProviderId::Xai));
+    assert!(matches!(ProviderId::Xai.auth_scheme(), AuthScheme::Bearer));
+
+    for (status, note) in [
+        (401, "invalid key"),
+        (200, "key accepted"),
+        (404, "key accepted"),
+    ] {
+        let transport = Arc::new(FakeTransport::scripted(vec![Ok(HttpResponse {
+            status,
+            headers: Vec::new(),
+            body: b"{}".to_vec(),
+        })]));
+        let notes = cx.new(|_| Notifications::new());
+        let panel = cx.new({
+            let notes = notes.clone();
+            let transport = Arc::clone(&transport);
+            move |cx| SettingsPanel::new(notes, transport, cx)
+        });
+        let titles = panel.read_with(cx, |panel, _| panel.provider_titles());
+        assert!(titles.iter().any(|title| title == "xAI"));
+        panel
+            .update(cx, |panel, cx| panel.test_key(ProviderId::Xai, cx))
+            .await;
+        let seen = transport.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].method, Method::Get);
+        assert_eq!(seen[0].url, probe.url);
+        assert_eq!(seen[0].auth, Some(ProviderId::Xai));
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.row_note(ProviderId::Xai).to_owned()),
             note
         );
     }

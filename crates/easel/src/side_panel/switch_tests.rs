@@ -196,6 +196,7 @@ fn the_header_lists_providers_and_the_body_lists_their_models(cx: &mut TestAppCo
     assert!(providers.contains(&"Black Forest Labs".to_string()));
     assert!(providers.contains(&"Krea".to_string()));
     assert!(!providers.iter().any(|name| name == "OpenAI"));
+    assert!(!providers.iter().any(|name| name == "xAI"));
     assert!(!providers.iter().any(|name| name == "FLUX 3"));
     assert_eq!(
         selected(
@@ -250,6 +251,19 @@ fn the_header_lists_providers_and_the_body_lists_their_models(cx: &mut TestAppCo
     );
 }
 
+#[gpui::test]
+fn xai_appears_in_the_provider_menu_when_a_key_is_present(cx: &mut TestAppContext) {
+    let _env = ProviderEnvGuard::clear();
+    let keys = Arc::new(SharedKeys::default());
+    keys.set_session(ProviderId::Xai, "xai-key");
+    let (_state, panel) = editor_with(cx, keys);
+    let providers = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.provider_menu().clone()),
+    );
+    assert!(providers.contains(&"xAI".to_string()));
+}
+
 struct ProviderEnvGuard {
     saved: Vec<(&'static str, Option<String>)>,
 }
@@ -261,6 +275,7 @@ impl ProviderEnvGuard {
             "KREA_API_KEY",
             "GEMINI_API_KEY",
             "OPENAI_API_KEY",
+            "XAI_API_KEY",
         ];
         let saved = names
             .iter()

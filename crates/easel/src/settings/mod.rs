@@ -26,6 +26,7 @@ pub fn key_probe(provider: ProviderId) -> HttpRequest {
         ProviderId::Krea => format!("https://api.krea.ai/jobs/{}", fresh_uuid()),
         ProviderId::Google => "https://generativelanguage.googleapis.com/v1beta/models".to_owned(),
         ProviderId::OpenAi => "https://api.openai.com/v1/models".to_owned(),
+        ProviderId::Xai => "https://api.x.ai/v1/api-key".to_owned(),
     };
     HttpRequest {
         method: Method::Get,
@@ -161,6 +162,7 @@ pub struct SessionKeys {
     krea: Option<Zeroizing<String>>,
     google: Option<Zeroizing<String>>,
     openai: Option<Zeroizing<String>>,
+    xai: Option<Zeroizing<String>>,
 }
 
 impl SessionKeys {
@@ -171,6 +173,7 @@ impl SessionKeys {
             ProviderId::Krea => self.krea = Some(key),
             ProviderId::Google => self.google = Some(key),
             ProviderId::OpenAi => self.openai = Some(key),
+            ProviderId::Xai => self.xai = Some(key),
         }
     }
 
@@ -180,6 +183,7 @@ impl SessionKeys {
             ProviderId::Krea => self.krea = None,
             ProviderId::Google => self.google = None,
             ProviderId::OpenAi => self.openai = None,
+            ProviderId::Xai => self.xai = None,
         }
     }
 
@@ -189,6 +193,7 @@ impl SessionKeys {
             ProviderId::Krea => self.krea.clone(),
             ProviderId::Google => self.google.clone(),
             ProviderId::OpenAi => self.openai.clone(),
+            ProviderId::Xai => self.xai.clone(),
         }
     }
 }
@@ -585,6 +590,7 @@ impl Render for SettingsPanel {
                 ProviderId::Krea => "krea",
                 ProviderId::Google => "google",
                 ProviderId::OpenAi => "openai",
+                ProviderId::Xai => "xai",
             };
             let reveal_label = if revealed { "Hide" } else { "Reveal" };
             column = column

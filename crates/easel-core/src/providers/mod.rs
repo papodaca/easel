@@ -43,6 +43,7 @@ impl ModelRegistry {
             ProviderId::Krea,
             ProviderId::Google,
             ProviderId::OpenAi,
+            ProviderId::Xai,
         ]
     }
 

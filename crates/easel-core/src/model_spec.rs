@@ -10,6 +10,8 @@ pub enum ProviderId {
     Google,
     #[serde(rename = "openai")]
     OpenAi,
+    #[serde(rename = "xai")]
+    Xai,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +28,8 @@ const GOOGLE_HOSTS: &[HostRule] = &[HostRule::Exact("generativelanguage.googleap
 
 const OPENAI_HOSTS: &[HostRule] = &[HostRule::Exact("api.openai.com")];
 
+const XAI_HOSTS: &[HostRule] = &[HostRule::Exact("api.x.ai")];
+
 impl ProviderId {
     #[must_use]
     pub fn base_url(self) -> &'static str {
@@ -34,6 +38,7 @@ impl ProviderId {
             Self::Krea => "https://api.krea.ai",
             Self::Google => "https://generativelanguage.googleapis.com",
             Self::OpenAi => "https://api.openai.com",
+            Self::Xai => "https://api.x.ai",
         }
     }
 
@@ -44,6 +49,7 @@ impl ProviderId {
             Self::Krea => "KREA_API_KEY",
             Self::Google => "GEMINI_API_KEY",
             Self::OpenAi => "OPENAI_API_KEY",
+            Self::Xai => "XAI_API_KEY",
         }
     }
 
@@ -54,6 +60,7 @@ impl ProviderId {
             Self::Krea => "Krea",
             Self::Google => "Google",
             Self::OpenAi => "OpenAI",
+            Self::Xai => "xAI",
         }
     }
 
@@ -68,6 +75,7 @@ impl ProviderId {
                 header: "x-goog-api-key".into(),
             },
             Self::OpenAi => AuthScheme::Bearer,
+            Self::Xai => AuthScheme::Bearer,
         }
     }
 
@@ -78,6 +86,7 @@ impl ProviderId {
             Self::Krea => KREA_HOSTS,
             Self::Google => GOOGLE_HOSTS,
             Self::OpenAi => OPENAI_HOSTS,
+            Self::Xai => XAI_HOSTS,
         }
     }
 
@@ -346,6 +355,26 @@ mod tests {
             serde_json::to_value(ProviderId::OpenAi).unwrap(),
             serde_json::json!("openai")
         );
+    }
+
+    #[test]
+    fn xai_allows_only_api_x_ai() {
+        use crate::providers::ModelRegistry;
+
+        assert_eq!(ProviderId::Xai.env_var(), "XAI_API_KEY");
+        assert_eq!(ProviderId::Xai.display_name(), "xAI");
+        assert_eq!(ProviderId::Xai.base_url(), "https://api.x.ai");
+        assert!(matches!(ProviderId::Xai.auth_scheme(), AuthScheme::Bearer));
+        assert!(ProviderId::Xai.allows_url("https://api.x.ai"));
+        assert!(ProviderId::Xai.allows_url("https://api.x.ai/v1/api-key"));
+        assert!(!ProviderId::Xai.allows_url("https://us.api.x.ai"));
+        assert!(!ProviderId::Xai.allows_url("http://api.x.ai"));
+        assert!(!ProviderId::Xai.allows_url("https://api.x.ai.evil.example/x"));
+        assert_eq!(
+            serde_json::to_value(ProviderId::Xai).unwrap(),
+            serde_json::json!("xai")
+        );
+        assert!(ModelRegistry::providers().contains(&ProviderId::Xai));
     }
 
     #[test]

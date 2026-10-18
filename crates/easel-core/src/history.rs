@@ -589,6 +589,7 @@ fn provider_name(model_id: &str) -> String {
             ProviderId::Krea => "krea",
             ProviderId::Google => "google",
             ProviderId::OpenAi => "openai",
+            ProviderId::Xai => "xai",
         })
         .unwrap_or("")
         .to_owned()
@@ -977,6 +978,11 @@ mod tests {
     #[test]
     fn an_openai_model_stamps_provider_openai() {
         assert_eq!(provider_name("gpt-image-2.5-flare"), "openai");
+        assert_eq!(provider_name("not-a-model"), "");
+    }
+
+    #[test]
+    fn an_unknown_model_stores_an_empty_provider_string() {
         assert_eq!(provider_name("not-a-model"), "");
     }
 }
