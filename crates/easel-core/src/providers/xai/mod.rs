@@ -6,7 +6,7 @@ use crate::error::{FieldError, ProviderError};
 use crate::http::{Body, HttpHeader, HttpRequest, HttpResponse, Method};
 use crate::job::{EncodedImage, JobRequest};
 use crate::model_spec::{AuthScheme, Capabilities, ImageSlots, ModelSpec, ProviderId, SizeControl};
-use crate::providers::{ImageInput, PollOutcome, Provider, ReferenceStep, Submitted};
+use crate::providers::{ImageInput, InlineImage, PollOutcome, Provider, ReferenceStep, Submitted};
 use crate::scene::Scene;
 use crate::schema::{FieldDef, FieldKind, ParamSchema, RuleContext};
 
@@ -86,10 +86,17 @@ impl Provider for GrokImagine {
         }
     }
 
-    fn parse_submit(&self, _response: &HttpResponse) -> Result<Submitted, ProviderError> {
-        Err(ProviderError::Protocol(
-            "xai returns the image on the submit response".into(),
-        ))
+    fn parse_submit(&self, response: &HttpResponse) -> Result<Submitted, ProviderError> {
+        match imagine(response) {
+            Ok(_) => Err(ProviderError::Protocol(
+                "xai returns the image on the submit response".into(),
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn inline_image(&self, response: &HttpResponse) -> Option<InlineImage> {
+        imagine(response).ok()
     }
 
     fn parse_poll(&self, _response: &HttpResponse) -> PollOutcome {
@@ -219,12 +226,105 @@ fn build_xai(spec: &ModelSpec, request: &JobRequest, images: &[ImageInput]) -> H
     }
 }
 
+fn imagine(response: &HttpResponse) -> Result<InlineImage, ProviderError> {
+    if response.status == 401 {
+        return Err(ProviderError::Auth);
+    }
+    if response.status == 429 {
+        return Err(ProviderError::RateLimited { retry_after: None });
+    }
+    let value: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
+    if response.status == 400 && error_code(&value) == "imagine:content-moderated" {
+        return Err(ProviderError::Blocked);
+    }
+    if response.status != 200 {
+        return Err(ProviderError::Http {
+            status: response.status,
+            body: String::from_utf8_lossy(&response.body).into_owned(),
+        });
+    }
+    if moderated(&value) {
+        return Err(ProviderError::Blocked);
+    }
+    let Some(items) = value.get("data").and_then(Value::as_array) else {
+        return Err(ProviderError::Protocol("missing data".into()));
+    };
+    if items.is_empty() {
+        return Err(ProviderError::Blocked);
+    }
+    let item = &items[0];
+    match item.get("b64_json") {
+        Some(Value::String(encoded)) if !encoded.is_empty() => decode_image(&value, item, encoded),
+        Some(_) => Err(ProviderError::Blocked),
+        None if has_url(item) => Err(ProviderError::NoImage),
+        None => Err(ProviderError::Blocked),
+    }
+}
+
+fn error_code(value: &Value) -> &str {
+    value
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .or_else(|| value.get("code").and_then(Value::as_str))
+        .unwrap_or("")
+}
+
+fn moderated(value: &Value) -> bool {
+    if respect_moderation_false(value) {
+        return true;
+    }
+    value
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .is_some_and(respect_moderation_false)
+}
+
+fn respect_moderation_false(value: &Value) -> bool {
+    value.get("respect_moderation").and_then(Value::as_bool) == Some(false)
+}
+
+fn has_url(item: &Value) -> bool {
+    item.get("url")
+        .and_then(Value::as_str)
+        .is_some_and(|url| !url.is_empty())
+}
+
+fn decode_image(root: &Value, item: &Value, encoded: &str) -> Result<InlineImage, ProviderError> {
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+        .map_err(|_| ProviderError::Protocol("invalid image".into()))?;
+    let interaction_id = root
+        .get("request_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .unwrap_or("")
+        .to_owned();
+    Ok(InlineImage {
+        bytes,
+        mime: mime_type(item),
+        interaction_id,
+        suggestion: String::new(),
+    })
+}
+
+fn mime_type(item: &Value) -> String {
+    let mime = item.get("mime_type").and_then(Value::as_str).unwrap_or("");
+    if mime.is_empty() {
+        "image/jpeg".into()
+    } else {
+        mime.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::GrokImagine;
-    use crate::http::{Body, Method};
+    use crate::error::ProviderError;
+    use crate::http::{Body, HttpResponse, Method};
     use crate::job::{EncodedImage, JobRequest};
     use crate::model_spec::ProviderId;
+    use crate::providers::Provider;
     use crate::providers::{ImageInput, ReferenceStep};
     use crate::schema::FieldKind;
     use serde_json::{Value, json};
@@ -424,5 +524,78 @@ mod tests {
         assert_eq!(provider.spec().id, "flux-3-image");
         assert_eq!(provider.spec().provider, ProviderId::Bfl);
         assert_eq!(provider.spec().provider.display_name(), "Black Forest Labs");
+    }
+
+    fn response(status: u16, body: &str) -> HttpResponse {
+        HttpResponse {
+            status,
+            headers: Vec::new(),
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn null_or_empty_b64_json_is_blocked_before_any_url() {
+        let provider = GrokImagine;
+        for body in [
+            r#"{"data":[{"b64_json":null}]}"#,
+            r#"{"data":[{"b64_json":""}]}"#,
+            r#"{"data":[{"b64_json":null,"url":"https://example.com/a.jpg"}]}"#,
+        ] {
+            let response = response(200, body);
+            assert!(provider.inline_image(&response).is_none(), "{body}");
+            assert_eq!(
+                provider.parse_submit(&response).unwrap_err(),
+                ProviderError::Blocked,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_id_alone_is_not_a_poll_ticket() {
+        let provider = GrokImagine;
+        let response = response(200, r#"{"request_id":"req-1"}"#);
+        assert!(provider.inline_image(&response).is_none());
+        let error = provider.parse_submit(&response).unwrap_err();
+        assert!(matches!(error, ProviderError::Protocol(_)), "{error:?}");
+    }
+
+    #[test]
+    fn an_empty_mime_stays_inline_jpeg_and_is_not_submitted() {
+        let provider = GrokImagine;
+        let image = encoded(b"jpeg-bytes");
+        let response = response(
+            200,
+            &format!(
+                r#"{{"request_id":"","data":[{{"b64_json":"{}","mime_type":""}}]}}"#,
+                image.base64()
+            ),
+        );
+        let inline = provider.inline_image(&response).unwrap();
+        assert_eq!(inline.bytes, b"jpeg-bytes");
+        assert_eq!(inline.mime, "image/jpeg");
+        assert_eq!(inline.interaction_id, "");
+        assert!(matches!(
+            provider.parse_submit(&response).unwrap_err(),
+            ProviderError::Protocol(_)
+        ));
+    }
+
+    #[test]
+    fn webp_mime_is_passed_through() {
+        let provider = GrokImagine;
+        let image = encoded(b"webp-bytes");
+        let response = response(
+            200,
+            &format!(
+                r#"{{"request_id":"req-webp","data":[{{"b64_json":"{}","mime_type":"image/webp"}},{{"b64_json":"later"}}]}}"#,
+                image.base64()
+            ),
+        );
+        let inline = provider.inline_image(&response).unwrap();
+        assert_eq!(inline.bytes, b"webp-bytes");
+        assert_eq!(inline.mime, "image/webp");
+        assert_eq!(inline.interaction_id, "req-webp");
     }
 }
