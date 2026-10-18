@@ -1,6 +1,7 @@
 pub mod bfl;
 pub mod google;
 pub mod krea;
+pub mod openai;
 
 use std::sync::OnceLock;
 
@@ -24,6 +25,12 @@ impl ModelRegistry {
                     google::NanoBanana21::model_spec(),
                     google::NanoBanana2Lite::model_spec(),
                     google::NanoBananaPro::model_spec(),
+                    openai::GptImage25Flare::model_spec(),
+                    openai::GptImage25Sunburst::model_spec(),
+                    openai::GptImage2::model_spec(),
+                    openai::GptImage15::model_spec(),
+                    openai::GptImage1Mini::model_spec(),
+                    openai::GptImage1::model_spec(),
                 ]
             })
             .as_slice()
@@ -31,7 +38,12 @@ impl ModelRegistry {
 
     #[must_use]
     pub fn providers() -> &'static [ProviderId] {
-        &[ProviderId::Bfl, ProviderId::Krea, ProviderId::Google]
+        &[
+            ProviderId::Bfl,
+            ProviderId::Krea,
+            ProviderId::Google,
+            ProviderId::OpenAi,
+        ]
     }
 
     #[must_use]
@@ -51,6 +63,12 @@ pub fn resolve_model(model_id: &str) -> Option<Box<dyn Provider>> {
         "gemini-nano-banana-2.1" => Some(Box::new(google::NanoBanana21)),
         "gemini-3.1-flash-lite-image" => Some(Box::new(google::NanoBanana2Lite)),
         "gemini-3-pro-image" => Some(Box::new(google::NanoBananaPro)),
+        "gpt-image-2.5-flare" => Some(Box::new(openai::GptImage25Flare)),
+        "gpt-image-2.5-sunburst" => Some(Box::new(openai::GptImage25Sunburst)),
+        "gpt-image-2" => Some(Box::new(openai::GptImage2)),
+        "gpt-image-1.5" => Some(Box::new(openai::GptImage15)),
+        "gpt-image-1-mini" => Some(Box::new(openai::GptImage1Mini)),
+        "gpt-image-1" => Some(Box::new(openai::GptImage1)),
         _ => None,
     }
 }

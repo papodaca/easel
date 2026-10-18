@@ -973,6 +973,7 @@ impl JobRunner {
                 ProviderId::Bfl => "bfl",
                 ProviderId::Krea => "krea",
                 ProviderId::Google => "google",
+                ProviderId::OpenAi => "openai",
             })
             .unwrap_or("unknown");
         format!("{label}:{content_hash}")

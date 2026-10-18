@@ -8,6 +8,8 @@ pub enum ProviderId {
     Bfl,
     Krea,
     Google,
+    #[serde(rename = "openai")]
+    OpenAi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +24,8 @@ const KREA_HOSTS: &[HostRule] = &[HostRule::Exact("api.krea.ai"), HostRule::Suff
 
 const GOOGLE_HOSTS: &[HostRule] = &[HostRule::Exact("generativelanguage.googleapis.com")];
 
+const OPENAI_HOSTS: &[HostRule] = &[HostRule::Exact("api.openai.com")];
+
 impl ProviderId {
     #[must_use]
     pub fn base_url(self) -> &'static str {
@@ -29,6 +33,7 @@ impl ProviderId {
             Self::Bfl => "https://api.bfl.ai",
             Self::Krea => "https://api.krea.ai",
             Self::Google => "https://generativelanguage.googleapis.com",
+            Self::OpenAi => "https://api.openai.com",
         }
     }
 
@@ -38,6 +43,7 @@ impl ProviderId {
             Self::Bfl => "BFL_API_KEY",
             Self::Krea => "KREA_API_KEY",
             Self::Google => "GEMINI_API_KEY",
+            Self::OpenAi => "OPENAI_API_KEY",
         }
     }
 
@@ -47,6 +53,7 @@ impl ProviderId {
             Self::Bfl => "Black Forest Labs",
             Self::Krea => "Krea",
             Self::Google => "Google",
+            Self::OpenAi => "OpenAI",
         }
     }
 
@@ -60,6 +67,7 @@ impl ProviderId {
             Self::Google => AuthScheme::HeaderKey {
                 header: "x-goog-api-key".into(),
             },
+            Self::OpenAi => AuthScheme::Bearer,
         }
     }
 
@@ -69,6 +77,7 @@ impl ProviderId {
             Self::Bfl => BFL_HOSTS,
             Self::Krea => KREA_HOSTS,
             Self::Google => GOOGLE_HOSTS,
+            Self::OpenAi => OPENAI_HOSTS,
         }
     }
 
@@ -288,6 +297,54 @@ mod tests {
                 "gemini-3.1-flash-lite-image",
                 "gemini-3-pro-image",
             ]
+        );
+    }
+
+    #[test]
+    fn registry_lists_the_six_openai_models_in_menu_order() {
+        use crate::providers::ModelRegistry;
+
+        let specs: Vec<_> = ModelRegistry::specs()
+            .iter()
+            .filter(|spec| spec.id.starts_with("gpt-image"))
+            .collect();
+        let ids: Vec<_> = specs.iter().map(|spec| spec.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "gpt-image-2.5-flare",
+                "gpt-image-2.5-sunburst",
+                "gpt-image-2",
+                "gpt-image-1.5",
+                "gpt-image-1-mini",
+                "gpt-image-1",
+            ]
+        );
+        let names: Vec<_> = specs
+            .iter()
+            .map(|spec| spec.display_name.as_str())
+            .collect();
+        assert!(names[3].contains("2026-12-01"), "{}", names[3]);
+        assert!(names[4].contains("2026-12-01"), "{}", names[4]);
+        assert!(names[5].contains("2026-10-23"), "{}", names[5]);
+        assert!(!names[0].contains("2026-"));
+    }
+
+    #[test]
+    fn openai_allows_only_api_openai_com() {
+        assert_eq!(ProviderId::OpenAi.env_var(), "OPENAI_API_KEY");
+        assert_eq!(ProviderId::OpenAi.display_name(), "OpenAI");
+        assert!(matches!(
+            ProviderId::OpenAi.auth_scheme(),
+            AuthScheme::Bearer
+        ));
+        assert!(ProviderId::OpenAi.allows_url("https://api.openai.com/v1/images/generations"));
+        assert!(!ProviderId::OpenAi.allows_url("https://evil.example/v1/images/generations"));
+        assert!(!ProviderId::OpenAi.allows_url("https://api.openai.com.evil.example/x"));
+        assert!(!ProviderId::OpenAi.allows_url("http://api.openai.com/v1/models"));
+        assert_eq!(
+            serde_json::to_value(ProviderId::OpenAi).unwrap(),
+            serde_json::json!("openai")
         );
     }
 

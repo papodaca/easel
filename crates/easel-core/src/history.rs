@@ -588,6 +588,7 @@ fn provider_name(model_id: &str) -> String {
             ProviderId::Bfl => "bfl",
             ProviderId::Krea => "krea",
             ProviderId::Google => "google",
+            ProviderId::OpenAi => "openai",
         })
         .unwrap_or("")
         .to_owned()
@@ -599,7 +600,7 @@ fn io_err(error: impl std::fmt::Display) -> StoreError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Completion, HistoryStore};
+    use super::{Completion, HistoryStore, provider_name};
     use crate::geometry::Size;
     use crate::image_prep::ImageSummary;
     use crate::job::{EncodedImage, JobRequest, JobState};
@@ -971,5 +972,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fs::read(root.join("gjpeg/result.jpg")).unwrap(), jpeg);
+    }
+
+    #[test]
+    fn an_openai_model_stamps_provider_openai() {
+        assert_eq!(provider_name("gpt-image-2.5-flare"), "openai");
+        assert_eq!(provider_name("not-a-model"), "");
     }
 }

@@ -82,6 +82,7 @@ pub struct MapKeys {
     bfl: Option<String>,
     krea: Option<String>,
     google: Option<String>,
+    openai: Option<String>,
 }
 
 #[cfg(test)]
@@ -91,6 +92,7 @@ impl MapKeys {
             ProviderId::Bfl => self.bfl = Some(key.into()),
             ProviderId::Krea => self.krea = Some(key.into()),
             ProviderId::Google => self.google = Some(key.into()),
+            ProviderId::OpenAi => self.openai = Some(key.into()),
         }
         self
     }
@@ -103,6 +105,7 @@ impl KeyResolver for MapKeys {
             ProviderId::Bfl => self.bfl.clone(),
             ProviderId::Krea => self.krea.clone(),
             ProviderId::Google => self.google.clone(),
+            ProviderId::OpenAi => self.openai.clone(),
         };
         key.map(Zeroizing::new)
     }

@@ -38,6 +38,7 @@ impl Validation {
                 ProviderId::Bfl => "BFL",
                 ProviderId::Krea => "Krea",
                 ProviderId::Google => "Google",
+                ProviderId::OpenAi => "OpenAI",
             };
             messages.push(format!("No {name} API key — open Settings"));
         }

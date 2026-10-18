@@ -14,6 +14,23 @@ fn env_with(value: &str) -> std::collections::HashMap<String, String> {
 }
 
 #[test]
+fn openai_env_beats_the_store() {
+    let store = MemoryStore::default();
+    store.write(ProviderId::OpenAi, "store-key").expect("write");
+    assert!(store.stores_under(ProviderId::OpenAi.base_url()));
+    let mut session = SessionKeys::default();
+    session.set(ProviderId::OpenAi, "session-key");
+    let env = std::collections::HashMap::from([(
+        ProviderId::OpenAi.env_var().to_owned(),
+        "env-key".to_owned(),
+    )]);
+    let resolved = resolve_key(ProviderId::OpenAi, &env, &store, &session).expect("env");
+    assert_eq!(resolved.0.as_str(), "env-key");
+    assert_eq!(resolved.1, Source::Env);
+    assert_eq!(ProviderId::OpenAi.env_var(), "OPENAI_API_KEY");
+}
+
+#[test]
 fn krea_env_beats_the_store_keyed_by_base_url() {
     let store = MemoryStore::default();
     store.write(ProviderId::Krea, "store-key").expect("write");
@@ -247,6 +264,7 @@ async fn each_provider_row_keeps_its_own_test_result(cx: &mut TestAppContext) {
     assert_eq!(titles.len(), ModelRegistry::providers().len());
     assert!(titles.iter().any(|title| title == "Black Forest Labs"));
     assert!(titles.iter().any(|title| title == "Krea"));
+    assert!(titles.iter().any(|title| title == "OpenAI"));
 
     panel.update(cx, |panel, cx| {
         panel.set_draft(ProviderId::Krea, "krea-secret", cx);
