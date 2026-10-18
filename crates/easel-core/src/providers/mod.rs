@@ -2,6 +2,7 @@ pub mod bfl;
 pub mod google;
 pub mod krea;
 pub mod openai;
+pub mod xai;
 
 use std::sync::OnceLock;
 
@@ -31,6 +32,7 @@ impl ModelRegistry {
                     openai::GptImage15::model_spec(),
                     openai::GptImage1Mini::model_spec(),
                     openai::GptImage1::model_spec(),
+                    xai::GrokImagine::model_spec(),
                 ]
             })
             .as_slice()
@@ -70,6 +72,7 @@ pub fn resolve_model(model_id: &str) -> Option<Box<dyn Provider>> {
         "gpt-image-1.5" => Some(Box::new(openai::GptImage15)),
         "gpt-image-1-mini" => Some(Box::new(openai::GptImage1Mini)),
         "gpt-image-1" => Some(Box::new(openai::GptImage1)),
+        "grok-imagine-image-2.0" => Some(Box::new(xai::GrokImagine)),
         _ => None,
     }
 }
