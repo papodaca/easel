@@ -15,8 +15,8 @@ use zeroize::Zeroizing;
 use crate::net::{HttpTransport, KeyResolver};
 use crate::notifications::{Notifications, Toast, ToastLevel};
 use crate::theme;
-use crate::ui::{Button, muted_text, section_label};
-use crate::widgets::{TextInput, field_row};
+use crate::ui::{Button, muted_text};
+use crate::widgets::{Select, TextInput, field_row};
 
 /// Probe the provider uses to decide whether a key is accepted.
 /// Krea asks for a fresh job id; a valid key gets 404, an invalid key gets 401.
@@ -318,6 +318,7 @@ pub struct SettingsPanel {
     notifications: Entity<Notifications>,
     transport: Arc<dyn HttpTransport>,
     keys: Arc<SharedKeys>,
+    provider_menu: Entity<Select>,
     rows: Vec<ProviderRow>,
     test_log: Vec<String>,
     data_directory: gpui::SharedString,
@@ -364,6 +365,21 @@ impl SettingsPanel {
                 }
             })
             .collect();
+        let options: Vec<gpui::SharedString> = ModelRegistry::providers()
+            .iter()
+            .copied()
+            .map(|provider| gpui::SharedString::from(provider.display_name()))
+            .collect();
+        let initial = options
+            .first()
+            .cloned()
+            .unwrap_or_else(|| gpui::SharedString::from("Select"));
+        let provider_menu = cx.new(|cx| {
+            let mut select = Select::new(options, cx);
+            select.set_label("Provider", cx);
+            select.set_value(serde_json::Value::String(initial.to_string()), cx);
+            select
+        });
         let reads: Vec<_> = ModelRegistry::providers()
             .iter()
             .copied()
@@ -408,6 +424,7 @@ impl SettingsPanel {
             notifications,
             transport,
             keys,
+            provider_menu,
             rows,
             test_log: Vec::new(),
             data_directory: gpui::SharedString::default(),
@@ -429,6 +446,25 @@ impl SettingsPanel {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn logged_test_lines(&self) -> Vec<String> {
         self.test_log.clone()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn provider_menu(&self) -> &Entity<Select> {
+        &self.provider_menu
+    }
+
+    pub fn selected_provider(&self, cx: &gpui::App) -> ProviderId {
+        let name = self
+            .provider_menu
+            .read(cx)
+            .value()
+            .as_str()
+            .unwrap_or_default();
+        ModelRegistry::providers()
+            .iter()
+            .copied()
+            .find(|provider| provider.display_name() == name)
+            .unwrap_or(ProviderId::Bfl)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -563,84 +599,78 @@ impl SettingsPanel {
     }
 }
 
+fn provider_slug(provider: ProviderId) -> &'static str {
+    match provider {
+        ProviderId::Bfl => "bfl",
+        ProviderId::Krea => "krea",
+        ProviderId::Google => "google",
+        ProviderId::OpenAi => "openai",
+        ProviderId::Xai => "xai",
+    }
+}
+
 impl Render for SettingsPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows: Vec<_> = self
-            .rows
-            .iter()
-            .map(|row| {
-                (
-                    row.provider,
-                    row.draft.clone(),
-                    row.note.clone(),
-                    row.field_message.clone(),
-                    row.revealed,
-                )
-            })
-            .collect();
-        let mut column = div()
+        let provider = self.selected_provider(cx);
+        let (draft, note, field_message, revealed) = {
+            let row = self.row(provider);
+            (
+                row.draft.clone(),
+                row.note.clone(),
+                row.field_message.clone(),
+                row.revealed,
+            )
+        };
+        let slug = provider_slug(provider);
+        let reveal_label = if revealed { "Hide" } else { "Reveal" };
+        div()
             .flex()
             .flex_col()
             .gap(px(10.0))
             .w_full()
-            .text_color(rgb(theme::TEXT));
-        for (provider, draft, note, field_message, revealed) in rows {
-            let slug = match provider {
-                ProviderId::Bfl => "bfl",
-                ProviderId::Krea => "krea",
-                ProviderId::Google => "google",
-                ProviderId::OpenAi => "openai",
-                ProviderId::Xai => "xai",
-            };
-            let reveal_label = if revealed { "Hide" } else { "Reveal" };
-            column = column
-                .child(section_label(provider.display_name()))
-                .child(draft)
-                .child(muted_text(note))
-                .when(!field_message.is_empty(), |column| {
-                    column.child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(theme::ERROR))
-                            .child(field_message),
-                    )
-                })
-                .child(
+            .text_color(rgb(theme::TEXT))
+            .child(self.provider_menu.clone())
+            .child(draft)
+            .child(muted_text(note))
+            .when(!field_message.is_empty(), |column| {
+                column.child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(
-                            Button::filled(format!("settings-save-{slug}"), "Save").on_click(
-                                cx.listener(move |this, _, _, cx| this.save(provider, cx)),
-                            ),
-                        )
-                        .child(
-                            Button::filled(format!("settings-test-{slug}"), "Test").on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.test_key(provider, cx).detach();
-                                }),
-                            ),
-                        )
-                        .child(div().flex_1())
-                        .child(
-                            Button::ghost(format!("settings-reveal-{slug}"), reveal_label)
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.reveal(provider, cx)),
-                                ),
-                        )
-                        .child(
-                            Button::ghost(format!("settings-clear-{slug}"), "Clear").on_click(
-                                cx.listener(move |this, _, _, cx| this.clear(provider, cx)),
-                            ),
+                        .text_sm()
+                        .text_color(rgb(theme::ERROR))
+                        .child(field_message),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        Button::filled(format!("settings-save-{slug}"), "Save")
+                            .on_click(cx.listener(move |this, _, _, cx| this.save(provider, cx))),
+                    )
+                    .child(
+                        Button::filled(format!("settings-test-{slug}"), "Test").on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.test_key(provider, cx).detach();
+                            }),
                         ),
-                );
-        }
-        column.child(field_row(
-            Some("Data directory"),
-            None,
-            div().text_sm().child(self.data_directory.clone()),
-        ))
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::ghost(format!("settings-reveal-{slug}"), reveal_label)
+                            .on_click(cx.listener(move |this, _, _, cx| this.reveal(provider, cx))),
+                    )
+                    .child(
+                        Button::ghost(format!("settings-clear-{slug}"), "Clear")
+                            .on_click(cx.listener(move |this, _, _, cx| this.clear(provider, cx))),
+                    ),
+            )
+            .child(field_row(
+                Some("Data directory"),
+                None,
+                div().text_sm().child(self.data_directory.clone()),
+            ))
     }
 }

@@ -497,3 +497,35 @@ async fn xai_settings_probe_uses_get_api_key(cx: &mut TestAppContext) {
         );
     }
 }
+
+#[gpui::test]
+fn the_provider_menu_selects_which_key_form_is_active(cx: &mut TestAppContext) {
+    use gpui::prelude::*;
+
+    use crate::net::FakeTransport;
+    use crate::notifications::Notifications;
+    use crate::settings::SettingsPanel;
+
+    let notes = cx.new(|_| Notifications::new());
+    let transport = Arc::new(FakeTransport::scripted(Vec::new()));
+    let panel = cx.new(move |cx| SettingsPanel::new(notes, transport, cx));
+    assert_eq!(
+        panel.read_with(cx, |panel, cx| panel.selected_provider(cx)),
+        ProviderId::Bfl
+    );
+    assert_eq!(
+        panel.read_with(cx, |panel, cx| {
+            panel.provider_menu().read(cx).label().map(str::to_owned)
+        }),
+        Some("Provider".to_owned())
+    );
+    panel.update(cx, |panel, cx| {
+        panel.provider_menu().update(cx, |select, cx| {
+            select.set_value(serde_json::Value::String("OpenAI".into()), cx);
+        });
+    });
+    assert_eq!(
+        panel.read_with(cx, |panel, cx| panel.selected_provider(cx)),
+        ProviderId::OpenAi
+    );
+}
