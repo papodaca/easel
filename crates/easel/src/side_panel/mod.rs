@@ -37,7 +37,7 @@ pub struct SidePanel {
     form: gpui::Entity<SchemaForm>,
     validation: gpui::Entity<Validation>,
     model: gpui::Entity<Select>,
-    runner: Option<gpui::Entity<crate::jobs::JobRunner<easel_core::providers::bfl::flux3::Flux3>>>,
+    runner: Option<gpui::Entity<crate::jobs::JobRunner>>,
     scroll: ScrollHandle,
     thumb: Bounds<Pixels>,
     thumb_grab: Option<Pixels>,
@@ -47,9 +47,7 @@ impl SidePanel {
     pub fn new(
         app_state: gpui::Entity<AppState>,
         keys: std::sync::Arc<SharedKeys>,
-        runner: Option<
-            gpui::Entity<crate::jobs::JobRunner<easel_core::providers::bfl::flux3::Flux3>>,
-        >,
+        runner: Option<gpui::Entity<crate::jobs::JobRunner>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let inspector = cx.new(|cx| Inspector::new(app_state.clone(), cx));

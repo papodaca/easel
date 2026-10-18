@@ -12,6 +12,7 @@ pub fn build_request(app: &AppState) -> Result<JobRequest, String> {
         .get("resolution")
         .and_then(|value| value.as_str())
         .unwrap_or("1k");
+    let tier = if tier == "4K" { "4k" } else { tier };
     let options = PrepOptions::for_resolution(tier);
     let mut images = Vec::new();
     if let Some(image) = &app.image {

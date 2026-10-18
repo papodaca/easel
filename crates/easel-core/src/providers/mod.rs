@@ -39,6 +39,21 @@ impl ModelRegistry {
         provider.auth_scheme()
     }
 }
+
+/// The provider that owns a registered model id.
+#[must_use]
+pub fn resolve_model(model_id: &str) -> Option<Box<dyn Provider>> {
+    match model_id {
+        "flux-3-image" => Some(Box::new(bfl::flux3::Flux3)),
+        "flux-2-pro" => Some(Box::new(bfl::flux2_pro::Flux2Pro)),
+        "krea-3" => Some(Box::new(krea::krea3::Krea3)),
+        "krea-2-large" => Some(Box::new(krea::krea2_large::Krea2Large)),
+        "gemini-nano-banana-2.1" => Some(Box::new(google::NanoBanana21)),
+        "gemini-3.1-flash-lite-image" => Some(Box::new(google::NanoBanana2Lite)),
+        "gemini-3-pro-image" => Some(Box::new(google::NanoBananaPro)),
+        _ => None,
+    }
+}
 use serde::{Deserialize, Serialize};
 
 /// Server job id. Only values matching `^[A-Za-z0-9_-]{1,64}$` can name a file.

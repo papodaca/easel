@@ -39,12 +39,13 @@ pub struct LiveJob {
     pub bytes: Option<Vec<u8>>,
 }
 
-pub struct JobRunner<P> {
-    provider: P,
+pub struct JobRunner {
+    resolve: Arc<dyn Fn(&str) -> Option<Box<dyn Provider>>>,
     transport: Arc<dyn HttpTransport>,
     keys: Arc<dyn KeyResolver>,
     history: Arc<HistoryStore>,
     slots: Vec<Slot>,
+    providers: HashMap<u64, Box<dyn Provider>>,
     uploads: HashMap<String, ImageInput>,
     next_token: u64,
     sunset_watch: Option<(
@@ -53,19 +54,23 @@ pub struct JobRunner<P> {
     )>,
 }
 
-impl<P: Provider + 'static> JobRunner<P> {
-    pub fn new(
-        provider: P,
+impl JobRunner {
+    pub fn new<R>(
+        resolve: R,
         transport: Arc<dyn HttpTransport>,
         keys: Arc<dyn KeyResolver>,
         history: Arc<HistoryStore>,
-    ) -> Self {
+    ) -> Self
+    where
+        R: Fn(&str) -> Option<Box<dyn Provider>> + 'static,
+    {
         Self {
-            provider,
+            resolve: Arc::new(resolve),
             transport,
             keys,
             history,
             slots: Vec::new(),
+            providers: HashMap::new(),
             uploads: HashMap::new(),
             next_token: 1,
             sunset_watch: None,
@@ -75,6 +80,7 @@ impl<P: Provider + 'static> JobRunner<P> {
     pub fn submit(&mut self, request: JobRequest, cx: &mut Context<Self>) {
         let token = self.next_token;
         self.next_token += 1;
+        let model_id = request.model_id.clone();
         self.slots.push(Slot {
             token,
             state: JobState::Queued,
@@ -87,7 +93,19 @@ impl<P: Provider + 'static> JobRunner<P> {
             cost: None,
             last_outcome: None,
         });
-        self.pump(cx);
+        match (self.resolve)(&model_id) {
+            Some(provider) => {
+                self.providers.insert(token, provider);
+                self.pump(cx);
+            }
+            None => {
+                self.fail(
+                    token,
+                    ProviderError::Protocol(format!("unknown model {model_id}")),
+                    cx,
+                );
+            }
+        }
     }
 
     pub fn watch_krea_sunset(
@@ -103,12 +121,18 @@ impl<P: Provider + 'static> JobRunner<P> {
             return;
         }
         if matches!(self.slots[index].state, JobState::Queued) {
+            let token = self.slots[index].token;
+            self.providers.remove(&token);
             self.slots.remove(index);
             return;
         }
-        let cancel = self.slots[index].submitted.clone().and_then(|submitted| {
-            self.provider
-                .cancel_request(&submitted, self.slots[index].last_outcome.as_ref())
+        let token = self.slots[index].token;
+        let submitted = self.slots[index].submitted.clone();
+        let last = self.slots[index].last_outcome.clone();
+        let cancel = submitted.and_then(|submitted| {
+            self.providers
+                .get(&token)
+                .and_then(|provider| provider.cancel_request(&submitted, last.as_ref()))
         });
         let slot = &mut self.slots[index];
         slot.dead = true;
@@ -188,11 +212,17 @@ impl<P: Provider + 'static> JobRunner<P> {
                 let _ = self.history.fail(&entry.id, &error);
                 continue;
             }
+            let Some(provider) = (self.resolve)("flux-3-image") else {
+                let error = ProviderError::Protocol("unknown model flux-3-image".into());
+                let _ = self.history.fail(&entry.id, &error);
+                continue;
+            };
             let Ok(url) = poll_url.parse() else {
                 continue;
             };
             let token = self.next_token;
             self.next_token += 1;
+            self.providers.insert(token, provider);
             self.slots.push(Slot {
                 token,
                 state: JobState::Polling {
@@ -244,7 +274,14 @@ impl<P: Provider + 'static> JobRunner<P> {
     }
 
     fn resolve(&mut self, token: u64, mut inputs: Vec<ImageInput>, cx: &mut Context<Self>) {
-        let provider_id = self.provider.spec().provider;
+        let Some(provider_id) = self
+            .providers
+            .get(&token)
+            .map(|provider| provider.spec().provider)
+        else {
+            self.fail(token, ProviderError::Protocol("unknown model".into()), cx);
+            return;
+        };
         if self.keys.key_for(provider_id).is_none() {
             self.fail(token, ProviderError::Auth, cx);
             return;
@@ -253,7 +290,11 @@ impl<P: Provider + 'static> JobRunner<P> {
             .slot_mut(token)
             .map(|slot| slot.request.images.clone())
             .unwrap_or_default();
-        let mut steps = self.provider.reference_steps(&images);
+        let mut steps = self
+            .providers
+            .get(&token)
+            .map(|provider| provider.reference_steps(&images))
+            .unwrap_or_default();
         self.resolve_steps(token, &mut steps, &mut inputs, cx);
     }
 
@@ -272,7 +313,8 @@ impl<P: Provider + 'static> JobRunner<P> {
                     request,
                     content_hash,
                 } => {
-                    if let Some(cached) = self.uploads.get(&content_hash).cloned() {
+                    let cache_key = self.cache_key(token, &content_hash);
+                    if let Some(cached) = self.uploads.get(&cache_key).cloned() {
                         inputs.push(cached);
                         continue;
                     }
@@ -282,7 +324,7 @@ impl<P: Provider + 'static> JobRunner<P> {
                     cx.spawn(async move |this, cx| {
                         let response = task.await;
                         this.update(cx, |runner, cx| {
-                            runner.finish_upload(token, content_hash, response, rest, inputs, cx);
+                            runner.finish_upload(token, cache_key, response, rest, inputs, cx);
                         })
                         .ok();
                     })
@@ -310,13 +352,18 @@ impl<P: Provider + 'static> JobRunner<P> {
             self.fail(token, ProviderError::Network("upload failed".into()), cx);
             return;
         };
-        match self.provider.parse_upload(&response) {
-            Ok(input) => {
+        let parsed = self
+            .providers
+            .get(&token)
+            .map(|provider| provider.parse_upload(&response));
+        match parsed {
+            Some(Ok(input)) => {
                 self.uploads.insert(content_hash, input.clone());
                 inputs.push(input);
                 self.resolve_steps(token, &mut steps, &mut inputs, cx);
             }
-            Err(error) => self.fail(token, error, cx),
+            Some(Err(error)) => self.fail(token, error, cx),
+            None => self.fail(token, ProviderError::Protocol("unknown model".into()), cx),
         }
     }
 
@@ -324,7 +371,14 @@ impl<P: Provider + 'static> JobRunner<P> {
         let Some(request) = self.slot_mut(token).map(|slot| slot.request.clone()) else {
             return;
         };
-        let http = self.provider.build_submit(&request, &inputs);
+        let Some(http) = self
+            .providers
+            .get(&token)
+            .map(|provider| provider.build_submit(&request, &inputs))
+        else {
+            self.fail(token, ProviderError::Protocol("unknown model".into()), cx);
+            return;
+        };
         let task = self.transport.request(http, cx);
         cx.spawn(async move |this, cx| {
             let response = task.await;
@@ -358,9 +412,13 @@ impl<P: Provider + 'static> JobRunner<P> {
                 return;
             }
         };
-        self.note_headers(&response, cx);
-        match self.provider.parse_submit(&response) {
-            Ok(submitted) => {
+        self.note_headers(token, &response, cx);
+        let parsed = self
+            .providers
+            .get(&token)
+            .map(|provider| provider.parse_submit(&response));
+        match parsed {
+            Some(Ok(submitted)) => {
                 let request = self.slot_mut(token).map(|slot| slot.request.clone());
                 if let Some(request) = request {
                     let _ = self.history.begin(&submitted.job_id, &request, &submitted);
@@ -375,22 +433,31 @@ impl<P: Provider + 'static> JobRunner<P> {
                 cx.notify();
                 self.schedule_poll(token, cx);
             }
-            Err(error) => {
-                if self.provider.spec().beta && matches!(error, ProviderError::Auth) {
+            Some(Err(error)) => {
+                let beta = self
+                    .providers
+                    .get(&token)
+                    .is_some_and(|provider| provider.spec().beta);
+                if beta && matches!(error, ProviderError::Auth) {
                     self.probe_beta(token, cx);
                 } else {
                     self.fail(token, error, cx);
                 }
             }
+            None => self.fail(token, ProviderError::Protocol("unknown model".into()), cx),
         }
     }
 
     fn probe_beta(&mut self, token: u64, cx: &mut Context<Self>) {
-        let request = crate::settings::key_probe(self.provider.spec().provider);
+        let Some(provider) = self.providers.get(&token) else {
+            return;
+        };
+        let provider_id = provider.spec().provider;
         let message = format!(
             "{} is in beta; your workspace needs access",
-            self.provider.spec().display_name
+            provider.spec().display_name
         );
+        let request = crate::settings::key_probe(provider_id);
         let task = self.transport.request(request, cx);
         cx.spawn(async move |this, cx| {
             let response = task.await;
@@ -425,7 +492,13 @@ impl<P: Provider + 'static> JobRunner<P> {
         else {
             return;
         };
-        let policy = self.provider.poll_policy();
+        let Some(policy) = self
+            .providers
+            .get(&token)
+            .map(|provider| provider.poll_policy())
+        else {
+            return;
+        };
         let remaining = policy.deadline.saturating_sub(elapsed);
         if remaining.is_zero() {
             self.deadline(token, cx);
@@ -458,7 +531,13 @@ impl<P: Provider + 'static> JobRunner<P> {
             .find(|slot| slot.token == token)
             .map(|slot| slot.elapsed)
             .unwrap_or_default();
-        let policy = self.provider.poll_policy();
+        let Some(policy) = self
+            .providers
+            .get(&token)
+            .map(|provider| provider.poll_policy())
+        else {
+            return;
+        };
         if policy.expired(elapsed) {
             self.deadline(token, cx);
             return;
@@ -471,7 +550,13 @@ impl<P: Provider + 'static> JobRunner<P> {
         else {
             return;
         };
-        let http = self.provider.poll_request(&submitted);
+        let Some(http) = self
+            .providers
+            .get(&token)
+            .map(|provider| provider.poll_request(&submitted))
+        else {
+            return;
+        };
         let task = self.transport.request(http, cx);
         cx.spawn(async move |this, cx| {
             let response = task.await;
@@ -491,10 +576,16 @@ impl<P: Provider + 'static> JobRunner<P> {
             return;
         }
         if let Ok(response) = &response {
-            self.note_headers(response, cx);
+            self.note_headers(token, response, cx);
         }
-        let outcome = match response {
-            Ok(response) => self.provider.parse_poll(&response),
+        let outcome = match &response {
+            Ok(response) => self
+                .providers
+                .get(&token)
+                .map(|provider| provider.parse_poll(response))
+                .unwrap_or_else(|| {
+                    PollOutcome::Failed(ProviderError::Protocol("unknown model".into()))
+                }),
             Err(TransportError::Network { .. } | TransportError::Timeout { .. }) => {
                 PollOutcome::Failed(ProviderError::Network("poll failed".into()))
             }
@@ -538,7 +629,13 @@ impl<P: Provider + 'static> JobRunner<P> {
             return;
         };
         self.arm_deadline(token, cx);
-        let http = self.provider.download_request(&url);
+        let Some(http) = self
+            .providers
+            .get(&token)
+            .map(|provider| provider.download_request(&url))
+        else {
+            return;
+        };
         let task = self.transport.request(http, cx);
         cx.spawn(async move |this, cx| {
             let response = task.await;
@@ -559,7 +656,14 @@ impl<P: Provider + 'static> JobRunner<P> {
         else {
             return;
         };
-        let remaining = self.provider.poll_policy().deadline.saturating_sub(elapsed);
+        let Some(deadline) = self
+            .providers
+            .get(&token)
+            .map(|provider| provider.poll_policy().deadline)
+        else {
+            return;
+        };
+        let remaining = deadline.saturating_sub(elapsed);
         if remaining.is_zero() {
             self.deadline(token, cx);
             return;
@@ -701,8 +805,12 @@ impl<P: Provider + 'static> JobRunner<P> {
         self.pump(cx);
     }
 
-    fn note_headers(&mut self, response: &HttpResponse, cx: &mut Context<Self>) {
-        if self.provider.spec().provider != ProviderId::Krea {
+    fn note_headers(&mut self, token: u64, response: &HttpResponse, cx: &mut Context<Self>) {
+        let is_krea = self
+            .providers
+            .get(&token)
+            .is_some_and(|provider| provider.spec().provider == ProviderId::Krea);
+        if !is_krea {
             return;
         }
         let Some(sunset) = easel_core::providers::krea::deprecation_headers(response) else {
@@ -769,6 +877,19 @@ impl<P: Provider + 'static> JobRunner<P> {
 
     fn slot_mut(&mut self, token: u64) -> Option<&mut Slot> {
         self.slots.iter_mut().find(|slot| slot.token == token)
+    }
+
+    fn cache_key(&self, token: u64, content_hash: &str) -> String {
+        let label = self
+            .providers
+            .get(&token)
+            .map(|provider| match provider.spec().provider {
+                ProviderId::Bfl => "bfl",
+                ProviderId::Krea => "krea",
+                ProviderId::Google => "google",
+            })
+            .unwrap_or("unknown");
+        format!("{label}:{content_hash}")
     }
 }
 
@@ -855,7 +976,7 @@ mod tests {
     }
 
     struct Harness {
-        runner: gpui::Entity<JobRunner<Flux3>>,
+        runner: gpui::Entity<JobRunner>,
         transport: Arc<FakeTransport>,
         history: Arc<HistoryStore>,
         root: std::path::PathBuf,
@@ -874,7 +995,16 @@ mod tests {
         let runner = cx.update({
             let transport = transport.clone() as Arc<dyn HttpTransport>;
             let history = history.clone();
-            move |cx| cx.new(|_| JobRunner::new(Flux3, transport, keys, history))
+            move |cx| {
+                cx.new(|_| {
+                    JobRunner::new(
+                        easel_core::providers::resolve_model,
+                        transport,
+                        keys,
+                        history,
+                    )
+                })
+            }
         });
         Harness {
             runner,
@@ -895,7 +1025,16 @@ mod tests {
         let runner = cx.update({
             let transport = transport.clone() as Arc<dyn HttpTransport>;
             let history = history.clone();
-            move |cx| cx.new(|_| JobRunner::new(Flux3, transport, keys, history))
+            move |cx| {
+                cx.new(|_| {
+                    JobRunner::new(
+                        easel_core::providers::resolve_model,
+                        transport,
+                        keys,
+                        history,
+                    )
+                })
+            }
         });
         Harness {
             runner,
@@ -903,6 +1042,92 @@ mod tests {
             history,
             root,
         }
+    }
+
+    #[gpui::test]
+    fn the_snapshotted_model_posts_to_its_own_host(cx: &mut TestAppContext) {
+        use serde_json::json;
+
+        let transport = Arc::new(FakeTransport::scripted(Vec::new()));
+        let keys: Arc<dyn KeyResolver> = Arc::new(
+            MapKeys::default()
+                .insert(ProviderId::Bfl, "bfl-test-key-xyz")
+                .insert(ProviderId::Krea, "krea-test-key")
+                .insert(ProviderId::Google, "gemini-test-key"),
+        );
+        let history = Arc::new(HistoryStore::open(temp_dir("hosts")).unwrap());
+        let runner = cx.update({
+            let transport = transport.clone() as Arc<dyn HttpTransport>;
+            move |cx| {
+                cx.new(|_| {
+                    JobRunner::new(
+                        easel_core::providers::resolve_model,
+                        transport,
+                        keys,
+                        history,
+                    )
+                })
+            }
+        });
+        let mut google = request();
+        google.model_id = "gemini-nano-banana-2.1".into();
+        google.params.insert("resolution".into(), json!("2K"));
+        google.params.insert("aspect_ratio".into(), json!("16:9"));
+        google.images.push(EncodedImage {
+            media_type: "image/png".into(),
+            bytes: png(),
+            width: 16,
+            height: 16,
+            content_hash: "pixel".into(),
+        });
+        runner.update(cx, |runner, cx| runner.submit(google, cx));
+        cx.run_until_parked();
+        let seen = transport.seen();
+        assert_eq!(
+            seen[0].url,
+            "https://generativelanguage.googleapis.com/v1beta/interactions"
+        );
+        let easel_core::http::Body::Json(body) = &seen[0].body else {
+            panic!("expected json");
+        };
+        assert_eq!(body["response_format"]["image_size"], json!("2K"));
+        assert_eq!(body["response_format"]["aspect_ratio"], json!("16:9"));
+        assert_eq!(body["store"], json!(false));
+        assert!(body.get("aspect_ratio").is_none());
+
+        let mut flux = request();
+        flux.model_id = "flux-3-image".into();
+        runner.update(cx, |runner, cx| runner.submit(flux, cx));
+        cx.run_until_parked();
+        assert!(
+            transport.seen()[1].url.starts_with("https://api.bfl.ai/"),
+            "{}",
+            transport.seen()[1].url
+        );
+
+        let mut krea = request();
+        krea.model_id = "krea-3".into();
+        runner.update(cx, |runner, cx| runner.submit(krea, cx));
+        cx.run_until_parked();
+        assert!(
+            transport.seen()[2].url.starts_with("https://api.krea.ai/"),
+            "{}",
+            transport.seen()[2].url
+        );
+
+        let before = transport.seen().len();
+        let mut unknown = request();
+        unknown.model_id = "no-such-model".into();
+        runner.update(cx, |runner, cx| runner.submit(unknown, cx));
+        cx.run_until_parked();
+        assert_eq!(transport.seen().len(), before);
+        let states = runner.read_with(cx, |runner, _| runner.states());
+        assert!(
+            states
+                .iter()
+                .any(|state| matches!(state, JobState::Failed { .. })),
+            "{states:?}"
+        );
     }
 
     #[gpui::test]
@@ -1192,8 +1417,16 @@ mod tests {
         let transport = harness.transport.clone() as Arc<dyn HttpTransport>;
         let keys: Arc<dyn KeyResolver> =
             Arc::new(MapKeys::default().insert(ProviderId::Bfl, "bfl-test-key-xyz"));
-        let runner =
-            cx.update(move |cx| cx.new(|_| JobRunner::new(Flux3, transport, keys, history)));
+        let runner = cx.update(move |cx| {
+            cx.new(|_| {
+                JobRunner::new(
+                    easel_core::providers::resolve_model,
+                    transport,
+                    keys,
+                    history,
+                )
+            })
+        });
         runner.update(cx, |runner, cx| runner.resume(cx));
         cx.run_until_parked();
         assert_eq!(harness.transport.seen().len(), before);
@@ -1205,6 +1438,7 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Copy)]
     struct UploadFlux;
 
     impl Provider for UploadFlux {
@@ -1269,7 +1503,16 @@ mod tests {
         let history = Arc::new(HistoryStore::open(temp_dir("upload")).unwrap());
         let runner = cx.update({
             let transport = transport.clone() as Arc<dyn HttpTransport>;
-            move |cx| cx.new(|_| JobRunner::new(UploadFlux, transport, keys, history))
+            move |cx| {
+                cx.new(|_| {
+                    JobRunner::new(
+                        |_| Some(Box::new(UploadFlux) as Box<dyn Provider>),
+                        transport,
+                        keys,
+                        history,
+                    )
+                })
+            }
         });
         let mut image_request = request();
         image_request.images.push(EncodedImage {

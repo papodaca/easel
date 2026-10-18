@@ -3,8 +3,6 @@ use gpui::{
     PathPromptOptions, Render, ResizeEdge, Styled, Window, div, prelude::*, px, rgb,
 };
 
-use easel_core::providers::Provider;
-
 use crate::actions::{ActualSize, CloseSettings, Fit, Open, Paste, Quit, SaveAs, Settings};
 use crate::app_state::AppState;
 use crate::assets;
@@ -76,7 +74,7 @@ impl Root {
         let strip_history = std::sync::Arc::clone(&history);
         let runner = cx.new(move |_| {
             JobRunner::new(
-                easel_core::providers::bfl::flux3::Flux3,
+                easel_core::providers::resolve_model,
                 runner_transport,
                 runner_keys,
                 history,
@@ -92,7 +90,7 @@ impl Root {
             StatusBar::new(
                 notifications.clone(),
                 app_state.clone(),
-                easel_core::providers::bfl::flux3::Flux3.spec().provider,
+                easel_core::model_spec::ProviderId::Bfl,
                 credit_transport,
                 credit_keys,
                 Some(credit_runner),

@@ -4,7 +4,6 @@ use std::sync::Arc;
 use easel_core::history::HistoryStore;
 use easel_core::job::JobState;
 use easel_core::providers::JobId;
-use easel_core::providers::bfl::flux3::Flux3;
 use easel_core::providers::bfl::protocol::extract_result_mime;
 use easel_core::text::sanitize_for_display;
 use gpui::{
@@ -35,7 +34,7 @@ struct Row {
 
 pub struct BottomStrip {
     app_state: gpui::Entity<AppState>,
-    runner: Option<gpui::Entity<JobRunner<Flux3>>>,
+    runner: Option<gpui::Entity<JobRunner>>,
     history: Arc<HistoryStore>,
     rows: Vec<Row>,
     bounds: Vec<Bounds<Pixels>>,
@@ -47,7 +46,7 @@ pub struct BottomStrip {
 impl BottomStrip {
     pub fn new(
         app_state: gpui::Entity<AppState>,
-        runner: Option<gpui::Entity<JobRunner<Flux3>>>,
+        runner: Option<gpui::Entity<JobRunner>>,
         history: Arc<HistoryStore>,
         cx: &mut Context<Self>,
     ) -> Self {

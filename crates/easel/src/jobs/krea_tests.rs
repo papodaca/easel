@@ -58,16 +58,16 @@ fn request_with_image() -> JobRequest {
     }
 }
 
-struct Harness<P> {
-    runner: gpui::Entity<JobRunner<P>>,
+struct Harness {
+    runner: gpui::Entity<JobRunner>,
     transport: Arc<FakeTransport>,
 }
 
-fn open<P: Provider + 'static>(
+fn open<P: Provider + Copy + 'static>(
     cx: &mut TestAppContext,
     provider: P,
     script: Vec<Result<HttpResponse, TransportError>>,
-) -> Harness<P> {
+) -> Harness {
     let transport = Arc::new(FakeTransport::scripted(script));
     let keys: Arc<dyn KeyResolver> =
         Arc::new(MapKeys::default().insert(ProviderId::Krea, "krea-test-key"));
@@ -83,7 +83,16 @@ fn open<P: Provider + 'static>(
     let history = Arc::new(HistoryStore::open(&root).unwrap());
     let runner = cx.update({
         let transport = transport.clone() as Arc<dyn HttpTransport>;
-        move |cx| cx.new(|_| JobRunner::new(provider, transport, keys, history))
+        move |cx| {
+            cx.new(|_| {
+                JobRunner::new(
+                    move |_| Some(Box::new(provider) as Box<dyn Provider>),
+                    transport,
+                    keys,
+                    history,
+                )
+            })
+        }
     });
     Harness { runner, transport }
 }

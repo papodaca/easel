@@ -110,39 +110,29 @@ impl AppState {
     }
 
     pub fn field_errors(&self, sent_images: usize) -> Vec<easel_core::error::FieldError> {
-        use easel_core::providers::Provider;
-        use easel_core::providers::bfl::flux2_pro::Flux2Pro;
-        use easel_core::providers::bfl::flux3::Flux3;
-        use easel_core::providers::krea::krea2_large::Krea2Large;
-        use easel_core::providers::krea::krea3::Krea3;
-
-        match self.model_id.as_str() {
-            "flux-2-pro" => Flux2Pro.validate_for_submit(&self.scene, &self.values, sent_images),
-            "krea-3" => Krea3.validate_for_submit(&self.scene, &self.values, sent_images),
-            "krea-2-large" => {
-                Krea2Large.validate_for_submit(&self.scene, &self.values, sent_images)
-            }
-            _ => Flux3.validate_for_submit(&self.scene, &self.values, sent_images),
-        }
+        let Some(provider) = easel_core::providers::resolve_model(&self.model_id) else {
+            return vec![easel_core::error::FieldError {
+                key: "model".into(),
+                message: format!("unknown model {}", self.model_id),
+                approved_max: None,
+            }];
+        };
+        provider.validate_for_submit(&self.scene, &self.values, sent_images)
     }
 
     pub fn compiled(&self) -> easel_core::providers::bfl::flux3::CompiledPrompt {
-        use easel_core::providers::Provider;
-        use easel_core::providers::bfl::flux2_pro::Flux2Pro;
-        use easel_core::providers::bfl::flux3::Flux3;
-        use easel_core::providers::krea::krea2_large::Krea2Large;
-        use easel_core::providers::krea::krea3::Krea3;
-
         let frame = self
             .scene
             .frame()
             .unwrap_or(easel_core::geometry::Size { w: 1000, h: 1000 });
-        match self.model_id.as_str() {
-            "flux-2-pro" => Flux2Pro.compile_prompt(&self.scene, frame),
-            "krea-3" => Krea3.compile_prompt(&self.scene, frame),
-            "krea-2-large" => Krea2Large.compile_prompt(&self.scene, frame),
-            _ => Flux3.compile_prompt(&self.scene, frame),
-        }
+        let Some(provider) = easel_core::providers::resolve_model(&self.model_id) else {
+            return easel_core::providers::bfl::flux3::CompiledPrompt {
+                text: self.scene.prose.clone(),
+                rows_json: String::new(),
+                warnings: Vec::new(),
+            };
+        };
+        provider.compile_prompt(&self.scene, frame)
     }
 
     pub fn reference_marks(&self) -> Vec<(String, bool)> {

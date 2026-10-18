@@ -5,7 +5,6 @@ use easel_core::http::HttpResponse;
 use easel_core::job::JobState;
 use easel_core::model_spec::ProviderId;
 use easel_core::providers::bfl::credits::{credits_request, parse_credits};
-use easel_core::providers::bfl::flux3::Flux3;
 use gpui::{Context, IntoElement, ParentElement, Render, Styled, Window, div, prelude::*, px, rgb};
 
 use crate::app_state::AppState;
@@ -39,7 +38,7 @@ impl StatusBar {
         provider: ProviderId,
         transport: Arc<dyn HttpTransport>,
         keys: Arc<dyn KeyResolver>,
-        runner: Option<gpui::Entity<JobRunner<Flux3>>>,
+        runner: Option<gpui::Entity<JobRunner>>,
         settings: Option<gpui::Entity<SettingsPanel>>,
         cx: &mut Context<Self>,
     ) -> Self {

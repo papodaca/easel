@@ -242,7 +242,7 @@ fn open_runner(
     script: Vec<Result<easel_core::http::HttpResponse, crate::net::TransportError>>,
 ) -> (
     gpui::Entity<BottomStrip>,
-    gpui::Entity<crate::jobs::JobRunner<easel_core::providers::bfl::flux3::Flux3>>,
+    gpui::Entity<crate::jobs::JobRunner>,
     VisualTestContext,
 ) {
     let root = temp_dir(name);
@@ -257,7 +257,7 @@ fn open_runner(
         move |cx| {
             cx.new(|_| {
                 crate::jobs::JobRunner::new(
-                    easel_core::providers::bfl::flux3::Flux3,
+                    easel_core::providers::resolve_model,
                     transport,
                     Arc::new(crate::settings::Resolver(keys)),
                     history,

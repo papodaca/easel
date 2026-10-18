@@ -138,6 +138,188 @@ fn image_spec(
     }
 }
 
+fn inline_steps(images: &[crate::job::EncodedImage]) -> Vec<crate::providers::ReferenceStep> {
+    images
+        .iter()
+        .map(|image| {
+            crate::providers::ReferenceStep::Inline(crate::providers::ImageInput::RawBase64(
+                image.base64(),
+            ))
+        })
+        .collect()
+}
+
+fn validate_submit(
+    spec: &ModelSpec,
+    scene: &crate::scene::Scene,
+    values: &std::collections::BTreeMap<String, serde_json::Value>,
+    image_count: usize,
+) -> Vec<crate::error::FieldError> {
+    use crate::error::FieldError;
+    use crate::schema::RuleContext;
+
+    let ctx = RuleContext {
+        has_source_image: scene.source_image.is_some(),
+        image_count,
+        box_count: scene.boxes.len(),
+    };
+    let mut errors = spec.schema.validate(values, &ctx);
+    if scene.prose.trim().is_empty() {
+        errors.push(FieldError {
+            key: "prompt".into(),
+            message: "Prompt is empty".into(),
+            approved_max: None,
+        });
+    }
+    errors
+}
+
+fn build_google(
+    spec: &ModelSpec,
+    request: &crate::job::JobRequest,
+    images: &[crate::providers::ImageInput],
+) -> crate::http::HttpRequest {
+    use crate::http::{Body, HttpHeader, HttpRequest, Method};
+    use crate::providers::ImageInput;
+    use serde_json::{Map, Value, json};
+
+    let mut input = vec![json!({
+        "type": "text",
+        "text": request.compiled_prompt,
+    })];
+    for (index, image) in images.iter().enumerate() {
+        let ImageInput::RawBase64(data) = image else {
+            continue;
+        };
+        let mime = request
+            .images
+            .get(index)
+            .map(|encoded| encoded.media_type.as_str())
+            .unwrap_or("image/png");
+        input.push(json!({
+            "type": "image",
+            "mime_type": mime,
+            "data": data,
+        }));
+    }
+    let aspect_ratio = request
+        .params
+        .get("aspect_ratio")
+        .and_then(Value::as_str)
+        .unwrap_or("1:1");
+    let image_size = request
+        .params
+        .get("resolution")
+        .and_then(Value::as_str)
+        .unwrap_or("1K");
+    let mut body = Map::new();
+    body.insert("model".into(), Value::String(request.model_id.clone()));
+    body.insert("store".into(), Value::Bool(false));
+    body.insert("input".into(), Value::Array(input));
+    body.insert(
+        "response_format".into(),
+        json!({
+            "type": "image",
+            "aspect_ratio": aspect_ratio,
+            "image_size": image_size,
+        }),
+    );
+    if request
+        .params
+        .get("grounding")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        body.insert("tools".into(), json!([{ "type": "google_search" }]));
+    }
+    HttpRequest {
+        method: Method::Post,
+        url: spec.endpoint.clone(),
+        headers: vec![HttpHeader {
+            name: "Content-Type".into(),
+            value: "application/json".into(),
+            sensitive: false,
+        }],
+        auth: Some(ProviderId::Google),
+        body: Body::Json(Value::Object(body)),
+        max_body_bytes: 100 * 1024 * 1024,
+    }
+}
+
+fn refused_poll(submitted: &crate::providers::Submitted) -> crate::http::HttpRequest {
+    crate::http::HttpRequest {
+        method: crate::http::Method::Get,
+        url: submitted.poll_url.to_string(),
+        headers: Vec::new(),
+        auth: Some(ProviderId::Google),
+        body: crate::http::Body::Empty,
+        max_body_bytes: 1024,
+    }
+}
+
+fn inline_only() -> crate::error::ProviderError {
+    crate::error::ProviderError::Protocol("google returns the image on the submit response".into())
+}
+
+macro_rules! impl_google {
+    ($ty:ident, $spec:ident) => {
+        impl crate::providers::Provider for $ty {
+            fn spec(&self) -> &ModelSpec {
+                &$spec
+            }
+
+            fn validate_for_submit(
+                &self,
+                scene: &crate::scene::Scene,
+                values: &std::collections::BTreeMap<String, serde_json::Value>,
+                image_count: usize,
+            ) -> Vec<crate::error::FieldError> {
+                validate_submit(&$spec, scene, values, image_count)
+            }
+
+            fn reference_steps(
+                &self,
+                images: &[crate::job::EncodedImage],
+            ) -> Vec<crate::providers::ReferenceStep> {
+                inline_steps(images)
+            }
+
+            fn build_submit(
+                &self,
+                request: &crate::job::JobRequest,
+                images: &[crate::providers::ImageInput],
+            ) -> crate::http::HttpRequest {
+                build_google(&$spec, request, images)
+            }
+
+            fn poll_request(
+                &self,
+                submitted: &crate::providers::Submitted,
+            ) -> crate::http::HttpRequest {
+                refused_poll(submitted)
+            }
+
+            fn parse_submit(
+                &self,
+                _response: &crate::http::HttpResponse,
+            ) -> Result<crate::providers::Submitted, crate::error::ProviderError> {
+                Err(inline_only())
+            }
+
+            fn parse_poll(
+                &self,
+                _response: &crate::http::HttpResponse,
+            ) -> crate::providers::PollOutcome {
+                crate::providers::PollOutcome::Failed(inline_only())
+            }
+        }
+    };
+}
+
+impl_google!(NanoBanana21, NANO_BANANA_21);
+impl_google!(NanoBanana2Lite, NANO_BANANA_2_LITE);
+impl_google!(NanoBananaPro, NANO_BANANA_PRO);
+
 fn ratios(wide: bool) -> Vec<String> {
     let mut ratios: Vec<String> = STANDARD_RATIOS
         .iter()
@@ -227,6 +409,62 @@ mod tests {
         assert!(!schema.accepts("aspect_ratio", &json!("1:8")));
         assert!(!schema.accepts("grounding", &json!(true)));
         assert!(!schema.accepts("grounding", &json!(false)));
+    }
+
+    #[test]
+    fn nano_banana_21_submit_posts_interactions_json() {
+        use crate::job::{EncodedImage, JobRequest};
+        use crate::providers::{ImageInput, Provider};
+
+        let png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let image = EncodedImage {
+            media_type: "image/png".into(),
+            bytes: png,
+            width: 16,
+            height: 16,
+            content_hash: "abc".into(),
+        };
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("resolution".into(), json!("2K"));
+        params.insert("aspect_ratio".into(), json!("16:9"));
+        let request = JobRequest {
+            model_id: "gemini-nano-banana-2.1".into(),
+            compiled_prompt: "a red square".into(),
+            params,
+            images: vec![image],
+            box_snapshot: Vec::new(),
+            created_at: "2026-10-17T00:00:00Z".into(),
+        };
+        let http = NanoBanana21.build_submit(
+            &request,
+            &[ImageInput::RawBase64(request.images[0].base64())],
+        );
+        assert_eq!(
+            http.url,
+            "https://generativelanguage.googleapis.com/v1beta/interactions"
+        );
+        assert!(
+            http.headers
+                .iter()
+                .all(|header| header.name != "Api-Revision")
+        );
+        let crate::http::Body::Json(body) = http.body else {
+            panic!("expected json");
+        };
+        assert_eq!(body["store"], json!(false));
+        assert!(body.get("delivery").is_none());
+        assert!(body.get("background").is_none());
+        assert!(body.get("image_search").is_none());
+        assert!(body.get("aspect_ratio").is_none());
+        assert!(body.get("image_size").is_none());
+        assert_eq!(body["response_format"]["type"], json!("image"));
+        assert_eq!(body["response_format"]["aspect_ratio"], json!("16:9"));
+        assert_eq!(body["response_format"]["image_size"], json!("2K"));
+        assert_eq!(body["input"][0]["type"], json!("text"));
+        assert_eq!(body["input"][0]["text"], json!("a red square"));
+        assert_eq!(body["input"][1]["type"], json!("image"));
+        assert_eq!(body["input"][1]["mime_type"], json!("image/png"));
+        assert_eq!(body["input"][1]["data"], json!(request.images[0].base64()));
     }
 
     #[test]

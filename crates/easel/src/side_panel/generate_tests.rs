@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use easel_core::history::HistoryStore;
 use easel_core::model_spec::ProviderId;
-use easel_core::providers::bfl::flux3::Flux3;
 use gpui::{TestAppContext, prelude::*};
 
 use crate::app_state::AppState;
@@ -35,7 +34,16 @@ fn generate_submits_the_scene_to_the_runner(cx: &mut TestAppContext) {
         let transport = Arc::clone(&transport);
         let history = Arc::clone(&history);
         let keys = Arc::clone(&keys);
-        move |cx| cx.new(|_| JobRunner::new(Flux3, transport, Arc::new(Resolver(keys)), history))
+        move |cx| {
+            cx.new(|_| {
+                JobRunner::new(
+                    easel_core::providers::resolve_model,
+                    transport,
+                    Arc::new(Resolver(keys)),
+                    history,
+                )
+            })
+        }
     });
     let (state, panel) = cx.update(|cx| {
         let state = cx.new(|_| AppState::new());

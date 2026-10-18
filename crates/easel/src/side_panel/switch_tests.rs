@@ -115,3 +115,26 @@ fn a_built_request_keeps_its_model_after_a_switch(cx: &mut TestAppContext) {
     let next = state.read_with(cx, |app, _| build_request(app).unwrap());
     assert_eq!(next.model_id, "krea-3");
 }
+
+#[gpui::test]
+fn google_compile_drops_a_box_tag_and_does_not_require_flux_fields(cx: &mut TestAppContext) {
+    let state = app(cx);
+    state.update(cx, |app, cx| {
+        app.scene.prose = "paint <layout_1> red".into();
+        app.set_model("gemini-nano-banana-2.1", cx);
+    });
+    let (compiled, errors) = state.read_with(cx, |app, _| (app.compiled(), app.field_errors(0)));
+    assert!(compiled.rows_json.is_empty(), "{}", compiled.rows_json);
+    assert!(!compiled.text.contains('<'), "{}", compiled.text);
+    assert!(
+        compiled
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("layout_1")),
+        "{compiled:?}"
+    );
+    assert!(
+        errors.iter().all(|error| error.key != "safety_tolerance"),
+        "{errors:?}"
+    );
+}
