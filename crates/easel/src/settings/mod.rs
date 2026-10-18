@@ -438,7 +438,8 @@ impl SettingsPanel {
             let (text, level) = match result {
                 Ok(response)
                     if response.status == 401
-                        || (provider != ProviderId::Google && response.status == 403) =>
+                        || (matches!(provider, ProviderId::Bfl | ProviderId::Krea)
+                            && response.status == 403) =>
                 {
                     ("invalid key", ToastLevel::Error)
                 }

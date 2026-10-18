@@ -339,3 +339,49 @@ async fn google_settings_row_probes_models_with_a_get(cx: &mut TestAppContext) {
         "key accepted"
     );
 }
+
+#[gpui::test]
+async fn openai_settings_probe_uses_get_models(cx: &mut TestAppContext) {
+    use easel_core::http::{HttpResponse, Method};
+    use gpui::prelude::*;
+
+    use crate::net::FakeTransport;
+    use crate::notifications::Notifications;
+    use crate::settings::{SettingsPanel, key_probe};
+
+    let probe = key_probe(ProviderId::OpenAi);
+    assert_eq!(probe.method, Method::Get);
+    assert_eq!(probe.url, "https://api.openai.com/v1/models");
+    assert_eq!(probe.auth, Some(ProviderId::OpenAi));
+
+    for (status, note) in [(401, "invalid key"), (200, "key accepted")] {
+        let transport = Arc::new(FakeTransport::scripted(vec![Ok(HttpResponse {
+            status,
+            headers: Vec::new(),
+            body: b"{}".to_vec(),
+        })]));
+        let notes = cx.new(|_| Notifications::new());
+        let panel = cx.new({
+            let notes = notes.clone();
+            let transport = Arc::clone(&transport);
+            move |cx| SettingsPanel::new(notes, transport, cx)
+        });
+        let titles = panel.read_with(cx, |panel, _| panel.provider_titles());
+        assert!(titles.iter().any(|title| title == "OpenAI"));
+        panel
+            .update(cx, |panel, cx| panel.test_key(ProviderId::OpenAi, cx))
+            .await;
+        let seen = transport.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].method, Method::Get);
+        assert_eq!(seen[0].url, probe.url);
+        assert!(
+            !seen.iter().any(|request| request.url.contains("/images/")),
+            "{seen:?}"
+        );
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.row_note(ProviderId::OpenAi).to_owned()),
+            note
+        );
+    }
+}

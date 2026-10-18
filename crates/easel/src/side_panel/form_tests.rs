@@ -933,7 +933,14 @@ fn an_oversized_data_url_disables_generate(cx: &mut TestAppContext) {
         app.scene.prose = "a harbor".into();
         app.set_image(image, cx);
     });
-    let validation = openai_validation(&mut cx, state);
+    let validation = openai_validation(&mut cx, state.clone());
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages.iter().any(|message| message.contains("20971520")),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    state.update(&mut cx, |app, cx| app.set_model("gpt-image-2", cx));
     let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
     assert!(
         messages.iter().any(|message| message.contains("20971520")),
@@ -962,4 +969,47 @@ fn openai_size_stays_on_the_four_megapixel_prep(cx: &mut TestAppContext) {
         u64::from(image.width) * u64::from(image.height)
     });
     assert!(pixels <= 4_000_000, "{pixels}");
+}
+
+#[gpui::test]
+fn fidelity_stays_hidden_without_an_image_and_keeps_its_value(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("gpt-image-1.5", cx);
+        app.values.insert("input_fidelity".into(), json!("high"));
+    });
+    assert!(!form.read_with(&cx, |form, _| form.has_control("input_fidelity")));
+    state.update(&mut cx, |app, cx| app.set_image(source_image(), cx));
+    assert!(form.read_with(&cx, |form, _| form.has_control("input_fidelity")));
+    assert_eq!(
+        form.read_with(&cx, |form, cx| {
+            form.select("input_fidelity")
+                .unwrap()
+                .read(cx)
+                .value()
+                .clone()
+        }),
+        json!("high")
+    );
+    state.update(&mut cx, |app, cx| app.remove_reference_slot(0, cx));
+    assert!(!form.read_with(&cx, |form, _| form.has_control("input_fidelity")));
+    assert_eq!(
+        state.read_with(&cx, |app, _| app.values.get("input_fidelity").cloned()),
+        Some(json!("high"))
+    );
+
+    state.update(&mut cx, |app, cx| {
+        app.values.remove("input_fidelity");
+        app.set_image(source_image(), cx);
+    });
+    assert_eq!(
+        form.read_with(&cx, |form, cx| {
+            form.select("input_fidelity")
+                .unwrap()
+                .read(cx)
+                .value()
+                .clone()
+        }),
+        json!("low")
+    );
 }

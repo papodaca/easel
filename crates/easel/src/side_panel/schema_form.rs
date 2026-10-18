@@ -40,6 +40,7 @@ enum Binding {
 pub struct SchemaForm {
     app_state: Entity<AppState>,
     model_id: String,
+    image_count: usize,
     controls: Vec<(String, FieldControl)>,
     #[cfg(test)]
     presented: Vec<(String, Option<String>)>,
@@ -52,6 +53,7 @@ impl SchemaForm {
         let mut form = Self {
             app_state: app_state.clone(),
             model_id: String::new(),
+            image_count: 0,
             controls: Vec::new(),
             #[cfg(test)]
             presented: Vec::new(),
@@ -60,8 +62,10 @@ impl SchemaForm {
                 if this.quiet {
                     return;
                 }
-                let id = this.app_state.read(cx).model_id.clone();
-                if id != this.model_id {
+                let app = this.app_state.read(cx);
+                let id = app.model_id.clone();
+                let images = attached_images(app);
+                if id != this.model_id || images != this.image_count {
                     this.rebuild(cx);
                 } else {
                     this.push_values(cx);
@@ -251,16 +255,22 @@ impl SchemaForm {
     }
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
-        let (model_id, fields) = {
+        let (model_id, fields, images) = {
             let app = self.app_state.read(cx);
-            (app.model_id.clone(), app.spec().schema.fields.clone())
+            (
+                app.model_id.clone(),
+                app.spec().schema.fields.clone(),
+                attached_images(app),
+            )
         };
         self.model_id = model_id;
+        self.image_count = images;
         self.ensure_empty_lists(&fields, cx);
         let values = self.app_state.read(cx).values.clone();
         let state = self.app_state.clone();
         self.controls = fields
             .iter()
+            .filter(|field| field.key != "input_fidelity" || images > 0)
             .map(|field| {
                 (
                     field.key.clone(),
@@ -307,6 +317,7 @@ impl SchemaForm {
                 let value = schema
                     .locked_value(field, &ctx)
                     .or_else(|| app.values.get(&field.key).cloned())
+                    .or_else(|| field.default.clone())
                     .unwrap_or(Value::Null);
                 (field.key.clone(), value)
             })
@@ -951,6 +962,10 @@ fn control_element(control: &FieldControl) -> gpui::AnyElement {
         FieldControl::Text { input, .. } => input.clone().into_any_element(),
         FieldControl::Repeated { .. } => div().into_any_element(),
     }
+}
+
+fn attached_images(app: &AppState) -> usize {
+    usize::from(app.scene.source_image.is_some()) + app.scene.references.len()
 }
 
 fn context_of(app: &AppState) -> RuleContext {

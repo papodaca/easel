@@ -319,3 +319,73 @@ fn a_restored_pro_session_shows_google_and_nano_banana_pro(cx: &mut TestAppConte
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui::test]
+fn flare_max_becomes_a_quality_gpt_image_2_allows(cx: &mut TestAppContext) {
+    let (state, panel) = editor(cx);
+    state.update(cx, |app, cx| {
+        app.scene.prose = "a harbor".into();
+        app.set_model("gpt-image-2.5-flare", cx);
+        app.values.insert("quality".into(), json!("max"));
+    });
+    panel.update(cx, |panel, cx| panel.choose_model("GPT Image 2", cx));
+    let (quality, fields) = state.read_with(cx, |app, _| {
+        (
+            app.values.get("quality").cloned(),
+            app.spec()
+                .schema
+                .fields
+                .iter()
+                .map(|field| field.key.clone())
+                .collect::<Vec<_>>(),
+        )
+    });
+    let quality = quality.and_then(|value| value.as_str().map(str::to_owned));
+    assert!(
+        matches!(quality.as_deref(), Some("low" | "medium" | "high" | "auto")),
+        "{quality:?}"
+    );
+    assert!(!fields.iter().any(|key| key == "input_fidelity"));
+}
+
+#[gpui::test]
+fn mini_drops_high_fidelity_to_low(cx: &mut TestAppContext) {
+    let (state, panel) = editor(cx);
+    state.update(cx, |app, cx| {
+        app.set_model("gpt-image-1.5", cx);
+        app.values.insert("input_fidelity".into(), json!("high"));
+    });
+    panel.update(cx, |panel, cx| {
+        panel.choose_model("GPT Image 1 mini 2026-12-01", cx)
+    });
+    assert_eq!(
+        state.read_with(cx, |app, _| app.values.get("input_fidelity").cloned()),
+        Some(json!("low"))
+    );
+}
+
+#[gpui::test]
+fn switching_back_to_flux_keeps_the_prompt_and_posts_to_bfl(cx: &mut TestAppContext) {
+    use easel_core::providers::Provider;
+
+    let state = app(cx);
+    state.update(cx, |app, cx| {
+        app.scene.prose = "keep this prompt".into();
+        app.scene
+            .set_source(ImageRef::new("canvas.png", 1024, 1024));
+        app.set_model("gpt-image-2.5-flare", cx);
+        app.set_model("flux-3-image", cx);
+    });
+    let (prose, canvas) = state.read_with(cx, |app, _| {
+        (app.scene.prose.clone(), app.scene.source_image.is_some())
+    });
+    assert_eq!(prose, "keep this prompt");
+    assert!(canvas);
+    let url = state.read_with(cx, |app, _| {
+        let request = build_request(app).unwrap();
+        easel_core::providers::bfl::flux3::Flux3
+            .build_submit(&request, &[])
+            .url
+    });
+    assert!(url.starts_with("https://api.bfl.ai/"), "{url}");
+}
