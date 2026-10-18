@@ -49,11 +49,39 @@ impl Validation {
         {
             messages.push("The request is over 20 MB. Remove a reference.".into());
         }
+        if provider == ProviderId::OpenAi {
+            let prepared = usize::from(app.image.is_some()) + app.extras.len();
+            let (prompt, urls) = match crate::jobs::build_request(app) {
+                Ok(request) => {
+                    let urls = request
+                        .images
+                        .iter()
+                        .map(|image| {
+                            easel_core::providers::openai::data_url(
+                                &image.media_type,
+                                &image.base64(),
+                            )
+                        })
+                        .collect();
+                    (request.compiled_prompt, urls)
+                }
+                Err(_) => (app.compiled().text, Vec::new()),
+            };
+            messages.extend(easel_core::providers::openai::refusal_messages(
+                &prompt, &urls, prepared,
+            ));
+        }
         messages
     }
 
     pub fn send_notice(&self, cx: &gpui::App) -> Option<String> {
         let app = self.app_state.read(cx);
+        let prepared = usize::from(app.image.is_some()) + app.extras.len();
+        if app.spec().provider == ProviderId::OpenAi
+            && prepared > easel_core::providers::openai::IMAGE_CAP
+        {
+            return None;
+        }
         let image_count =
             usize::from(app.scene.source_image.is_some()) + app.scene.references.len();
         let sent = image_count.min(app.spec().capabilities.image_slots.max());

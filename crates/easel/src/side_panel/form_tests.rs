@@ -851,3 +851,115 @@ fn paste_sets_the_source_then_adds_a_reference(cx: &mut TestAppContext) {
         1
     );
 }
+
+fn openai_validation(
+    cx: &mut VisualTestContext,
+    state: gpui::Entity<AppState>,
+) -> gpui::Entity<Validation> {
+    let keys: Arc<dyn crate::net::KeyResolver> =
+        Arc::new(MapKeys::default().insert(ProviderId::OpenAi, "openai-key"));
+    cx.new(|cx| Validation::new(state, keys, cx))
+}
+
+fn decoded(buffer: image::RgbaImage) -> Arc<crate::image_load::DecodedImage> {
+    let size = easel_core::geometry::Size {
+        w: buffer.width(),
+        h: buffer.height(),
+    };
+    let rgba_for_export = Arc::new(image::DynamicImage::ImageRgba8(buffer.clone()));
+    let mut rgba = buffer;
+    for pixel in rgba.pixels_mut() {
+        pixel.0.swap(0, 2);
+    }
+    Arc::new(crate::image_load::DecodedImage {
+        size,
+        render: Arc::new(gpui::RenderImage::new([image::Frame::new(rgba)])),
+        rgba_for_export,
+    })
+}
+
+#[gpui::test]
+fn openai_caps_disable_generate(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("gpt-image-2", cx);
+        app.scene.prose = "a".repeat(32_001);
+    });
+    let validation = openai_validation(&mut cx, state.clone());
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert!(validation.read_with(&cx, |validation, cx| {
+        validation
+            .messages(cx)
+            .iter()
+            .any(|message| message.contains("32000"))
+    }));
+
+    state.update(&mut cx, |app, cx| {
+        app.scene.prose = "a harbor".into();
+        app.set_image(source_image(), cx);
+        for _ in 0..16 {
+            app.scene
+                .add_reference(easel_core::scene::ImageRef::new("ref", 64, 64));
+            app.extras.push(source_image());
+        }
+        cx.notify();
+    });
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages.iter().any(|message| message.contains("16")),
+        "{messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("will be sent"))
+    );
+    assert!(validation.read_with(&cx, |validation, cx| validation.send_notice(cx).is_none()));
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn an_oversized_data_url_disables_generate(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    let mut buffer = image::RgbaImage::new(2000, 2000);
+    let mut noise = 0x1234_5678u32;
+    for pixel in buffer.pixels_mut() {
+        noise = noise.wrapping_mul(1664525).wrapping_add(1013904223);
+        *pixel = image::Rgba([noise as u8, (noise >> 8) as u8, (noise >> 16) as u8, 128]);
+    }
+    let image = decoded(buffer);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("gpt-image-2.5-flare", cx);
+        app.scene.prose = "a harbor".into();
+        app.set_image(image, cx);
+    });
+    let validation = openai_validation(&mut cx, state);
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages.iter().any(|message| message.contains("20971520")),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn openai_size_stays_on_the_four_megapixel_prep(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    let image = decoded(image::RgbaImage::from_pixel(
+        2100,
+        2100,
+        image::Rgba([20, 40, 60, 255]),
+    ));
+    state.update(&mut cx, |app, cx| {
+        app.set_model("gpt-image-2.5-flare", cx);
+        app.scene.prose = "a harbor".into();
+        app.values.insert("size".into(), json!("1536x1024"));
+        app.set_image(image, cx);
+    });
+    let pixels = state.read_with(&cx, |app, _| {
+        let request = crate::jobs::build_request(app).expect("request");
+        let image = &request.images[0];
+        u64::from(image.width) * u64::from(image.height)
+    });
+    assert!(pixels <= 4_000_000, "{pixels}");
+}

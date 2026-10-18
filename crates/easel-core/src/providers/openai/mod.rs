@@ -27,6 +27,14 @@ pub struct GptImage1;
 
 const GENERATIONS: &str = "https://api.openai.com/v1/images/generations";
 
+const EDITS: &str = "https://api.openai.com/v1/images/edits";
+
+pub const PROMPT_CAP: usize = 32_000;
+
+pub const DATA_URL_CAP: usize = 20_971_520;
+
+pub const IMAGE_CAP: usize = 16;
+
 const SIZES: &[&str] = &["1024x1024", "1536x1024", "1024x1536"];
 
 const QUALITY: &[&str] = &["low", "medium", "high", "auto"];
@@ -218,14 +226,118 @@ fn inline_steps(
         .collect()
 }
 
-fn placeholder_submit(spec: &ModelSpec) -> crate::http::HttpRequest {
-    crate::http::HttpRequest {
-        method: crate::http::Method::Post,
-        url: spec.endpoint.clone(),
-        headers: Vec::new(),
+#[must_use]
+pub fn data_url(media_type: &str, encoded: &str) -> String {
+    format!("data:{media_type};base64,{encoded}")
+}
+
+#[must_use]
+pub fn refusal_messages(prompt: &str, data_urls: &[String], prepared: usize) -> Vec<String> {
+    let mut messages = Vec::new();
+    if prompt.chars().count() > PROMPT_CAP {
+        messages.push(format!("The prompt is over {PROMPT_CAP} characters."));
+    }
+    if prepared > IMAGE_CAP {
+        messages.push(format!("At most {IMAGE_CAP} images."));
+    }
+    if data_urls
+        .iter()
+        .any(|url| url.chars().count() > DATA_URL_CAP)
+    {
+        messages.push(format!(
+            "An image data URL is over {DATA_URL_CAP} characters."
+        ));
+    }
+    messages
+}
+
+fn field_string(
+    spec: &ModelSpec,
+    params: &std::collections::BTreeMap<String, serde_json::Value>,
+    key: &str,
+) -> Option<String> {
+    if let Some(value) = params.get(key)
+        && spec.schema.accepts(key, value)
+        && let Some(text) = value.as_str()
+    {
+        return Some(text.to_owned());
+    }
+    spec.schema
+        .fields
+        .iter()
+        .find(|field| field.key == key)
+        .and_then(|field| field.default.as_ref())
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+}
+
+fn build_openai(
+    spec: &ModelSpec,
+    request: &crate::job::JobRequest,
+    images: &[crate::providers::ImageInput],
+) -> crate::http::HttpRequest {
+    use crate::http::{Body, HttpHeader, HttpRequest, Method};
+    use crate::providers::ImageInput;
+    use serde_json::{Map, Value, json};
+
+    let edits = !images.is_empty();
+    let mut body = Map::new();
+    body.insert("model".into(), Value::String(request.model_id.clone()));
+    body.insert(
+        "prompt".into(),
+        Value::String(request.compiled_prompt.clone()),
+    );
+    for key in ["quality", "size", "background"] {
+        if let Some(value) = field_string(spec, &request.params, key) {
+            body.insert(key.into(), Value::String(value));
+        }
+    }
+    body.insert("output_format".into(), Value::String("png".into()));
+    if edits {
+        let urls = images
+            .iter()
+            .enumerate()
+            .map(|(index, image)| {
+                let image_url = match image {
+                    ImageInput::Url(url) => url.clone(),
+                    ImageInput::RawBase64(encoded) => {
+                        let media_type = request
+                            .images
+                            .get(index)
+                            .map(|image| image.media_type.as_str())
+                            .unwrap_or("image/png");
+                        data_url(media_type, encoded)
+                    }
+                };
+                json!({ "image_url": image_url })
+            })
+            .collect();
+        body.insert("images".into(), Value::Array(urls));
+        if spec
+            .schema
+            .fields
+            .iter()
+            .any(|field| field.key == "input_fidelity")
+            && let Some(value) = field_string(spec, &request.params, "input_fidelity")
+        {
+            body.insert("input_fidelity".into(), Value::String(value));
+        }
+    }
+    HttpRequest {
+        method: Method::Post,
+        url: if edits {
+            EDITS.into()
+        } else {
+            spec.endpoint.clone()
+        },
+        headers: vec![HttpHeader {
+            name: "Content-Type".into(),
+            value: "application/json".into(),
+            sensitive: false,
+        }],
         auth: Some(ProviderId::OpenAi),
-        body: crate::http::Body::Empty,
-        max_body_bytes: 64 * 1024 * 1024,
+        body: Body::Json(Value::Object(body)),
+        max_body_bytes: 100 * 1024 * 1024,
     }
 }
 
@@ -254,10 +366,10 @@ macro_rules! impl_openai {
 
             fn build_submit(
                 &self,
-                _request: &crate::job::JobRequest,
-                _images: &[crate::providers::ImageInput],
+                request: &crate::job::JobRequest,
+                images: &[crate::providers::ImageInput],
             ) -> crate::http::HttpRequest {
-                placeholder_submit(&$spec)
+                build_openai(&$spec, request, images)
             }
 
             fn poll_request(
@@ -381,5 +493,195 @@ mod tests {
                 Some(&serde_json::json!("1024x1024"))
             );
         }
+    }
+
+    use crate::http::{Body, Method};
+    use crate::job::{EncodedImage, JobRequest};
+    use crate::model_spec::ProviderId;
+    use crate::providers::{ImageInput, Provider};
+    use crate::scene::{BoxKind, ImageRef, Scene};
+    use serde_json::{Value, json};
+
+    fn encoded(bytes: &[u8]) -> EncodedImage {
+        EncodedImage {
+            media_type: "image/png".into(),
+            bytes: bytes.to_vec(),
+            width: 256,
+            height: 256,
+            content_hash: "h".into(),
+        }
+    }
+
+    fn request(model: &str, prompt: &str, params: Value, images: Vec<EncodedImage>) -> JobRequest {
+        let params = params.as_object().unwrap().clone().into_iter().collect();
+        JobRequest {
+            model_id: model.into(),
+            compiled_prompt: prompt.into(),
+            params,
+            images,
+            box_snapshot: Vec::new(),
+            created_at: "2026-10-17T00:00:00Z".into(),
+        }
+    }
+
+    fn inputs(images: &[EncodedImage]) -> Vec<ImageInput> {
+        images
+            .iter()
+            .map(|image| ImageInput::RawBase64(image.base64()))
+            .collect()
+    }
+
+    fn posted(
+        model: &str,
+        prompt: &str,
+        params: Value,
+        images: Vec<EncodedImage>,
+    ) -> (String, Value) {
+        let provider = crate::providers::resolve_model(model).unwrap();
+        let request = request(model, prompt, params, images.clone());
+        let http = provider.build_submit(&request, &inputs(&images));
+        assert_eq!(http.method, Method::Post);
+        assert_eq!(http.auth, Some(ProviderId::OpenAi));
+        assert!(!request.params.contains_key("images"));
+        let Body::Json(json) = http.body else {
+            panic!("expected json");
+        };
+        (http.url, json)
+    }
+
+    #[test]
+    fn generations_body_omits_edit_only_fields() {
+        let (url, json) = posted(
+            "gpt-image-2.5-flare",
+            "a harbor",
+            json!({
+                "quality": "auto",
+                "size": "1024x1024",
+                "background": "transparent"
+            }),
+            Vec::new(),
+        );
+        assert_eq!(url, "https://api.openai.com/v1/images/generations");
+        assert_eq!(json["model"], "gpt-image-2.5-flare");
+        assert_eq!(json["prompt"], "a harbor");
+        assert_eq!(json["quality"], "auto");
+        assert_eq!(json["size"], "1024x1024");
+        assert_eq!(json["background"], "transparent");
+        assert_eq!(json["output_format"], "png");
+        for key in [
+            "input_fidelity",
+            "n",
+            "stream",
+            "mask",
+            "moderation",
+            "output_compression",
+            "response_format",
+            "style",
+            "safety_identifier",
+            "user",
+            "images",
+        ] {
+            assert!(json.get(key).is_none(), "{key}");
+        }
+    }
+
+    #[test]
+    fn edits_put_references_on_the_body_and_keep_them_out_of_params() {
+        let first = encoded(b"one");
+        let second = encoded(b"two");
+        let first_url = super::data_url("image/png", &first.base64());
+        let second_url = super::data_url("image/png", &second.base64());
+        let (url, json) = posted(
+            "gpt-image-1.5",
+            "make it blue",
+            json!({
+                "quality": "auto",
+                "size": "1024x1024",
+                "background": "auto",
+                "input_fidelity": "high"
+            }),
+            vec![first, second],
+        );
+        assert_eq!(url, "https://api.openai.com/v1/images/edits");
+        assert_eq!(json["input_fidelity"], "high");
+        assert_eq!(json["output_format"], "png");
+        assert_eq!(json["images"][0]["image_url"], first_url);
+        assert_eq!(json["images"][1]["image_url"], second_url);
+        assert!(json.get("mask").is_none());
+    }
+
+    #[test]
+    fn canvas_data_url_is_first() {
+        let canvas = encoded(b"canvas");
+        let reference = encoded(b"ref");
+        let canvas_url = super::data_url("image/png", &canvas.base64());
+        let (_, json) = posted(
+            "gpt-image-2",
+            "edit",
+            json!({
+                "quality": "high",
+                "size": "1536x1024",
+                "background": "opaque",
+                "input_fidelity": "high"
+            }),
+            vec![canvas, reference],
+        );
+        assert_eq!(json["images"][0]["image_url"], canvas_url);
+        assert!(json.get("input_fidelity").is_none());
+    }
+
+    #[test]
+    fn mini_edit_sends_low_after_reconcile() {
+        let mini = spec("gpt-image-1-mini");
+        let mut stored = spec("gpt-image-1.5").schema.defaults();
+        stored.insert("input_fidelity".into(), json!("high"));
+        let mut values = mini.schema.defaults();
+        for (key, value) in stored {
+            if mini.schema.accepts(&key, &value) {
+                values.insert(key, value);
+            }
+        }
+        assert_eq!(values.get("input_fidelity"), Some(&json!("low")));
+        let image = encoded(b"mini");
+        let params = Value::Object(values.into_iter().collect());
+        let (_, json) = posted("gpt-image-1-mini", "edit", params, vec![image]);
+        assert_eq!(json["input_fidelity"], "low");
+    }
+
+    #[test]
+    fn flare_compile_leaves_boxes_out_of_the_prompt() {
+        let mut scene = Scene::empty();
+        scene.set_source(ImageRef::new("canvas.png", 1024, 1024));
+        scene.prose = "a harbor".into();
+        scene.add_box(
+            crate::geometry::Rect {
+                x: 10,
+                y: 20,
+                w: 30,
+                h: 40,
+            },
+            BoxKind::Layout,
+        );
+        let compiled =
+            GptImage25Flare.compile_prompt(&scene, crate::geometry::Size { w: 1024, h: 1024 });
+        assert_eq!(compiled.text, "a harbor");
+        assert!(compiled.rows_json.is_empty());
+        assert!(!compiled.text.contains("[10"));
+    }
+
+    #[test]
+    fn caps_name_the_limits_and_the_image_line_is_not_a_partial_send() {
+        let prompt = "a".repeat(super::PROMPT_CAP + 1);
+        let messages = super::refusal_messages(&prompt, &[], 0);
+        assert!(messages.iter().any(|message| message.contains("32000")));
+
+        let url = "x".repeat(super::DATA_URL_CAP + 1);
+        let messages = super::refusal_messages("ok", std::slice::from_ref(&url), 1);
+        assert!(messages.iter().any(|message| message.contains("20971520")));
+
+        let messages = super::refusal_messages("ok", &[], 17);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("16"));
+        assert!(!messages[0].contains("will be sent"));
     }
 }
