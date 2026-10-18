@@ -7,6 +7,7 @@ use easel_core::geometry::{
     Handle, Point, Rect, Size, ViewRect, Viewport, edge_at, handle_at, hit_test,
 };
 use easel_core::scene::{BoxId, BoxKind};
+use easel_core::sheet::{self, SheetLayout};
 use gpui::{
     App, BorderStyle, Bounds, Context, CursorStyle, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder, Pixels,
@@ -16,9 +17,9 @@ use gpui::{
 
 use crate::actions::{ActualSize, BoxTool, DeleteBox, Fit, SelectTool};
 use crate::app_state::{AppState, Tool};
-use crate::image_load::DecodedImage;
 use crate::notifications::Notifications;
 use crate::theme;
+use crate::ui::Button;
 
 pub struct Canvas {
     focus_handle: FocusHandle,
@@ -30,9 +31,17 @@ pub struct Canvas {
     space_held: bool,
     last_cursor: Option<gpui::Point<Pixels>>,
     pointer: CursorStyle,
-    shown_image: Option<u64>,
-    virtual_frame: Option<Size>,
+    layout: SheetLayout,
+    sizes: Vec<Size>,
+    sheet_key: String,
+    selected_tile: Option<usize>,
     drag: Drag,
+}
+
+struct PointerHit {
+    slot: Option<usize>,
+    pixel: Point,
+    on_sheet: bool,
 }
 
 enum Drag {
@@ -40,9 +49,11 @@ enum Drag {
     /// Press landed on a box. A short release selects it. A drag in the box tool starts a new box.
     Pressed {
         start_view: Point,
-        start_image: Point,
+        slot: Option<usize>,
+        start: Point,
     },
     Drawing {
+        slot: Option<usize>,
         start: Point,
         current: Point,
     },
@@ -50,12 +61,15 @@ enum Drag {
         id: BoxId,
         origin: Rect,
         grab: Point,
+        slot: Option<usize>,
     },
     Resizing {
         id: BoxId,
         handle: Handle,
+        slot: Option<usize>,
     },
     DrawingTarget {
+        slot: Option<usize>,
         start: Point,
         current: Point,
     },
@@ -80,15 +94,72 @@ impl Canvas {
             space_held: false,
             last_cursor: None,
             pointer: CursorStyle::Crosshair,
-            shown_image: None,
-            virtual_frame: None,
+            layout: SheetLayout {
+                content: Size { w: 0, h: 0 },
+                tiles: Vec::new(),
+            },
+            sizes: Vec::new(),
+            sheet_key: String::new(),
+            selected_tile: None,
             drag: Drag::Idle,
         }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn shows_hint(&self, cx: &App) -> bool {
-        self.app_state.read(cx).image.is_none() && self.app_state.read(cx).scene.frame().is_none()
+        self.hint_text(cx).is_some()
+    }
+
+    pub fn hint_text(&self, cx: &App) -> Option<String> {
+        let app = self.app_state.read(cx);
+        if app.image.is_some() || app.scene.frame().is_some() {
+            return None;
+        }
+        let mut text =
+            "Open, drop, or paste an image, or pick an aspect ratio to draw boxes".to_string();
+        if allows_empty_image_list(app) {
+            text.push_str(". A prompt can run with no image");
+        }
+        Some(text)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn tile_count(&self) -> usize {
+        self.layout.tiles.len()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn tile_view(&self, index: usize) -> Option<ViewRect> {
+        self.layout
+            .tiles
+            .get(index)
+            .map(|tile| content_to_view(&self.viewport, *tile))
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn tile_label(&self, index: usize, cx: &App) -> Option<String> {
+        self.app_state
+            .read(cx)
+            .reference_marks()
+            .get(index)
+            .map(|(label, _)| label.clone())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn tile_border(&self, index: usize) -> Option<u32> {
+        if index >= self.layout.tiles.len() {
+            return None;
+        }
+        Some(if self.selected_tile == Some(index) {
+            theme::ACCENT
+        } else {
+            theme::BORDER
+        })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn selected_tile(&self) -> Option<usize> {
+        self.selected_tile
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -107,6 +178,7 @@ impl Canvas {
     }
 
     pub fn fit(&mut self, cx: &mut Context<Self>) {
+        self.sync_sheet(cx);
         self.user_zoomed = false;
         self.refit(cx);
         cx.notify();
@@ -118,11 +190,11 @@ impl Canvas {
         cx.notify();
     }
 
-    fn refit(&mut self, cx: &mut Context<Self>) {
-        let Some(image) = self.app_state.read(cx).image.clone() else {
+    fn refit(&mut self, _cx: &mut Context<Self>) {
+        if self.layout.content.w == 0 && self.layout.content.h == 0 {
             return;
-        };
-        self.viewport = Viewport::fit(image.size, self.viewport.view_size);
+        }
+        self.viewport = Viewport::fit(self.layout.content, self.viewport.view_size);
     }
 
     fn note_bounds(&mut self, bounds: Bounds<Pixels>) -> (Viewport, bool) {
@@ -142,32 +214,45 @@ impl Canvas {
         (self.viewport, true)
     }
 
-    fn sync_frame(&mut self, cx: &mut Context<Self>) {
-        let image = self.app_state.read(cx).image.clone();
-        self.sync_image(image.as_deref());
-        if image.is_some() {
-            self.virtual_frame = None;
-            return;
-        }
-        let frame = self.app_state.read(cx).scene.frame();
-        if frame != self.virtual_frame {
-            self.virtual_frame = frame;
-            if let Some(frame) = frame {
-                self.user_zoomed = false;
-                self.viewport = Viewport::fit(frame, self.viewport.view_size);
+    fn sync_sheet(&mut self, cx: &mut Context<Self>) {
+        let (sizes, aspect, key) = {
+            let app = self.app_state.read(cx);
+            let mut sizes = Vec::new();
+            let mut key = String::new();
+            if let Some(image) = &app.image {
+                sizes.push(image.size);
+                key.push_str(&format!(
+                    "s:{}:{}:{},",
+                    image.render.id.0, image.size.w, image.size.h
+                ));
             }
-        }
-    }
-
-    fn sync_image(&mut self, image: Option<&DecodedImage>) {
-        let id = image.map(|image| image.render.id.0 as u64);
-        if id == self.shown_image {
+            for extra in &app.extras {
+                sizes.push(extra.size);
+                key.push_str(&format!(
+                    "e:{}:{}:{},",
+                    extra.render.id.0, extra.size.w, extra.size.h
+                ));
+            }
+            let aspect = app.scene.aspect_ratio.clone();
+            key.push_str(aspect.as_deref().unwrap_or(""));
+            (sizes, aspect, key)
+        };
+        if key == self.sheet_key {
             return;
         }
-        self.shown_image = id;
+        self.sheet_key = key;
+        self.sizes = sizes;
+        self.layout = sheet::layout(&self.sizes, aspect.as_deref());
+        if let Some(index) = self.selected_tile
+            && index >= self.layout.tiles.len()
+        {
+            self.selected_tile = self.layout.tiles.len().checked_sub(1);
+        }
         self.user_zoomed = false;
-        if let Some(image) = image {
-            self.viewport = Viewport::fit(image.size, self.viewport.view_size);
+        if self.layout.content.w > 0 || self.layout.content.h > 0 {
+            self.viewport = Viewport::fit(self.layout.content, self.viewport.view_size);
+        } else {
+            self.viewport.image_size = Size { w: 0, h: 0 };
         }
     }
 
@@ -247,14 +332,73 @@ impl Canvas {
             .iter()
             .filter_map(|element| {
                 let rect = element.src.or(element.tgt)?;
-                Some((element.id.clone(), rect, view_of(&self.viewport, rect)))
+                Some((
+                    element.id.clone(),
+                    rect,
+                    rect_view(
+                        &self.layout,
+                        &self.sizes,
+                        &self.viewport,
+                        element.from_image,
+                        rect,
+                    ),
+                ))
             })
             .collect()
     }
 
+    fn pointer_hit(&self, local: Point) -> PointerHit {
+        let content = self.viewport.view_to_image(local);
+        if let Some(hit) = sheet::hit_tile(&self.layout, &self.sizes, content) {
+            return PointerHit {
+                slot: Some(hit.index),
+                pixel: hit.pixel,
+                on_sheet: true,
+            };
+        }
+        if self.layout.tiles.is_empty() && (self.layout.content.w > 0 || self.layout.content.h > 0)
+        {
+            let size = self.layout.content;
+            let inside = content.x >= 0.0
+                && content.y >= 0.0
+                && content.x <= size.w as f32
+                && content.y <= size.h as f32;
+            return PointerHit {
+                slot: None,
+                pixel: Point {
+                    x: content.x.clamp(0.0, size.w as f32),
+                    y: content.y.clamp(0.0, size.h as f32),
+                },
+                on_sheet: inside,
+            };
+        }
+        PointerHit {
+            slot: None,
+            pixel: content,
+            on_sheet: false,
+        }
+    }
+
+    fn clamped_pixel(&self, local: Point, slot: Option<usize>) -> Point {
+        let content = self.viewport.view_to_image(local);
+        if let Some(slot) = slot
+            && let Some(pixel) = sheet::clamp_tile(&self.layout, &self.sizes, slot, content)
+        {
+            return pixel;
+        }
+        if self.layout.tiles.is_empty() {
+            let size = self.layout.content;
+            return Point {
+                x: content.x.clamp(0.0, size.w as f32),
+                y: content.y.clamp(0.0, size.h as f32),
+            };
+        }
+        content
+    }
+
     fn draft_rect(&self) -> Option<Rect> {
         match self.drag {
-            Drag::Drawing { start, current } | Drag::DrawingTarget { start, current } => {
+            Drag::Drawing { start, current, .. } | Drag::DrawingTarget { start, current, .. } => {
                 Some(rect_between(start, current))
             }
             _ => None,
@@ -266,11 +410,14 @@ impl Canvas {
             return;
         }
         let local = self.local_point(event.position);
-        let image = self.viewport.view_to_image(local);
+        let hit = self.pointer_hit(local);
         if self.app_state.read(cx).draw_target.is_some() {
+            let slot = self.draw_target_slot(cx);
+            let pixel = self.clamped_pixel(local, slot);
             self.drag = Drag::DrawingTarget {
-                start: image,
-                current: image,
+                slot,
+                start: pixel,
+                current: pixel,
             };
             return;
         }
@@ -282,42 +429,79 @@ impl Canvas {
             )
         {
             let (id, rect, _) = views[index].clone();
+            let slot = self.slot_of(&id, cx);
             self.select_box(id.clone(), cx);
+            self.note_tile(slot);
             self.drag = Drag::Moving {
                 id,
                 origin: rect,
-                grab: image,
+                grab: self.clamped_pixel(local, slot),
+                slot,
             };
             return;
         }
         let selected = self.app_state.read(cx).selected_box.clone();
         if let Some((id, handle)) = Self::edge_target(local, selected.as_ref(), &views) {
+            let slot = self.slot_of(&id, cx);
             self.select_box(id.clone(), cx);
-            self.drag = Drag::Resizing { id, handle };
+            self.note_tile(slot);
+            self.drag = Drag::Resizing { id, handle, slot };
             return;
         }
         let rects: Vec<ViewRect> = views.iter().map(|(_, _, view)| *view).collect();
         if let Some(index) = hit_test(local, &rects) {
             let (id, _, _) = views[index].clone();
+            let slot = self.slot_of(&id, cx).or(hit.slot);
             self.select_box(id, cx);
+            self.note_tile(slot);
             self.drag = Drag::Pressed {
                 start_view: local,
-                start_image: image,
+                slot,
+                start: self.clamped_pixel(local, slot),
             };
             return;
         }
-        if self.app_state.read(cx).tool == Tool::Box && self.app_state.read(cx).box_tool_enabled() {
+        if hit.on_sheet
+            && self.app_state.read(cx).tool == Tool::Box
+            && self.app_state.read(cx).box_tool_enabled()
+        {
+            self.note_tile(hit.slot);
             self.drag = Drag::Drawing {
-                start: image,
-                current: image,
+                slot: hit.slot,
+                start: hit.pixel,
+                current: hit.pixel,
             };
             cx.notify();
             return;
+        }
+        if hit.slot.is_some() {
+            self.note_tile(hit.slot);
         }
         self.app_state.update(cx, |app, cx| {
             app.selected_box = None;
             cx.notify();
         });
+    }
+
+    fn note_tile(&mut self, slot: Option<usize>) {
+        if slot.is_some() {
+            self.selected_tile = slot;
+        }
+    }
+
+    fn slot_of(&self, id: &BoxId, cx: &App) -> Option<usize> {
+        self.app_state
+            .read(cx)
+            .scene
+            .boxes
+            .iter()
+            .find(|element| &element.id == id)
+            .and_then(|element| element.from_image)
+    }
+
+    fn draw_target_slot(&self, cx: &App) -> Option<usize> {
+        let id = self.app_state.read(cx).draw_target.clone()?;
+        self.slot_of(&id, cx)
     }
 
     fn select_box(&mut self, id: BoxId, cx: &mut Context<Self>) {
@@ -351,12 +535,12 @@ impl Canvas {
             self.pan_move(event, cx);
             return;
         }
-        let image = self.viewport.view_to_image(local);
         let drag = std::mem::replace(&mut self.drag, Drag::Idle);
         match drag {
             Drag::Pressed {
                 start_view,
-                start_image,
+                slot,
+                start,
             } => {
                 let moved = (local.x - start_view.x).abs() + (local.y - start_view.y).abs();
                 self.drag = if moved > 4.0
@@ -364,29 +548,39 @@ impl Canvas {
                     && self.app_state.read(cx).box_tool_enabled()
                 {
                     Drag::Drawing {
-                        start: start_image,
-                        current: image,
+                        slot,
+                        start,
+                        current: self.clamped_pixel(local, slot),
                     }
                 } else {
                     Drag::Pressed {
                         start_view,
-                        start_image,
+                        slot,
+                        start,
                     }
                 };
             }
-            Drag::Drawing { start, .. } => {
+            Drag::Drawing { slot, start, .. } => {
                 self.drag = Drag::Drawing {
+                    slot,
                     start,
-                    current: image,
+                    current: self.clamped_pixel(local, slot),
                 };
             }
-            Drag::DrawingTarget { start, .. } => {
+            Drag::DrawingTarget { slot, start, .. } => {
                 self.drag = Drag::DrawingTarget {
+                    slot,
                     start,
-                    current: image,
+                    current: self.clamped_pixel(local, slot),
                 };
             }
-            Drag::Moving { id, origin, grab } => {
+            Drag::Moving {
+                id,
+                origin,
+                grab,
+                slot,
+            } => {
+                let image = self.clamped_pixel(local, slot);
                 let dx = (image.x - grab.x).round() as i32;
                 let dy = (image.y - grab.y).round() as i32;
                 let moved = Rect {
@@ -399,9 +593,15 @@ impl Canvas {
                     place_rect(&mut app.scene, &id, moved);
                     cx.notify();
                 });
-                self.drag = Drag::Moving { id, origin, grab };
+                self.drag = Drag::Moving {
+                    id,
+                    origin,
+                    grab,
+                    slot,
+                };
             }
-            Drag::Resizing { id, handle } => {
+            Drag::Resizing { id, handle, slot } => {
+                let image = self.clamped_pixel(local, slot);
                 self.app_state.update(cx, |app, cx| {
                     if let Some(rect) = app
                         .scene
@@ -415,7 +615,7 @@ impl Canvas {
                         cx.notify();
                     }
                 });
-                self.drag = Drag::Resizing { id, handle };
+                self.drag = Drag::Resizing { id, handle, slot };
             }
             Drag::Idle => {}
         }
@@ -426,25 +626,46 @@ impl Canvas {
         if event.button != MouseButton::Left {
             return;
         }
-        let image = self
-            .viewport
-            .view_to_image(self.local_point(event.position));
+        let local = self.local_point(event.position);
         let drag = std::mem::replace(&mut self.drag, Drag::Idle);
         match drag {
-            Drag::Drawing { start, .. } => self.finish_box(start, image, false, cx),
-            Drag::DrawingTarget { start, .. } => self.finish_box(start, image, true, cx),
+            Drag::Drawing { slot, start, .. } => {
+                let end = self.clamped_pixel(local, slot);
+                self.finish_box(slot, start, end, false, cx);
+            }
+            Drag::DrawingTarget { slot, start, .. } => {
+                let end = self.clamped_pixel(local, slot);
+                self.finish_box(slot, start, end, true, cx);
+            }
             _ => {}
         }
         self.note_pointer(self.local_point(event.position), cx);
     }
 
-    fn finish_box(&mut self, start: Point, end: Point, target: bool, cx: &mut Context<Self>) {
-        let frame = self.app_state.read(cx).scene.frame();
+    fn finish_box(
+        &mut self,
+        slot: Option<usize>,
+        start: Point,
+        end: Point,
+        target: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let limit = slot
+            .and_then(|index| self.sizes.get(index).copied())
+            .or_else(|| self.app_state.read(cx).scene.frame());
         let rect = rect_between(start, end);
-        let rect = frame.map(|frame| rect.clamp_to(frame)).unwrap_or(rect);
+        let rect = limit.map(|limit| rect.clamp_to(limit)).unwrap_or(rect);
         if rect.w < 2 || rect.h < 2 {
+            self.note_tile(slot);
+            if !target {
+                self.app_state.update(cx, |app, cx| {
+                    app.selected_box = None;
+                    cx.notify();
+                });
+            }
             return;
         }
+        self.note_tile(slot);
         self.app_state.update(cx, |app, cx| {
             if target {
                 if let Some(id) = app.draw_target.clone() {
@@ -454,17 +675,143 @@ impl Canvas {
                     app.revert_kind = None;
                 }
             } else {
-                let kind = if app.image.is_some() {
+                let kind = if slot.is_some() || app.image.is_some() {
                     BoxKind::New
                 } else {
                     BoxKind::Layout
                 };
-                let id = app.scene.add_box(rect, kind);
+                let id = if let Some(slot) = slot {
+                    app.scene.add_box_on(rect, kind, slot)
+                } else {
+                    app.scene.add_box(rect, kind)
+                };
                 app.selected_box = Some(id);
                 app.focus_box_field = true;
             }
             cx.notify();
         });
+    }
+
+    fn tile_overlays(&self, cx: &App) -> gpui::Div {
+        let marks = self.app_state.read(cx).reference_marks();
+        let mut overlays = div();
+        for (index, tile) in self.layout.tiles.iter().enumerate() {
+            let view = content_to_view(&self.viewport, *tile);
+            let label = marks
+                .get(index)
+                .map(|(label, _)| label.clone())
+                .unwrap_or_default();
+            let border = if self.selected_tile == Some(index) {
+                theme::ACCENT
+            } else {
+                theme::BORDER
+            };
+            overlays = overlays.child(
+                div()
+                    .absolute()
+                    .left(px(view.x))
+                    .top(px(view.y))
+                    .w(px(view.w.max(0.0)))
+                    .h(px(view.h.max(0.0)))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(rgb(border))
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(4.))
+                            .left(px(4.))
+                            .right(px(4.))
+                            .overflow_hidden()
+                            .text_xs()
+                            .text_color(rgb(theme::TEXT_MUTED))
+                            .child(label),
+                    ),
+            );
+        }
+        overlays
+    }
+
+    fn tile_actions(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(index) = self.selected_tile else {
+            return div();
+        };
+        let Some(view) = self.tile_view(index) else {
+            return div();
+        };
+        let names = action_names(index, self.layout.tiles.len(), view.w);
+        let entity = cx.entity();
+        let mut row = div()
+            .absolute()
+            .left(px(view.x))
+            .top(px(view.y))
+            .w(px(view.w.max(0.0)))
+            .h(px(view.h.max(0.0)))
+            .overflow_hidden()
+            .flex()
+            .items_end()
+            .gap(px(4.))
+            .p(px(4.));
+        for name in names {
+            let entity = entity.clone();
+            row = row.child(
+                Button::ghost(SharedString::from(format!("tile-{name}-{index}")), name).on_click(
+                    move |_, _, cx| {
+                        entity.update(cx, |canvas, cx| canvas.apply_tile_action(index, name, cx));
+                    },
+                ),
+            );
+        }
+        row
+    }
+
+    fn apply_tile_action(&mut self, index: usize, name: &str, cx: &mut Context<Self>) {
+        match name {
+            "Remove" => {
+                self.app_state
+                    .update(cx, |app, cx| app.remove_reference_slot(index, cx));
+                let count = {
+                    let app = self.app_state.read(cx);
+                    usize::from(app.image.is_some()) + app.extras.len()
+                };
+                self.selected_tile = if count == 0 {
+                    None
+                } else if index >= count {
+                    Some(count - 1)
+                } else {
+                    Some(index)
+                };
+            }
+            "Move left" if index > 0 => self.move_tile(index, index - 1, cx),
+            "Move right" => self.move_tile(index, index + 1, cx),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    fn move_tile(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        self.app_state.update(cx, |app, cx| {
+            let mut pixels = Vec::new();
+            if app.scene.source_image.is_some() {
+                pixels.push(app.image.clone());
+            }
+            pixels.extend(app.extras.iter().cloned().map(Some));
+            if from >= pixels.len() || to >= pixels.len() || from == to {
+                return;
+            }
+            let image = pixels.remove(from);
+            pixels.insert(to, image);
+            app.scene.move_reference(from, to);
+            let mut pixels = pixels.into_iter();
+            if app.scene.source_image.is_some() {
+                app.image = pixels.next().flatten();
+            } else {
+                app.image = None;
+            }
+            app.extras = pixels.flatten().collect();
+            cx.notify();
+        });
+        self.selected_tile = Some(to);
     }
 
     fn delete_selected(&mut self, cx: &mut Context<Self>) {
@@ -498,6 +845,8 @@ impl Canvas {
 
 fn paint_marks(
     origin: gpui::Point<Pixels>,
+    layout: &SheetLayout,
+    sizes: &[Size],
     viewport: &Viewport,
     boxes: &[easel_core::scene::BoxElement],
     opacity: f32,
@@ -511,7 +860,10 @@ fn paint_marks(
             if let Some(rect) = element.src {
                 paint_mark(
                     origin,
+                    layout,
+                    sizes,
                     viewport,
+                    element.from_image,
                     rect,
                     fill,
                     outline,
@@ -522,7 +874,10 @@ fn paint_marks(
             if let Some(rect) = element.tgt {
                 paint_mark(
                     origin,
+                    layout,
+                    sizes,
                     viewport,
+                    element.from_image,
                     rect,
                     fill,
                     outline,
@@ -531,12 +886,25 @@ fn paint_marks(
                 );
             }
             if let (Some(src), Some(tgt)) = (element.src, element.tgt) {
-                paint_arrow(origin, viewport, src, tgt, outline, window);
+                paint_arrow(
+                    origin,
+                    layout,
+                    sizes,
+                    viewport,
+                    element.from_image,
+                    src,
+                    tgt,
+                    outline,
+                    window,
+                );
             }
         } else if let Some(rect) = element.src.or(element.tgt) {
             paint_mark(
                 origin,
+                layout,
+                sizes,
                 viewport,
+                element.from_image,
                 rect,
                 fill,
                 outline,
@@ -566,6 +934,8 @@ fn label_rect(element: &easel_core::scene::BoxElement) -> Option<Rect> {
 
 fn paint_labels(
     origin: gpui::Point<Pixels>,
+    layout: &SheetLayout,
+    sizes: &[Size],
     viewport: &Viewport,
     boxes: &[easel_core::scene::BoxElement],
     window: &mut Window,
@@ -578,7 +948,7 @@ fn paint_labels(
         let Some(rect) = label_rect(element) else {
             continue;
         };
-        let view = view_of(viewport, rect);
+        let view = rect_view(layout, sizes, viewport, element.from_image, rect);
         let text = SharedString::from(element.id.as_str().to_string());
         let run = TextRun {
             len: text.len(),
@@ -605,11 +975,14 @@ fn paint_labels(
 
 fn paint_handles(
     origin: gpui::Point<Pixels>,
+    layout: &SheetLayout,
+    sizes: &[Size],
     viewport: &Viewport,
+    slot: Option<usize>,
     rect: Rect,
     window: &mut Window,
 ) {
-    let view = view_of(viewport, rect);
+    let view = rect_view(layout, sizes, viewport, slot, rect);
     let anchors = [
         (view.x, view.y),
         (view.x + view.w / 2.0, view.y),
@@ -638,14 +1011,17 @@ fn paint_handles(
 
 fn paint_mark(
     origin: gpui::Point<Pixels>,
+    layout: &SheetLayout,
+    sizes: &[Size],
     viewport: &Viewport,
+    slot: Option<usize>,
     rect: Rect,
     fill: gpui::Rgba,
     outline: gpui::Rgba,
     style: BorderStyle,
     window: &mut Window,
 ) {
-    let view = view_of(viewport, rect);
+    let view = rect_view(layout, sizes, viewport, slot, rect);
     window.paint_quad(quad(
         Bounds {
             origin: point(origin.x + px(view.x), origin.y + px(view.y)),
@@ -661,14 +1037,17 @@ fn paint_mark(
 
 fn paint_arrow(
     origin: gpui::Point<Pixels>,
+    layout: &SheetLayout,
+    sizes: &[Size],
     viewport: &Viewport,
+    slot: Option<usize>,
     src: Rect,
     tgt: Rect,
     color: gpui::Rgba,
     window: &mut Window,
 ) {
-    let src = view_of(viewport, src);
-    let tgt = view_of(viewport, tgt);
+    let src = rect_view(layout, sizes, viewport, slot, src);
+    let tgt = rect_view(layout, sizes, viewport, slot, tgt);
     let from = point(
         origin.x + px(src.x + src.w / 2.0),
         origin.y + px(src.y + src.h / 2.0),
@@ -700,14 +1079,59 @@ fn paint_arrow(
     }
 }
 
-fn view_of(viewport: &Viewport, rect: Rect) -> ViewRect {
-    let origin = viewport.image_to_view(Point {
+fn rect_view(
+    layout: &SheetLayout,
+    sizes: &[Size],
+    viewport: &Viewport,
+    slot: Option<usize>,
+    rect: Rect,
+) -> ViewRect {
+    let content = if let Some(index) = slot {
+        match (layout.tiles.get(index), sizes.get(index)) {
+            (Some(tile), Some(size)) if size.w > 0 && size.h > 0 => tile_local(*tile, *size, rect),
+            _ => pixels_as_content(rect),
+        }
+    } else if layout.tiles.is_empty() {
+        pixels_as_content(rect)
+    } else if let (Some(tile), Some(size)) = (layout.tiles.first(), sizes.first()) {
+        tile_local(*tile, *size, rect)
+    } else {
+        pixels_as_content(rect)
+    };
+    content_to_view(viewport, content)
+}
+
+fn tile_local(tile: ViewRect, size: Size, rect: Rect) -> ViewRect {
+    ViewRect {
+        x: tile.x + rect.x as f32 / size.w as f32 * tile.w,
+        y: tile.y + rect.y as f32 / size.h as f32 * tile.h,
+        w: rect.w as f32 / size.w as f32 * tile.w,
+        h: rect.h as f32 / size.h as f32 * tile.h,
+    }
+}
+
+fn pixels_as_content(rect: Rect) -> ViewRect {
+    ViewRect {
         x: rect.x as f32,
         y: rect.y as f32,
+        w: rect.w as f32,
+        h: rect.h as f32,
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn view_of(viewport: &Viewport, rect: Rect) -> ViewRect {
+    content_to_view(viewport, pixels_as_content(rect))
+}
+
+fn content_to_view(viewport: &Viewport, rect: ViewRect) -> ViewRect {
+    let origin = viewport.image_to_view(Point {
+        x: rect.x,
+        y: rect.y,
     });
     let far = viewport.image_to_view(Point {
-        x: (rect.x + rect.w) as f32,
-        y: (rect.y + rect.h) as f32,
+        x: rect.x + rect.w,
+        y: rect.y + rect.h,
     });
     ViewRect {
         x: origin.x,
@@ -749,6 +1173,47 @@ fn kind_color(kind: BoxKind) -> u32 {
     }
 }
 
+fn allows_empty_image_list(app: &AppState) -> bool {
+    app.field_errors(0)
+        .iter()
+        .all(|error| error.key != "images" && !error.message.to_ascii_lowercase().contains("image"))
+}
+
+fn action_names(index: usize, count: usize, width: f32) -> Vec<&'static str> {
+    const GAP: f32 = 4.0;
+    const REMOVE: f32 = 78.0;
+    const MOVE_LEFT: f32 = 92.0;
+    const MOVE_RIGHT: f32 = 100.0;
+    let inner = (width - 8.0).max(0.0);
+    let want_left = index > 0;
+    let want_right = index + 1 < count;
+    let mut all = REMOVE;
+    if want_left {
+        all += GAP + MOVE_LEFT;
+    }
+    if want_right {
+        all += GAP + MOVE_RIGHT;
+    }
+    if inner >= all {
+        let mut names = Vec::new();
+        if want_left {
+            names.push("Move left");
+        }
+        names.push("Remove");
+        if want_right {
+            names.push("Move right");
+        }
+        return names;
+    }
+    let mut names = vec!["Remove"];
+    if want_left && inner >= REMOVE + GAP + MOVE_LEFT {
+        names.insert(0, "Move left");
+    } else if want_right && inner >= REMOVE + GAP + MOVE_RIGHT {
+        names.push("Move right");
+    }
+    names
+}
+
 fn scroll_zoom_factor(delta: ScrollDelta) -> f32 {
     let lines = match delta {
         ScrollDelta::Lines(delta) => delta.y,
@@ -765,7 +1230,7 @@ impl Focusable for Canvas {
 
 impl Render for Canvas {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_frame(cx);
+        self.sync_sheet(cx);
         let image = self.app_state.read(cx).image.clone();
         let frame = self.app_state.read(cx).scene.frame();
         let boxes = {
@@ -775,22 +1240,20 @@ impl Render for Canvas {
                 None => app.scene.boxes.clone(),
             }
         };
-        let render_image = image.as_ref().map(|image| image.render.clone());
-        let image_layer = match &image {
-            Some(_) => div().into_any_element(),
-            None if frame.is_some() => {
-                let rect = self.viewport.image_rect_in_view();
-                div()
-                    .absolute()
-                    .left(px(rect.x))
-                    .top(px(rect.y))
-                    .w(px(rect.w.max(0.0)))
-                    .h(px(rect.h.max(0.0)))
-                    .border_1()
-                    .border_color(rgb(theme::BORDER))
-                    .into_any_element()
+        let tile_images = {
+            let app = self.app_state.read(cx);
+            let mut images = Vec::new();
+            if let Some(image) = &app.image {
+                images.push(image.render.clone());
             }
-            None => div()
+            for extra in &app.extras {
+                images.push(extra.render.clone());
+            }
+            images
+        };
+        let hint = self.hint_text(cx);
+        let image_layer = if let Some(hint) = hint {
+            div()
                 .size_full()
                 .flex()
                 .items_center()
@@ -798,14 +1261,35 @@ impl Render for Canvas {
                 .text_sm()
                 .italic()
                 .text_color(rgb(theme::TEXT_MUTED))
-                .child("Open, drop, or paste an image, or pick an aspect ratio to draw boxes")
-                .into_any_element(),
+                .child(hint)
+                .into_any_element()
+        } else if image.is_none() && frame.is_some() {
+            let rect = self.viewport.image_rect_in_view();
+            div()
+                .absolute()
+                .left(px(rect.x))
+                .top(px(rect.y))
+                .w(px(rect.w.max(0.0)))
+                .h(px(rect.h.max(0.0)))
+                .border_1()
+                .border_color(rgb(theme::BORDER))
+                .into_any_element()
+        } else {
+            div().into_any_element()
         };
         let painted = boxes.clone();
+        let layout = self.layout.clone();
+        let sizes = self.sizes.clone();
         let boxes_live = self.app_state.read(cx).spec().capabilities.supports_boxes;
+        let draft_slot = match &self.drag {
+            Drag::Drawing { slot, .. } | Drag::DrawingTarget { slot, .. } => *slot,
+            _ => None,
+        };
         let draft = self.draft_rect().map(|rect| {
-            let frame = self.app_state.read(cx).scene.frame();
-            frame.map(|frame| rect.clamp_to(frame)).unwrap_or(rect)
+            let limit = draft_slot
+                .and_then(|index| self.sizes.get(index).copied())
+                .or_else(|| self.app_state.read(cx).scene.frame());
+            limit.map(|limit| rect.clamp_to(limit)).unwrap_or(rect)
         });
         let selected_mark = {
             let selected = self.app_state.read(cx).selected_box.clone();
@@ -813,7 +1297,10 @@ impl Render for Canvas {
                 if selected.as_ref() != Some(&element.id) {
                     return None;
                 }
-                element.src.or(element.tgt)
+                element
+                    .src
+                    .or(element.tgt)
+                    .map(|rect| (element.from_image, rect))
             })
         };
         let bounds_entity = cx.entity();
@@ -859,6 +1346,7 @@ impl Render for Canvas {
             .bg(rgb(theme::EDITOR))
             .text_color(rgb(theme::TEXT))
             .child(image_layer)
+            .child(self.tile_overlays(cx))
             .child(
                 canvas(
                     move |bounds, window, cx| {
@@ -877,17 +1365,33 @@ impl Render for Canvas {
                             viewport,
                             painted,
                             draft,
+                            draft_slot,
                             selected_mark,
-                            render_image,
+                            tile_images,
+                            layout,
+                            sizes,
                             boxes_live,
                         )
                     },
                     |bounds,
-                     (viewport, painted, draft, selected, render_image, boxes_live),
+                     (
+                        viewport,
+                        painted,
+                        draft,
+                        draft_slot,
+                        selected,
+                        tile_images,
+                        layout,
+                        sizes,
+                        boxes_live,
+                    ),
                      window,
                      cx| {
-                        if let Some(render_image) = render_image {
-                            let rect = viewport.image_rect_in_view();
+                        for (index, render_image) in tile_images.iter().enumerate() {
+                            let Some(tile) = layout.tiles.get(index) else {
+                                continue;
+                            };
+                            let rect = content_to_view(&viewport, *tile);
                             let image_bounds = Bounds {
                                 origin: point(
                                     bounds.origin.x + px(rect.x),
@@ -900,7 +1404,7 @@ impl Render for Canvas {
                                     image_bounds,
                                     image_bounds,
                                     gpui::Corners::default(),
-                                    render_image,
+                                    render_image.clone(),
                                     0,
                                     false,
                                 )
@@ -908,16 +1412,29 @@ impl Render for Canvas {
                         }
                         paint_marks(
                             bounds.origin,
+                            &layout,
+                            &sizes,
                             &viewport,
                             &painted,
                             if boxes_live { 1.0 } else { 0.4 },
                             window,
                         );
-                        paint_labels(bounds.origin, &viewport, &painted, window, cx);
+                        paint_labels(
+                            bounds.origin,
+                            &layout,
+                            &sizes,
+                            &viewport,
+                            &painted,
+                            window,
+                            cx,
+                        );
                         if let Some(rect) = draft {
                             paint_mark(
                                 bounds.origin,
+                                &layout,
+                                &sizes,
                                 &viewport,
+                                draft_slot,
                                 rect,
                                 theme::color(theme::BOX_NEW, theme::BOX_FILL_ALPHA),
                                 theme::color(theme::BOX_NEW, 1.0),
@@ -925,8 +1442,16 @@ impl Render for Canvas {
                                 window,
                             );
                         }
-                        if boxes_live && let Some(rect) = selected {
-                            paint_handles(bounds.origin, &viewport, rect, window);
+                        if boxes_live && let Some((slot, rect)) = selected {
+                            paint_handles(
+                                bounds.origin,
+                                &layout,
+                                &sizes,
+                                &viewport,
+                                slot,
+                                rect,
+                                window,
+                            );
                         }
                     },
                 )
@@ -958,6 +1483,7 @@ impl Render for Canvas {
                         }),
                     ),
             )
+            .child(self.tile_actions(cx))
             .child(self.notifications.clone())
     }
 }

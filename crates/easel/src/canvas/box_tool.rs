@@ -8,12 +8,13 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::actions::{self, BoxTool, DeleteBox};
+use crate::actions::{self, BoxTool, DeleteBox, SelectTool};
 use crate::app_state::{AppState, Tool};
 use crate::canvas::Canvas;
 use crate::notifications::Notifications;
 use crate::settings::SharedKeys;
 use crate::side_panel::SidePanel;
+use crate::theme;
 use crate::toolbar::Toolbar;
 
 struct Surface {
@@ -470,4 +471,252 @@ fn a_selected_handle_shows_the_resize_cursor(cx: &mut TestAppContext) {
         canvas.read_with(&cx, |canvas, _| canvas.pointer()),
         CursorStyle::Crosshair
     );
+}
+
+fn sized_image(width: u32, height: u32) -> Arc<crate::image_load::DecodedImage> {
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/pixel.png"
+    ))
+    .unwrap();
+    let mut image = crate::image_load::decode_image(&bytes, "pixel.png").unwrap();
+    image.size = easel_core::geometry::Size {
+        w: width,
+        h: height,
+    };
+    Arc::new(image)
+}
+
+fn window_point(canvas: &Canvas, index: usize, dx: f32, dy: f32) -> gpui::Point<gpui::Pixels> {
+    let view = canvas.tile_view(index).expect("tile");
+    let bounds = canvas.content_bounds();
+    point(
+        bounds.origin.x + px(view.x + dx),
+        bounds.origin.y + px(view.y + dy),
+    )
+}
+
+fn click_tile(cx: &mut VisualTestContext, canvas: &gpui::Entity<Canvas>, index: usize) {
+    let at = canvas.read_with(cx, |canvas, _| {
+        let view = canvas.tile_view(index).expect("tile");
+        window_point(canvas, index, view.w / 2.0, view.h / 2.0)
+    });
+    cx.simulate_mouse_down(at, MouseButton::Left, Default::default());
+    cx.simulate_mouse_up(at, MouseButton::Left, Default::default());
+}
+
+#[gpui::test]
+fn empty_hint_mentions_a_prompt_only_when_zero_images_are_allowed(cx: &mut TestAppContext) {
+    let (window, mut cx) = open(cx);
+    let root = surface(&window, &mut cx);
+    let hint = root.read_with(&cx, |surface, cx| {
+        surface.canvas.read(cx).hint_text(cx).unwrap()
+    });
+    assert!(hint.contains("A prompt can run with no image"), "{hint}");
+
+    root.update(&mut cx, |surface, cx| {
+        surface.app_state.update(cx, |app, cx| {
+            app.set_model("krea-3", cx);
+            app.values
+                .insert("regional_edit".into(), serde_json::json!(true));
+            cx.notify();
+        });
+    });
+    let hint = root.read_with(&cx, |surface, cx| {
+        surface.canvas.read(cx).hint_text(cx).unwrap()
+    });
+    assert!(hint.contains("Open, drop, or paste an image"), "{hint}");
+    assert!(!hint.contains("A prompt can run with no image"), "{hint}");
+}
+
+#[gpui::test]
+fn an_empty_sheet_with_an_aspect_draws_on_the_virtual_frame(cx: &mut TestAppContext) {
+    let (window, mut cx) = open(cx);
+    let root = surface(&window, &mut cx);
+    root.update(&mut cx, |surface, cx| {
+        surface
+            .app_state
+            .update(cx, |app, cx| app.set_aspect_ratio("1:1", cx));
+    });
+    let canvas = root.read_with(&cx, |surface, _| surface.canvas.clone());
+    assert_eq!(canvas.read_with(&cx, |canvas, _| canvas.tile_count()), 0);
+    use_box_tool(&mut cx, &canvas);
+    drag(&mut cx, &canvas, (40.0, 30.0), (160.0, 110.0));
+    let rect = canvas.read_with(&cx, |canvas, cx| {
+        canvas.app_state().read(cx).scene.boxes[0]
+            .src
+            .or(canvas.app_state().read(cx).scene.boxes[0].tgt)
+            .unwrap()
+    });
+    assert!(rect.x >= 0 && rect.y >= 0);
+    assert!(rect.x + rect.w <= 1000 && rect.y + rect.h <= 1000);
+}
+
+#[gpui::test]
+fn a_click_selects_the_tile_under_the_pointer(cx: &mut TestAppContext) {
+    let (window, mut cx) = open(cx);
+    let root = surface(&window, &mut cx);
+    root.update(&mut cx, |surface, cx| {
+        surface.app_state.update(cx, |app, cx| {
+            app.set_image(sized_image(100, 100), cx);
+            app.add_extra(sized_image(400, 200), cx).unwrap();
+        });
+    });
+    let canvas = root.read_with(&cx, |surface, _| surface.canvas.clone());
+    use_box_tool(&mut cx, &canvas);
+    let start = canvas.read_with(&cx, |canvas, _| window_point(canvas, 0, 8.0, 8.0));
+    let end = canvas.read_with(&cx, |canvas, _| window_point(canvas, 0, 40.0, 40.0));
+    cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+    cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+    cx.simulate_mouse_up(end, MouseButton::Left, Default::default());
+    assert_eq!(
+        canvas.read_with(&cx, |canvas, cx| {
+            canvas.app_state().read(cx).scene.boxes.len()
+        }),
+        1
+    );
+    cx.update(|window, cx| {
+        canvas.update(cx, |canvas, cx| canvas.focus_handle(cx).focus(window, cx));
+        window.dispatch_action(Box::new(SelectTool), cx);
+    });
+    click_tile(&mut cx, &canvas, 1);
+    let (tile, border, selected_box) = canvas.read_with(&cx, |canvas, cx| {
+        (
+            canvas.selected_tile(),
+            canvas.tile_border(1),
+            canvas.app_state().read(cx).selected_box.clone(),
+        )
+    });
+    assert_eq!(tile, Some(1));
+    assert_eq!(border, Some(theme::ACCENT));
+    assert!(selected_box.is_none());
+}
+
+#[gpui::test]
+fn a_drag_on_the_second_tile_stays_in_that_tiles_pixels(cx: &mut TestAppContext) {
+    let (window, mut cx) = open(cx);
+    let root = surface(&window, &mut cx);
+    root.update(&mut cx, |surface, cx| {
+        surface.app_state.update(cx, |app, cx| {
+            app.set_image(sized_image(100, 100), cx);
+            app.add_extra(sized_image(400, 200), cx).unwrap();
+        });
+    });
+    let canvas = root.read_with(&cx, |surface, _| surface.canvas.clone());
+    use_box_tool(&mut cx, &canvas);
+    click_tile(&mut cx, &canvas, 1);
+    assert_eq!(
+        canvas.read_with(&cx, |canvas, _| canvas.selected_tile()),
+        Some(1)
+    );
+    assert!(canvas.read_with(&cx, |canvas, cx| {
+        canvas.app_state().read(cx).scene.boxes.is_empty()
+    }));
+
+    let start = canvas.read_with(&cx, |canvas, _| window_point(canvas, 1, 12.0, 12.0));
+    let end = canvas.read_with(&cx, |canvas, _| window_point(canvas, 1, 80.0, 50.0));
+    cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+    cx.simulate_mouse_move(end, MouseButton::Left, Default::default());
+    cx.simulate_mouse_up(end, MouseButton::Left, Default::default());
+    let element = canvas.read_with(&cx, |canvas, cx| {
+        canvas.app_state().read(cx).scene.boxes[0].clone()
+    });
+    assert_eq!(element.from_image, Some(1));
+    let rect = element.tgt.unwrap();
+    assert!(rect.x >= 0 && rect.y >= 0);
+    assert!(rect.x + rect.w <= 400 && rect.y + rect.h <= 200);
+
+    let (from_second, onto_first) = canvas.read_with(&cx, |canvas, _| {
+        let second = canvas.tile_view(1).unwrap();
+        (
+            window_point(canvas, 1, second.w - 16.0, second.h - 16.0),
+            window_point(canvas, 0, 10.0, 10.0),
+        )
+    });
+    cx.simulate_mouse_down(from_second, MouseButton::Left, Default::default());
+    cx.simulate_mouse_move(onto_first, MouseButton::Left, Default::default());
+    cx.simulate_mouse_up(onto_first, MouseButton::Left, Default::default());
+    let crossed = canvas.read_with(&cx, |canvas, cx| {
+        canvas.app_state().read(cx).scene.boxes[1].clone()
+    });
+    assert_eq!(crossed.from_image, Some(1));
+    let rect = crossed.tgt.unwrap();
+    assert!(rect.x >= 0 && rect.y >= 0);
+    assert!(rect.x + rect.w <= 400 && rect.y + rect.h <= 200);
+}
+
+#[gpui::test]
+fn fit_keeps_both_tiles_inside_the_view(cx: &mut TestAppContext) {
+    let (window, mut cx) = open(cx);
+    let root = surface(&window, &mut cx);
+    root.update(&mut cx, |surface, cx| {
+        surface.app_state.update(cx, |app, cx| {
+            app.set_image(sized_image(100, 100), cx);
+            app.add_extra(sized_image(400, 200), cx).unwrap();
+        });
+    });
+    let canvas = root.read_with(&cx, |surface, _| surface.canvas.clone());
+    cx.update(|window, cx| {
+        canvas.update(cx, |canvas, cx| canvas.focus_handle(cx).focus(window, cx));
+        window.dispatch_action(Box::new(crate::actions::Fit), cx);
+    });
+    let (view, first, second) = canvas.read_with(&cx, |canvas, _| {
+        (
+            canvas.viewport().view_size,
+            canvas.tile_view(0).unwrap(),
+            canvas.tile_view(1).unwrap(),
+        )
+    });
+    assert!(view.w > 0 && view.h > 0);
+    for tile in [first, second] {
+        assert!(tile.x >= -0.5, "{tile:?}");
+        assert!(tile.y >= -0.5, "{tile:?}");
+        assert!(tile.x + tile.w <= view.w as f32 + 1.0, "{tile:?} {view:?}");
+        assert!(tile.y + tile.h <= view.h as f32 + 1.0, "{tile:?} {view:?}");
+    }
+    assert!(second.x > first.x);
+}
+
+#[gpui::test]
+fn the_second_tile_label_matches_its_slot_mark(cx: &mut TestAppContext) {
+    let (window, mut cx) = open(cx);
+    let root = surface(&window, &mut cx);
+    root.update(&mut cx, |surface, cx| {
+        surface.app_state.update(cx, |app, cx| {
+            app.set_image(sized_image(100, 100), cx);
+            app.add_extra(sized_image(400, 200), cx).unwrap();
+        });
+    });
+    let (label, mark) = root.read_with(&cx, |surface, cx| {
+        let label = surface.canvas.read(cx).tile_label(1, cx).unwrap();
+        let mark = surface.app_state.read(cx).reference_marks()[1].0.clone();
+        (label, mark)
+    });
+    assert_eq!(label, mark);
+
+    root.update(&mut cx, |surface, cx| {
+        surface.app_state.update(cx, |app, cx| {
+            let max = app.spec().capabilities.image_slots.max();
+            while usize::from(app.scene.source_image.is_some()) + app.scene.references.len() <= max
+            {
+                let image = sized_image(20, 20);
+                app.scene.add_reference(easel_core::scene::ImageRef::new(
+                    "reference",
+                    image.size.w,
+                    image.size.h,
+                ));
+                app.extras.push(image);
+            }
+            cx.notify();
+        });
+    });
+    let (label, sent) = root.read_with(&cx, |surface, cx| {
+        let app = surface.app_state.read(cx);
+        let index = app.reference_marks().len() - 1;
+        let label = surface.canvas.read(cx).tile_label(index, cx).unwrap();
+        let sent = app.reference_marks()[index].1;
+        (label, sent)
+    });
+    assert!(!sent);
+    assert!(label.contains("not sent"), "{label}");
 }
