@@ -4,6 +4,8 @@ mod submit;
 
 #[cfg(test)]
 mod krea_tests;
+#[cfg(test)]
+mod openai_tests;
 
 use std::path::PathBuf;
 

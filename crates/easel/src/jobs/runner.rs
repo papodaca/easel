@@ -457,7 +457,10 @@ impl JobRunner {
                     .is_some_and(|provider| provider.spec().beta);
                 if matches!(
                     error,
-                    ProviderError::Blocked | ProviderError::Auth | ProviderError::ModelNotFound
+                    ProviderError::Blocked
+                        | ProviderError::Auth
+                        | ProviderError::ModelNotFound
+                        | ProviderError::NoImage
                 ) && !beta
                 {
                     self.finish_unpolled(token, error, cx);

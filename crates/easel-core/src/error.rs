@@ -19,6 +19,8 @@ pub enum ProviderError {
     Blocked,
     #[error("model not found")]
     ModelNotFound,
+    #[error("no usable image")]
+    NoImage,
     #[error("{}", credits_message(hint))]
     OutOfCredits {
         #[serde(default)]

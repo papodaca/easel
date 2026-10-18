@@ -271,6 +271,64 @@ fn field_string(
         .map(str::to_owned)
 }
 
+fn response_json(response: &crate::http::HttpResponse) -> serde_json::Value {
+    serde_json::from_slice(&response.body).unwrap_or(serde_json::Value::Null)
+}
+
+fn error_code(value: &serde_json::Value) -> &str {
+    value
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(|code| code.as_str())
+        .unwrap_or("")
+}
+
+fn decode_png(response: &crate::http::HttpResponse) -> Option<Vec<u8>> {
+    if response.status != 200 {
+        return None;
+    }
+    let value = response_json(response);
+    if error_code(&value) == "moderation_blocked" {
+        return None;
+    }
+    let encoded = value
+        .get("data")?
+        .as_array()?
+        .first()?
+        .get("b64_json")?
+        .as_str()?;
+    if encoded.is_empty() {
+        return None;
+    }
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).ok()
+}
+
+fn parse_openai(
+    response: &crate::http::HttpResponse,
+) -> Result<crate::providers::Submitted, crate::error::ProviderError> {
+    use crate::error::ProviderError;
+
+    let value = response_json(response);
+    if error_code(&value) == "moderation_blocked" {
+        return Err(ProviderError::Blocked);
+    }
+    if response.status == 401 {
+        return Err(ProviderError::Auth);
+    }
+    if decode_png(response).is_some() {
+        return Err(ProviderError::Protocol(
+            "openai returns the image on the submit response".into(),
+        ));
+    }
+    if response.status == 200 {
+        return Err(ProviderError::NoImage);
+    }
+    Err(ProviderError::Http {
+        status: response.status,
+        body: String::from_utf8_lossy(&response.body).into_owned(),
+    })
+}
+
 fn build_openai(
     spec: &ModelSpec,
     request: &crate::job::JobRequest,
@@ -388,11 +446,21 @@ macro_rules! impl_openai {
 
             fn parse_submit(
                 &self,
-                _response: &crate::http::HttpResponse,
+                response: &crate::http::HttpResponse,
             ) -> Result<crate::providers::Submitted, crate::error::ProviderError> {
-                Err(crate::error::ProviderError::Protocol(
-                    "openai returns the image on the submit response".into(),
-                ))
+                parse_openai(response)
+            }
+
+            fn inline_image(
+                &self,
+                response: &crate::http::HttpResponse,
+            ) -> Option<crate::providers::InlineImage> {
+                decode_png(response).map(|bytes| crate::providers::InlineImage {
+                    bytes,
+                    mime: "image/png".into(),
+                    interaction_id: String::new(),
+                    suggestion: String::new(),
+                })
             }
 
             fn parse_poll(
