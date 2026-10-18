@@ -160,12 +160,7 @@ impl Root {
     }
 
     fn settings_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("settings-scrim")
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
+        cover_below_title_bar("settings-scrim")
             .flex()
             .items_center()
             .justify_center()
@@ -227,13 +222,8 @@ impl Root {
         let actions = dialog.actions.clone();
         let confirming = dialog.confirming;
         let prompt = dialog.prompt;
-        div()
-            .id("history-scrim")
+        cover_below_title_bar("history-scrim")
             .debug_selector(|| "history-scrim".into())
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
             .flex()
             .items_center()
             .justify_center()
@@ -481,6 +471,16 @@ impl Root {
         self.set_status("Quit", cx);
         cx.quit();
     }
+}
+
+fn cover_below_title_bar(id: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .absolute()
+        .top(px(theme::TITLE_BAR_HEIGHT))
+        .left_0()
+        .right_0()
+        .bottom_0()
 }
 
 impl Focusable for Root {

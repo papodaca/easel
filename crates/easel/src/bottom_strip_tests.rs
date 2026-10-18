@@ -14,8 +14,6 @@ use crate::app_state::AppState;
 use crate::bottom_strip::BottomStrip;
 use crate::root::Root;
 
-use super::{file_uri, show_items_args};
-
 fn png() -> Vec<u8> {
     std::fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -550,7 +548,11 @@ fn escape_closes_settings_before_the_history_modal(cx: &mut TestAppContext) {
     cx.update(|window, cx| {
         window.dispatch_action(Box::new(crate::actions::Settings), cx);
     });
-    assert!(root.read_with(&cx, |root, cx| root.app_state.read(cx).settings_open));
+    draw(&mut cx);
+    cx.simulate_click(gpui::point(px(8.), px(8.)), Modifiers::default());
+    assert!(root.read_with(&cx, |root, cx| {
+        root.app_state.read(cx).settings_open && root.app_state.read(cx).history_item.is_some()
+    }));
     cx.update(|window, cx| {
         window.dispatch_action(Box::new(crate::actions::CloseSettings), cx);
     });
@@ -563,7 +565,12 @@ fn escape_closes_settings_before_the_history_modal(cx: &mut TestAppContext) {
 
     open_modal(&mut cx, &strip);
     draw(&mut cx);
-    cx.simulate_click(gpui::point(px(2.), px(2.)), Modifiers::default());
+    cx.simulate_click(gpui::point(px(8.), px(8.)), Modifiers::default());
+    assert!(root.read_with(&cx, |root, cx| root.app_state.read(cx).history_item.is_some()));
+    cx.simulate_click(
+        gpui::point(px(8.), px(crate::theme::TITLE_BAR_HEIGHT + 12.)),
+        Modifiers::default(),
+    );
     assert!(root.read_with(&cx, |root, cx| root.app_state.read(cx).history_item.is_none()));
 }
 
@@ -878,14 +885,17 @@ fn restore_while_compare_is_open_shows_the_editor_again(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn reveal_asks_for_show_items_and_stays_open(cx: &mut TestAppContext) {
+fn reveal_opens_the_result_folder_and_stays_open(cx: &mut TestAppContext) {
     let (root, strip, history, mut cx) = open_root(cx);
     seed_done(&history, "job1");
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let record = Arc::clone(&seen);
     strip.update(&mut cx, |strip, _| {
-        strip.set_reveal(Arc::new(move |uri, startup| {
-            record.lock().expect("calls").push((uri.to_owned(), startup.to_owned()));
+        strip.set_reveal(Arc::new(move |folder| {
+            record
+                .lock()
+                .expect("calls")
+                .push(folder.to_path_buf());
             Ok(())
         }));
     });
@@ -893,10 +903,10 @@ fn reveal_asks_for_show_items_and_stays_open(cx: &mut TestAppContext) {
     open_modal(&mut cx, &strip);
     strip.update(&mut cx, |strip, cx| strip.press("Reveal", cx));
     let calls = seen.lock().expect("calls").clone();
-    assert_eq!(calls.len(), 1);
-    assert!(calls[0].0.starts_with("file://"), "{}", calls[0].0);
-    assert!(calls[0].0.ends_with("/job1/result.png"), "{}", calls[0].0);
-    assert_eq!(calls[0].1, "");
+    let result = history
+        .result_path(&JobId::parse("job1").unwrap())
+        .unwrap();
+    assert_eq!(calls, vec![result.parent().unwrap().to_path_buf()]);
     assert!(root.read_with(&cx, |root, cx| root.app_state.read(cx).history_item.is_some()));
 }
 
@@ -907,9 +917,9 @@ fn a_failed_reveal_is_reported_and_starts_nothing_else(cx: &mut TestAppContext) 
     let seen = Arc::new(std::sync::Mutex::new(0u32));
     let record = Arc::clone(&seen);
     strip.update(&mut cx, |strip, _| {
-        strip.set_reveal(Arc::new(move |_uri, _startup| {
+        strip.set_reveal(Arc::new(move |_folder| {
             *record.lock().expect("calls") += 1;
-            Err("file manager is not available".into())
+            Err("Could not open the folder".into())
         }));
     });
     strip.update(&mut cx, |strip, cx| strip.refresh(cx));
@@ -917,42 +927,23 @@ fn a_failed_reveal_is_reported_and_starts_nothing_else(cx: &mut TestAppContext) 
     strip.update(&mut cx, |strip, cx| strip.press("Reveal", cx));
     assert_eq!(*seen.lock().expect("calls"), 1);
     assert!(root.read_with(&cx, |root, cx| {
-        root.status_line(cx).contains("file manager is not available")
+        root.status_line(cx).contains("Could not open the folder")
             && root.app_state.read(cx).history_item.is_some()
     }));
 }
 
 #[test]
-fn reveal_percent_encodes_a_space_in_the_file_uri() {
+fn reveal_passes_a_folder_with_a_space_as_one_argument() {
     let dir = temp_dir("space dir");
     let history = Arc::new(HistoryStore::open(dir.join("history")).unwrap());
     seed_done(&history, "job1");
     let path = history
         .result_path(&JobId::parse("job1").unwrap())
         .unwrap();
-    let uri = file_uri(&path);
-    assert!(uri.contains("%20"), "{uri}");
-    assert!(!uri.contains(' '));
-    assert!(uri.ends_with("/job1/result.png"), "{uri}");
-    let args = show_items_args(&uri, "");
-    assert_eq!(args[5], "string:\"\"");
-    assert!(args[4].contains("%20"));
-    assert!(args[4].starts_with("array:string:\"file://"));
-    assert!(args[4].ends_with('"'));
-}
-
-#[test]
-fn show_items_sends_one_uri_and_an_empty_startup_id() {
-    let args = show_items_args("file:///tmp/result.png", "");
-    assert_eq!(
-        args,
-        vec![
-            "--session",
-            "--dest=org.freedesktop.FileManager1",
-            "/org/freedesktop/FileManager1",
-            "org.freedesktop.FileManager1.ShowItems",
-            "array:string:\"file:///tmp/result.png\"",
-            "string:\"\"",
-        ]
-    );
+    let folder = path.parent().unwrap();
+    assert!(folder.to_string_lossy().contains(' '));
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(folder);
+    let args: Vec<_> = command.get_args().collect();
+    assert_eq!(args, [folder.as_os_str()]);
 }

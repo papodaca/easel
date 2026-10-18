@@ -76,7 +76,7 @@ pub struct BottomStrip {
     thumbs: HashMap<String, Arc<RenderImage>>,
     previews: HashMap<String, Preview>,
     notes: Option<gpui::Entity<Notifications>>,
-    reveal: Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>,
+    reveal: Arc<dyn Fn(&std::path::Path) -> Result<(), String> + Send + Sync>,
 }
 
 impl BottomStrip {
@@ -107,7 +107,7 @@ impl BottomStrip {
             thumbs: HashMap::new(),
             previews: HashMap::new(),
             notes: None,
-            reveal: Arc::new(dbus_show_items),
+            reveal: Arc::new(open_result_folder),
         }
     }
 
@@ -380,7 +380,7 @@ impl BottomStrip {
     #[cfg(test)]
     pub fn set_reveal(
         &mut self,
-        reveal: Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>,
+        reveal: Arc<dyn Fn(&std::path::Path) -> Result<(), String> + Send + Sync>,
     ) {
         self.reveal = reveal;
     }
@@ -396,8 +396,10 @@ impl BottomStrip {
         let Some(path) = self.history.result_path(&id) else {
             return;
         };
-        let uri = file_uri(&path);
-        if let Err(error) = (self.reveal)(&uri, "") {
+        let Some(folder) = path.parent() else {
+            return;
+        };
+        if let Err(error) = (self.reveal)(folder) {
             self.report_status(&error, cx);
         }
     }
@@ -738,37 +740,11 @@ fn copy_for(state: &JobState, status: &str) -> (String, String) {
     }
 }
 
-fn file_uri(path: &std::path::Path) -> String {
-    let mut uri = String::from("file://");
-    for byte in path.to_string_lossy().bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
-                uri.push(byte as char);
-            }
-            _ => uri.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    uri
-}
-
-fn show_items_args(uri: &str, startup_id: &str) -> Vec<String> {
-    vec![
-        "--session".into(),
-        "--dest=org.freedesktop.FileManager1".into(),
-        "/org/freedesktop/FileManager1".into(),
-        "org.freedesktop.FileManager1.ShowItems".into(),
-        format!("array:string:\"{uri}\""),
-        format!("string:\"{startup_id}\""),
-    ]
-}
-
-fn dbus_show_items(uri: &str, startup_id: &str) -> Result<(), String> {
-    let output = Command::new("dbus-send")
-        .args(show_items_args(uri, startup_id))
-        .output();
+fn open_result_folder(folder: &std::path::Path) -> Result<(), String> {
+    let output = Command::new("xdg-open").arg(folder).output();
     match output {
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            Err("File manager is not available".into())
+            Err("Could not open the folder".into())
         }
         Err(error) => Err(error.to_string()),
         Ok(output) if output.status.success() => Ok(()),
@@ -776,7 +752,7 @@ fn dbus_show_items(uri: &str, startup_id: &str) -> Result<(), String> {
             let text = String::from_utf8_lossy(&output.stderr);
             let text = text.trim();
             if text.is_empty() {
-                Err("Could not show the file".into())
+                Err("Could not open the folder".into())
             } else {
                 Err(text.to_string())
             }
