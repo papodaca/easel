@@ -21,6 +21,7 @@ struct Slot {
     token: u64,
     state: JobState,
     request: JobRequest,
+    editor: Option<easel_core::history::EditorSnapshot>,
     local_id: Option<easel_core::providers::JobId>,
     submitted: Option<Submitted>,
     elapsed: Duration,
@@ -79,6 +80,15 @@ impl JobRunner {
     }
 
     pub fn submit(&mut self, request: JobRequest, cx: &mut Context<Self>) {
+        self.submit_recorded(request, None, cx);
+    }
+
+    pub fn submit_recorded(
+        &mut self,
+        request: JobRequest,
+        editor: Option<easel_core::history::EditorSnapshot>,
+        cx: &mut Context<Self>,
+    ) {
         let token = self.next_token;
         self.next_token += 1;
         let model_id = request.model_id.clone();
@@ -86,6 +96,7 @@ impl JobRunner {
             token,
             state: JobState::Queued,
             request,
+            editor,
             local_id: None,
             submitted: None,
             elapsed: Duration::ZERO,
@@ -113,6 +124,11 @@ impl JobRunner {
     #[cfg(test)]
     pub fn first_request(&self) -> Option<JobRequest> {
         self.slots.first().map(|slot| slot.request.clone())
+    }
+
+    #[cfg(test)]
+    pub fn first_editor(&self) -> Option<easel_core::history::EditorSnapshot> {
+        self.slots.first().and_then(|slot| slot.editor.clone())
     }
 
     pub fn watch_krea_sunset(
@@ -243,6 +259,7 @@ impl JobRunner {
                     progress: None,
                 },
                 request: empty_request(),
+                editor: None,
                 local_id: None,
                 submitted: Some(Submitted {
                     job_id: entry.id,
@@ -441,9 +458,16 @@ impl JobRunner {
             .map(|provider| provider.parse_submit(&response));
         match parsed {
             Some(Ok(submitted)) => {
-                let request = self.slot_mut(token).map(|slot| slot.request.clone());
-                if let Some(request) = request {
-                    let _ = self.history.begin(&submitted.job_id, &request, &submitted);
+                let recorded = self
+                    .slot_mut(token)
+                    .map(|slot| (slot.request.clone(), slot.editor.clone()));
+                if let Some((request, editor)) = recorded {
+                    let _ = self.history.begin(
+                        &submitted.job_id,
+                        &request,
+                        &submitted,
+                        editor.as_ref(),
+                    );
                 }
                 if let Some(slot) = self.slot_mut(token) {
                     let state = std::mem::replace(&mut slot.state, JobState::Queued);
@@ -488,7 +512,10 @@ impl JobRunner {
         if self.dead(token) {
             return;
         }
-        let Some(request) = self.slot_mut(token).map(|slot| slot.request.clone()) else {
+        let Some((request, editor)) = self
+            .slot_mut(token)
+            .map(|slot| (slot.request.clone(), slot.editor.clone()))
+        else {
             return;
         };
         let id = mint_job_id();
@@ -506,6 +533,7 @@ impl JobRunner {
             &image.bytes,
             &image.mime,
             &thumb,
+            editor.as_ref(),
         ) {
             self.fail(token, ProviderError::Protocol(error.to_string()), cx);
             return;
@@ -530,11 +558,17 @@ impl JobRunner {
         if self.dead(token) {
             return;
         }
-        let Some(request) = self.slot_mut(token).map(|slot| slot.request.clone()) else {
+        let Some((request, editor)) = self
+            .slot_mut(token)
+            .map(|slot| (slot.request.clone(), slot.editor.clone()))
+        else {
             return;
         };
         let id = mint_job_id();
-        if self.history.fail_unpolled(&id, &request, &error).is_ok()
+        if self
+            .history
+            .fail_unpolled(&id, &request, &error, editor.as_ref())
+            .is_ok()
             && let Some(slot) = self.slot_mut(token)
         {
             slot.local_id = Some(id);
@@ -1519,6 +1553,7 @@ mod tests {
                         .unwrap(),
                     quote: None,
                 },
+                None,
             )
             .unwrap();
         harness.runner.update(cx, |runner, cx| runner.resume(cx));
@@ -1542,6 +1577,7 @@ mod tests {
                     poll_url: "https://api.krea.ai/jobs/job-1".parse().unwrap(),
                     quote: None,
                 },
+                None,
             )
             .unwrap();
         harness.runner.update(cx, |runner, cx| runner.resume(cx));

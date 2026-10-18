@@ -673,6 +673,7 @@ mod tests {
                         output_mp: 0.0,
                     }),
                 },
+                None,
             )
             .unwrap();
         let stored = std::fs::read_to_string(root.join("google-job/request.json")).unwrap();

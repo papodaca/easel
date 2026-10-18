@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -38,6 +39,15 @@ pub struct Entry {
     pub model_id: String,
 }
 
+/// Editor fields copied at Generate. This is the typed prompt, not `compiled_prompt`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EditorSnapshot {
+    pub prose: String,
+    pub model_id: String,
+    pub values: BTreeMap<String, serde_json::Value>,
+    pub aspect_ratio: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedRequest {
     pub model_id: String,
@@ -64,6 +74,8 @@ struct StoredRequest {
     images: Vec<ImageSummary>,
     box_snapshot: Vec<BoxElement>,
     created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    editor: Option<EditorSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +113,7 @@ struct IndexRow {
 pub struct HistoryStore {
     root: PathBuf,
     fail_rename: AtomicBool,
+    fail_request: AtomicBool,
 }
 
 impl HistoryStore {
@@ -111,6 +124,7 @@ impl HistoryStore {
         Ok(Self {
             root,
             fail_rename: AtomicBool::new(false),
+            fail_request: AtomicBool::new(false),
         })
     }
 
@@ -118,28 +132,21 @@ impl HistoryStore {
         self.fail_rename.store(true, Ordering::SeqCst);
     }
 
+    pub fn fail_next_request_write(&self) {
+        self.fail_request.store(true, Ordering::SeqCst);
+    }
+
     pub fn begin(
         &self,
         id: &JobId,
         request: &JobRequest,
         submitted: &Submitted,
+        editor: Option<&EditorSnapshot>,
     ) -> Result<Entry, StoreError> {
         let dir = self.entry_dir(id)?;
         fs::create_dir_all(&dir).map_err(io_err)?;
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(io_err)?;
-        let stored = StoredRequest {
-            model_id: request.model_id.clone(),
-            compiled_prompt: request.compiled_prompt.clone(),
-            params: serde_json::Value::Object(request.params.clone().into_iter().collect()),
-            images: request.images.iter().map(EncodedImage::summary).collect(),
-            box_snapshot: request.box_snapshot.clone(),
-            created_at: request.created_at.clone(),
-        };
-        write_private(
-            &dir.join("request.json"),
-            &serde_json::to_vec_pretty(&stored)
-                .map_err(|err| StoreError::Protocol(err.to_string()))?,
-        )?;
+        self.write_request(&dir, request, editor)?;
         let state = JobState::Polling {
             attempt: 0,
             progress: None,
@@ -232,9 +239,10 @@ impl HistoryStore {
         result_bytes: &[u8],
         mime: &str,
         thumb_bytes: &[u8],
+        editor: Option<&EditorSnapshot>,
     ) -> Result<(), StoreError> {
         let dir = self.prepare_dir(id)?;
-        self.write_request(&dir, request)?;
+        self.write_request(&dir, request, editor)?;
         let file_name = match mime {
             "image/jpeg" => "result.jpg",
             "image/webp" => "result.webp",
@@ -276,9 +284,10 @@ impl HistoryStore {
         id: &JobId,
         request: &JobRequest,
         error: &ProviderError,
+        editor: Option<&EditorSnapshot>,
     ) -> Result<(), StoreError> {
         let dir = self.prepare_dir(id)?;
-        self.write_request(&dir, request)?;
+        self.write_request(&dir, request, editor)?;
         let state = JobState::Failed {
             error: error.clone(),
         };
@@ -383,6 +392,17 @@ impl HistoryStore {
         fs::read(path).ok()
     }
 
+    pub fn load_editor(&self, id: &JobId) -> Result<Option<EditorSnapshot>, StoreError> {
+        let path = self.entry_dir(id)?.join("request.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(path).map_err(io_err)?;
+        let stored: StoredRequest =
+            serde_json::from_slice(&bytes).map_err(|err| StoreError::Protocol(err.to_string()))?;
+        Ok(stored.editor)
+    }
+
     pub fn load_request(&self, id: &JobId) -> Result<LoadedRequest, StoreError> {
         let path = self.entry_dir(id)?.join("request.json");
         let bytes = fs::read(path).map_err(io_err)?;
@@ -482,7 +502,15 @@ impl HistoryStore {
         Ok(dir)
     }
 
-    fn write_request(&self, dir: &std::path::Path, request: &JobRequest) -> Result<(), StoreError> {
+    fn write_request(
+        &self,
+        dir: &std::path::Path,
+        request: &JobRequest,
+        editor: Option<&EditorSnapshot>,
+    ) -> Result<(), StoreError> {
+        if self.fail_request.swap(false, Ordering::SeqCst) {
+            return Err(StoreError::Io("request write failed".into()));
+        }
         let stored = StoredRequest {
             model_id: request.model_id.clone(),
             compiled_prompt: request.compiled_prompt.clone(),
@@ -490,6 +518,7 @@ impl HistoryStore {
             images: request.images.iter().map(EncodedImage::summary).collect(),
             box_snapshot: request.box_snapshot.clone(),
             created_at: request.created_at.clone(),
+            editor: editor.cloned(),
         };
         write_private(
             &dir.join("request.json"),
@@ -601,7 +630,7 @@ fn io_err(error: impl std::fmt::Display) -> StoreError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Completion, HistoryStore, provider_name};
+    use super::{Completion, EditorSnapshot, HistoryStore, provider_name};
     use crate::geometry::Size;
     use crate::image_prep::ImageSummary;
     use crate::job::{EncodedImage, JobRequest, JobState};
@@ -689,7 +718,7 @@ mod tests {
         assert_eq!(mode_of(&root), 0o700);
         let id = JobId::parse("job1").unwrap();
         store
-            .begin(&id, &request_with_images(), &submitted("job1"))
+            .begin(&id, &request_with_images(), &submitted("job1"), None)
             .unwrap();
         store
             .complete(
@@ -742,7 +771,7 @@ mod tests {
         {
             let store = HistoryStore::open(&root).unwrap();
             store
-                .begin(&id, &request_with_images(), &submitted("inflight1"))
+                .begin(&id, &request_with_images(), &submitted("inflight1"), None)
                 .unwrap();
         }
         let store = HistoryStore::open(&root).unwrap();
@@ -773,7 +802,7 @@ mod tests {
         let store = HistoryStore::open(&root).unwrap();
         let id = JobId::parse("keepme").unwrap();
         store
-            .begin(&id, &request_with_images(), &submitted("keepme"))
+            .begin(&id, &request_with_images(), &submitted("keepme"), None)
             .unwrap();
         let before = fs::read(root.join("history.json")).unwrap();
         store.fail_next_index_rename();
@@ -792,7 +821,7 @@ mod tests {
             let id = JobId::parse(name).unwrap();
             let mut request = request_with_images();
             request.created_at = format!("2026-10-15T00:00:0{index}Z");
-            store.begin(&id, &request, &submitted(name)).unwrap();
+            store.begin(&id, &request, &submitted(name), None).unwrap();
             store
                 .complete(
                     &id,
@@ -805,7 +834,7 @@ mod tests {
         }
         let flying = JobId::parse("flying").unwrap();
         store
-            .begin(&flying, &request_with_images(), &submitted("flying"))
+            .begin(&flying, &request_with_images(), &submitted("flying"), None)
             .unwrap();
         store.evict_to(3, u64::MAX).unwrap();
         let ids: Vec<_> = store
@@ -853,7 +882,7 @@ mod tests {
         let store = HistoryStore::open(&root).unwrap();
         let id = JobId::parse("gifjob").unwrap();
         store
-            .begin(&id, &request_with_images(), &submitted("gifjob"))
+            .begin(&id, &request_with_images(), &submitted("gifjob"), None)
             .unwrap();
         store
             .complete(
@@ -876,7 +905,7 @@ mod tests {
         let store = HistoryStore::open(&root).unwrap();
         let id = JobId::parse("locked").unwrap();
         store
-            .begin(&id, &request_with_images(), &submitted("locked"))
+            .begin(&id, &request_with_images(), &submitted("locked"), None)
             .unwrap();
         let before = fs::read(root.join("history.json")).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o500)).unwrap();
@@ -898,7 +927,7 @@ mod tests {
         let store = HistoryStore::open(&root).unwrap();
         let id = JobId::parse("bfljob").unwrap();
         store
-            .begin(&id, &request_with_images(), &submitted("bfljob"))
+            .begin(&id, &request_with_images(), &submitted("bfljob"), None)
             .unwrap();
         let meta: serde_json::Value =
             serde_json::from_slice(&fs::read(root.join("bfljob/meta.json")).unwrap()).unwrap();
@@ -912,7 +941,7 @@ mod tests {
         let store = HistoryStore::open(&root).unwrap();
         let id = JobId::parse("oldjob").unwrap();
         store
-            .begin(&id, &request_with_images(), &submitted("oldjob"))
+            .begin(&id, &request_with_images(), &submitted("oldjob"), None)
             .unwrap();
         let path = root.join("oldjob/meta.json");
         let mut meta: serde_json::Value =
@@ -949,6 +978,7 @@ mod tests {
                 &png,
                 "image/png",
                 b"thumb",
+                None,
             )
             .unwrap();
         assert_eq!(fs::read(root.join("gpng/result.png")).unwrap(), png);
@@ -970,6 +1000,7 @@ mod tests {
                 &jpeg,
                 "image/jpeg",
                 b"thumb",
+                None,
             )
             .unwrap();
         assert_eq!(fs::read(root.join("gjpeg/result.jpg")).unwrap(), jpeg);
@@ -985,5 +1016,105 @@ mod tests {
     #[test]
     fn an_unknown_model_stores_an_empty_provider_string() {
         assert_eq!(provider_name("not-a-model"), "");
+    }
+
+    fn sample_editor() -> EditorSnapshot {
+        EditorSnapshot {
+            prose: "make <cat_1> orange".into(),
+            model_id: "flux-3".into(),
+            values: serde_json::from_value(json!({"safety_tolerance": 4})).unwrap(),
+            aspect_ratio: "16:9".into(),
+        }
+    }
+
+    #[test]
+    fn begin_round_trips_the_editor_snapshot() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        let id = JobId::parse("snap1").unwrap();
+        let editor = sample_editor();
+        store
+            .begin(
+                &id,
+                &request_with_images(),
+                &submitted("snap1"),
+                Some(&editor),
+            )
+            .unwrap();
+        let loaded = store.load_editor(&id).unwrap().expect("snapshot");
+        assert_eq!(loaded, editor);
+        let raw = fs::read(root.join("snap1/request.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(value["editor"]["prose"], "make <cat_1> orange");
+        assert_eq!(value["compiled_prompt"], "a fox");
+    }
+
+    #[test]
+    fn a_request_without_the_editor_field_loads_with_no_snapshot() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        let id = JobId::parse("oldreq").unwrap();
+        store
+            .begin(&id, &request_with_images(), &submitted("oldreq"), None)
+            .unwrap();
+        let path = root.join("oldreq/request.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("editor");
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        assert!(store.load_editor(&id).unwrap().is_none());
+        let loaded = store.load_request(&id).unwrap();
+        assert_eq!(loaded.compiled_prompt, "a fox");
+        assert_eq!(loaded.model_id, "flux-3-image");
+    }
+
+    #[test]
+    fn inline_and_unpolled_writes_keep_the_snapshot_after_the_slot_is_gone() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        let editor = sample_editor();
+        let inline = JobId::parse("inline-snap").unwrap();
+        store
+            .complete_inline(
+                &inline,
+                &request_with_images(),
+                "",
+                "",
+                &png_bytes(4),
+                "image/png",
+                b"thumb",
+                Some(&editor),
+            )
+            .unwrap();
+        assert_eq!(store.load_editor(&inline).unwrap().as_ref(), Some(&editor));
+
+        let failed = JobId::parse("fail-snap").unwrap();
+        store
+            .fail_unpolled(
+                &failed,
+                &request_with_images(),
+                &crate::error::ProviderError::NoImage,
+                Some(&editor),
+            )
+            .unwrap();
+        assert_eq!(store.load_editor(&failed).unwrap().as_ref(), Some(&editor));
+    }
+
+    #[test]
+    fn a_failed_request_write_leaves_no_entry_and_no_snapshot() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        let id = JobId::parse("nowrite").unwrap();
+        store.fail_next_request_write();
+        let failed = store.begin(
+            &id,
+            &request_with_images(),
+            &submitted("nowrite"),
+            Some(&sample_editor()),
+        );
+        assert!(failed.is_err());
+        assert!(store.list().unwrap().is_empty());
+        assert!(store.load_editor(&id).unwrap().is_none());
+        assert!(!root.join("nowrite/request.json").exists());
     }
 }

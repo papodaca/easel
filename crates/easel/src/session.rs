@@ -482,6 +482,7 @@ mod tests {
                     poll_url: "https://api.bfl.ai/v1/get_result?id=job1".parse().unwrap(),
                     quote: None,
                 },
+                None,
             )
             .unwrap();
         history

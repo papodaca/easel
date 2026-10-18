@@ -64,7 +64,7 @@ fn submitted(id: &str, cost: f64) -> Submitted {
 
 fn seed_done(history: &HistoryStore, id: &str) {
     let job = JobId::parse(id).unwrap();
-    history.begin(&job, &request(), &submitted(id, 1.25)).unwrap();
+    history.begin(&job, &request(), &submitted(id, 1.25), None).unwrap();
     history
         .complete(
             &job,
@@ -187,7 +187,7 @@ fn click_shows_actions_and_double_click_promotes(cx: &mut TestAppContext) {
 fn a_failed_entry_strips_controls_and_truncates(cx: &mut TestAppContext) {
     let (_state, strip, history, mut cx) = open(cx);
     let job = JobId::parse("job1").unwrap();
-    history.begin(&job, &request(), &submitted("job1", 1.0)).unwrap();
+    history.begin(&job, &request(), &submitted("job1", 1.0), None).unwrap();
     let mut message = "\u{202E}\u{0001}".to_string();
     message.push_str(&"x".repeat(10 * 1024));
     history
@@ -231,7 +231,7 @@ fn compare_shows_grounding_text_and_keeps_a_wide_ratio_on_nano_banana(
             &png(),
             "image/png",
             &png(),
-        )
+        None)
         .unwrap();
     strip.update(&mut cx, |strip, cx| {
         strip.refresh(cx);

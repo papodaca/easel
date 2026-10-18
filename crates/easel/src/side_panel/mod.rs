@@ -221,14 +221,23 @@ impl SidePanel {
         if !self.validation.read(cx).generate_enabled(cx) {
             return;
         }
-        let request = match crate::jobs::build_request(self.app_state.read(cx)) {
+        let app = self.app_state.read(cx);
+        let request = match crate::jobs::build_request(app) {
             Ok(request) => request,
             Err(message) => {
                 log::warn!("generate refused: {message}");
                 return;
             }
         };
-        runner.update(cx, |runner, cx| runner.submit(request, cx));
+        let editor = easel_core::history::EditorSnapshot {
+            prose: app.scene.prose.clone(),
+            model_id: app.model_id.clone(),
+            values: app.values.clone(),
+            aspect_ratio: app.scene.aspect_ratio.clone().unwrap_or_default(),
+        };
+        runner.update(cx, |runner, cx| {
+            runner.submit_recorded(request, Some(editor), cx);
+        });
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

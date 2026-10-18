@@ -104,9 +104,75 @@ fn an_empty_sheet_submits_no_image_and_stays_empty(cx: &mut TestAppContext) {
     assert!(request.images.is_empty());
     let id = easel_core::providers::JobId::parse("job-empty").unwrap();
     history
-        .complete_inline(&id, &request, "", "", b"png", "image/png", b"thumb")
+        .complete_inline(&id, &request, "", "", b"png", "image/png", b"thumb", None)
         .unwrap();
     assert!(state.read_with(cx, |app, _| app.image.is_none()));
     assert_eq!(history.list().unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui::test]
+fn generate_stores_the_typed_editor_on_the_slot_before_history(cx: &mut TestAppContext) {
+    use easel_core::geometry::Rect;
+    use easel_core::scene::BoxKind;
+    use serde_json::json;
+
+    let root = temp_dir();
+    let history = Arc::new(HistoryStore::open(root.join("history")).unwrap());
+    let transport: Arc<dyn HttpTransport> = Arc::new(FakeTransport::scripted(Vec::new()));
+    let keys = Arc::new(SharedKeys::default());
+    keys.set_session(ProviderId::Bfl, "test-key");
+    let runner = cx.update({
+        let transport = Arc::clone(&transport);
+        let history = Arc::clone(&history);
+        let keys = Arc::clone(&keys);
+        move |cx| {
+            cx.new(|_| {
+                JobRunner::new(
+                    easel_core::providers::resolve_model,
+                    transport,
+                    Arc::new(Resolver(keys)),
+                    history,
+                )
+            })
+        }
+    });
+    let (state, panel) = cx.update(|cx| {
+        let state = cx.new(|_| AppState::new());
+        let panel = cx.new({
+            let state = state.clone();
+            let runner = runner.clone();
+            move |cx| SidePanel::new(state, keys, Some(runner), None, cx)
+        });
+        (state, panel)
+    });
+    state.update(cx, |app, cx| {
+        let id = app.scene.add_box(
+            Rect {
+                x: 10,
+                y: 10,
+                w: 40,
+                h: 40,
+            },
+            BoxKind::Layout,
+        );
+        app.scene.prose = format!("make <{}> orange", id.as_str());
+        app.values.insert("safety_tolerance".into(), json!(4));
+        app.set_aspect_ratio("16:9", cx);
+    });
+    panel.update(cx, |panel, cx| panel.generate(cx));
+    let (editor, request) = runner.read_with(cx, |runner, _| {
+        (
+            runner.first_editor().unwrap(),
+            runner.first_request().unwrap(),
+        )
+    });
+    assert_eq!(editor.prose, "make <box_1> orange");
+    assert_eq!(editor.model_id, "flux-3-image");
+    assert_eq!(editor.aspect_ratio, "16:9");
+    assert_eq!(editor.values.get("safety_tolerance"), Some(&json!(4)));
+    assert_ne!(request.compiled_prompt, editor.prose);
+    assert!(request.compiled_prompt.starts_with("make <box_1> orange "));
+    assert!(history.list().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(root);
 }
