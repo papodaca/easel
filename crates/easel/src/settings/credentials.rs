@@ -272,3 +272,52 @@ async fn each_provider_row_keeps_its_own_test_result(cx: &mut TestAppContext) {
     assert_eq!(seen[0].auth, Some(ProviderId::Krea));
     assert_eq!(seen[1].auth, Some(ProviderId::Bfl));
 }
+
+#[gpui::test]
+async fn google_settings_row_probes_models_with_a_get(cx: &mut TestAppContext) {
+    use easel_core::http::{HttpResponse, Method};
+    use easel_core::model_spec::AuthScheme;
+    use gpui::prelude::*;
+
+    use crate::net::FakeTransport;
+    use crate::notifications::Notifications;
+    use crate::settings::{SettingsPanel, key_probe};
+
+    let probe = key_probe(ProviderId::Google);
+    assert_eq!(probe.method, Method::Get);
+    assert_eq!(
+        probe.url,
+        "https://generativelanguage.googleapis.com/v1beta/models"
+    );
+    assert!(!probe.url.contains("key="));
+    assert_eq!(probe.auth, Some(ProviderId::Google));
+    assert!(matches!(
+        ProviderId::Google.auth_scheme(),
+        AuthScheme::HeaderKey { ref header } if header == "x-goog-api-key"
+    ));
+
+    let transport = Arc::new(FakeTransport::scripted(vec![Ok(HttpResponse {
+        status: 200,
+        headers: Vec::new(),
+        body: b"{}".to_vec(),
+    })]));
+    let notes = cx.new(|_| Notifications::new());
+    let panel = cx.new({
+        let notes = notes.clone();
+        let transport = Arc::clone(&transport);
+        move |cx| SettingsPanel::new(notes, transport, cx)
+    });
+    let titles = panel.read_with(cx, |panel, _| panel.provider_titles());
+    assert!(titles.iter().any(|title| title == "Google"));
+    panel
+        .update(cx, |panel, cx| panel.test_key(ProviderId::Google, cx))
+        .await;
+    let seen = transport.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].method, Method::Get);
+    assert_eq!(seen[0].url, probe.url);
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.row_note(ProviderId::Google).to_owned()),
+        "key accepted"
+    );
+}

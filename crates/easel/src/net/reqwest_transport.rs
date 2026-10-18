@@ -329,7 +329,12 @@ fn loopback_http(url: &str) -> bool {
 fn credential_name(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-key"
+        "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "set-cookie"
+            | "x-key"
+            | "x-goog-api-key"
     )
 }
 
@@ -842,6 +847,29 @@ mod tests {
         let debug = format!("{http:?}");
         assert!(debug.contains("<redacted>"), "{debug}");
         assert!(!debug.contains("krea-key-9f3a"), "{debug}");
+    }
+
+    #[test]
+    fn google_api_key_is_redacted_when_the_header_is_not_marked_sensitive() {
+        install_capture();
+        let key = "gemini-secret-key-zz";
+        let url = "https://generativelanguage.googleapis.com/v1beta/models";
+        let mut http = request(
+            Method::Get,
+            url,
+            Body::Json(json!({"model": "gemini-nano-banana-2.1"})),
+        );
+        assert!(!http.url.contains("key="));
+        http.headers.push(HttpHeader {
+            name: "x-goog-api-key".into(),
+            value: key.into(),
+            sensitive: false,
+        });
+        super::log_request(&http);
+        let logged = lines_for(url);
+        assert!(logged.contains("<redacted>"), "{logged}");
+        assert!(!logged.contains(key), "{logged}");
+        assert!(!logged.contains("key="), "{logged}");
     }
 
     #[gpui::test]

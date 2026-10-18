@@ -37,6 +37,7 @@ impl Validation {
             let name = match provider {
                 ProviderId::Bfl => "BFL",
                 ProviderId::Krea => "Krea",
+                ProviderId::Google => "Google",
             };
             messages.push(format!("No {name} API key — open Settings"));
         }

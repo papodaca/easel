@@ -1,4 +1,5 @@
 pub mod bfl;
+pub mod google;
 pub mod krea;
 
 use std::sync::OnceLock;
@@ -20,6 +21,9 @@ impl ModelRegistry {
                     bfl::flux2_pro::model_spec(),
                     krea::krea3::model_spec(),
                     krea::krea2_large::model_spec(),
+                    google::NanoBanana21::model_spec(),
+                    google::NanoBanana2Lite::model_spec(),
+                    google::NanoBananaPro::model_spec(),
                 ]
             })
             .as_slice()
@@ -27,7 +31,7 @@ impl ModelRegistry {
 
     #[must_use]
     pub fn providers() -> &'static [ProviderId] {
-        &[ProviderId::Bfl, ProviderId::Krea]
+        &[ProviderId::Bfl, ProviderId::Krea, ProviderId::Google]
     }
 
     #[must_use]

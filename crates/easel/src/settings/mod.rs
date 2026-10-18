@@ -24,6 +24,7 @@ pub fn key_probe(provider: ProviderId) -> HttpRequest {
     let url = match provider {
         ProviderId::Bfl => "https://api.bfl.ai/v1/get_result?id=nonexistent".to_owned(),
         ProviderId::Krea => format!("https://api.krea.ai/jobs/{}", fresh_uuid()),
+        ProviderId::Google => "https://generativelanguage.googleapis.com/v1beta/models".to_owned(),
     };
     HttpRequest {
         method: Method::Get,
@@ -157,6 +158,7 @@ impl CredentialStore for FailingStore {
 pub struct SessionKeys {
     bfl: Option<Zeroizing<String>>,
     krea: Option<Zeroizing<String>>,
+    google: Option<Zeroizing<String>>,
 }
 
 impl SessionKeys {
@@ -165,6 +167,7 @@ impl SessionKeys {
         match provider {
             ProviderId::Bfl => self.bfl = Some(key),
             ProviderId::Krea => self.krea = Some(key),
+            ProviderId::Google => self.google = Some(key),
         }
     }
 
@@ -172,6 +175,7 @@ impl SessionKeys {
         match provider {
             ProviderId::Bfl => self.bfl = None,
             ProviderId::Krea => self.krea = None,
+            ProviderId::Google => self.google = None,
         }
     }
 
@@ -179,6 +183,7 @@ impl SessionKeys {
         match provider {
             ProviderId::Bfl => self.bfl.clone(),
             ProviderId::Krea => self.krea.clone(),
+            ProviderId::Google => self.google.clone(),
         }
     }
 }
@@ -426,7 +431,10 @@ impl SettingsPanel {
         cx.spawn(async move |this, cx| {
             let result = response.await;
             let (text, level) = match result {
-                Ok(response) if response.status == 401 || response.status == 403 => {
+                Ok(response)
+                    if response.status == 401
+                        || (provider != ProviderId::Google && response.status == 403) =>
+                {
                     ("invalid key", ToastLevel::Error)
                 }
                 Ok(_) => ("key accepted", ToastLevel::Info),
@@ -548,6 +556,7 @@ impl Render for SettingsPanel {
             let slug = match provider {
                 ProviderId::Bfl => "bfl",
                 ProviderId::Krea => "krea",
+                ProviderId::Google => "google",
             };
             let reveal_label = if revealed { "Hide" } else { "Reveal" };
             column = column

@@ -81,6 +81,7 @@ impl fmt::Display for TransportError {
 pub struct MapKeys {
     bfl: Option<String>,
     krea: Option<String>,
+    google: Option<String>,
 }
 
 #[cfg(test)]
@@ -89,6 +90,7 @@ impl MapKeys {
         match provider {
             ProviderId::Bfl => self.bfl = Some(key.into()),
             ProviderId::Krea => self.krea = Some(key.into()),
+            ProviderId::Google => self.google = Some(key.into()),
         }
         self
     }
@@ -100,6 +102,7 @@ impl KeyResolver for MapKeys {
         let key = match provider {
             ProviderId::Bfl => self.bfl.clone(),
             ProviderId::Krea => self.krea.clone(),
+            ProviderId::Google => self.google.clone(),
         };
         key.map(Zeroizing::new)
     }

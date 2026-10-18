@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub enum ProviderId {
     Bfl,
     Krea,
+    Google,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,12 +20,15 @@ const BFL_HOSTS: &[HostRule] = &[HostRule::Exact("api.bfl.ai"), HostRule::Suffix
 
 const KREA_HOSTS: &[HostRule] = &[HostRule::Exact("api.krea.ai"), HostRule::Suffix(".krea.ai")];
 
+const GOOGLE_HOSTS: &[HostRule] = &[HostRule::Exact("generativelanguage.googleapis.com")];
+
 impl ProviderId {
     #[must_use]
     pub fn base_url(self) -> &'static str {
         match self {
             Self::Bfl => "https://api.bfl.ai",
             Self::Krea => "https://api.krea.ai",
+            Self::Google => "https://generativelanguage.googleapis.com",
         }
     }
 
@@ -33,6 +37,7 @@ impl ProviderId {
         match self {
             Self::Bfl => "BFL_API_KEY",
             Self::Krea => "KREA_API_KEY",
+            Self::Google => "GEMINI_API_KEY",
         }
     }
 
@@ -41,6 +46,7 @@ impl ProviderId {
         match self {
             Self::Bfl => "Black Forest Labs",
             Self::Krea => "Krea",
+            Self::Google => "Google",
         }
     }
 
@@ -51,6 +57,9 @@ impl ProviderId {
                 header: "x-key".into(),
             },
             Self::Krea => AuthScheme::Bearer,
+            Self::Google => AuthScheme::HeaderKey {
+                header: "x-goog-api-key".into(),
+            },
         }
     }
 
@@ -59,6 +68,7 @@ impl ProviderId {
         match self {
             Self::Bfl => BFL_HOSTS,
             Self::Krea => KREA_HOSTS,
+            Self::Google => GOOGLE_HOSTS,
         }
     }
 
@@ -244,6 +254,41 @@ mod tests {
         assert!(!ProviderId::Bfl.allows_url("https://bfl.ai.evil.example/x"));
         assert!(!ProviderId::Bfl.allows_url("http://api.bfl.ai/x"));
         assert!(!ProviderId::Bfl.allows_url("https://api.krea.ai/x"));
+    }
+
+    #[test]
+    fn google_allows_only_the_generative_language_host() {
+        use crate::providers::ModelRegistry;
+
+        assert_eq!(ProviderId::Google.env_var(), "GEMINI_API_KEY");
+        assert_eq!(ProviderId::Google.display_name(), "Google");
+        assert!(matches!(
+            ProviderId::Google.auth_scheme(),
+            AuthScheme::HeaderKey { ref header } if header == "x-goog-api-key"
+        ));
+        assert!(
+            ProviderId::Google
+                .allows_url("https://generativelanguage.googleapis.com/v1beta/interactions")
+        );
+        assert!(!ProviderId::Google.allows_url("https://evil.example/x"));
+        assert!(
+            !ProviderId::Google
+                .allows_url("http://generativelanguage.googleapis.com/v1beta/interactions")
+        );
+        assert!(ModelRegistry::providers().contains(&ProviderId::Google));
+        let ids: Vec<_> = ModelRegistry::specs()
+            .iter()
+            .filter(|spec| spec.provider == ProviderId::Google)
+            .map(|spec| spec.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "gemini-nano-banana-2.1",
+                "gemini-3.1-flash-lite-image",
+                "gemini-3-pro-image",
+            ]
+        );
     }
 
     #[test]
