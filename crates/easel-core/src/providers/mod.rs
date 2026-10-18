@@ -102,6 +102,7 @@ pub struct InlineImage {
     pub bytes: Vec<u8>,
     pub mime: String,
     pub interaction_id: String,
+    pub suggestion: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]

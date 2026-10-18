@@ -41,6 +41,13 @@ impl Validation {
             };
             messages.push(format!("No {name} API key — open Settings"));
         }
+        if provider == ProviderId::Google
+            && let Ok(request) = crate::jobs::build_request(app)
+            && easel_core::providers::google::posted_json_len(app.spec(), &request)
+                > easel_core::providers::google::BODY_CAP
+        {
+            messages.push("The request is over 20 MB. Remove a reference.".into());
+        }
         messages
     }
 

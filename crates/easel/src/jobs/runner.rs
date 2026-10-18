@@ -494,6 +494,7 @@ impl JobRunner {
             &id,
             &request,
             &image.interaction_id,
+            &image.suggestion,
             &image.bytes,
             &image.mime,
             &thumb,
@@ -1331,6 +1332,39 @@ mod tests {
             std::fs::read(harness.root.join(&id).join("result.jpg")).unwrap(),
             bytes
         );
+    }
+
+    #[gpui::test]
+    fn a_grounded_response_stores_the_suggestion_and_does_not_fetch_the_citation(
+        cx: &mut TestAppContext,
+    ) {
+        let bytes = png();
+        let data = EncodedImage {
+            media_type: "image/png".into(),
+            bytes,
+            width: 1,
+            height: 1,
+            content_hash: String::new(),
+        }
+        .base64();
+        let suggestion = "<div class='search'>cats</div>";
+        let body = format!(
+            r#"{{"id":"grounded","output_image":{{"mime_type":"image/png","data":"{data}"}},"search_suggestions":"{suggestion}","url_citation":[{{"url":"https://cite.example/a"}}]}}"#
+        );
+        let harness = open_google(cx, vec![Ok(http(200, body))]);
+        harness
+            .runner
+            .update(cx, |runner, cx| runner.submit(google_request(), cx));
+        cx.run_until_parked();
+        assert!(
+            harness
+                .transport
+                .seen()
+                .iter()
+                .all(|request| !request.url.contains("cite.example"))
+        );
+        let id = harness.history.list().unwrap()[0].id.clone();
+        assert_eq!(harness.history.suggestion(&id), suggestion);
     }
 
     #[gpui::test]

@@ -208,6 +208,65 @@ fn a_failed_entry_strips_controls_and_truncates(cx: &mut TestAppContext) {
     assert!(!line.contains('\u{0001}') && !detail.contains('\u{0001}'));
 }
 
+#[gpui::test]
+fn compare_shows_grounding_text_and_keeps_a_wide_ratio_on_nano_banana(
+    cx: &mut TestAppContext,
+) {
+    use serde_json::json;
+
+    let (state, strip, history, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| app.set_model("gemini-3-pro-image", cx));
+    let mut job = request();
+    job.model_id = "gemini-nano-banana-2.1".into();
+    job.compiled_prompt = "a cat".into();
+    job.params.insert("aspect_ratio".into(), json!("1:8"));
+    job.params.insert("resolution".into(), json!("1K"));
+    let suggestion = "<div class=\"search\">cats</div>";
+    history
+        .complete_inline(
+            &JobId::parse("gcmp").unwrap(),
+            &job,
+            "interaction",
+            suggestion,
+            &png(),
+            "image/png",
+            &png(),
+        )
+        .unwrap();
+    strip.update(&mut cx, |strip, cx| {
+        strip.refresh(cx);
+        strip.select(0, cx);
+        strip.press("Compare", cx);
+    });
+    let (model, ratio, inspection) = state.read_with(&cx, |app, _| {
+        (
+            app.model_id.clone(),
+            app.values.get("aspect_ratio").cloned(),
+            app.inspection.clone(),
+        )
+    });
+    assert_eq!(model, "gemini-nano-banana-2.1");
+    assert_eq!(ratio, Some(json!("1:8")));
+    let inspection = inspection.expect("compare");
+    assert_eq!(inspection.prompt, "a cat");
+    assert_eq!(inspection.suggestion, suggestion);
+    assert!(
+        inspection
+            .rows
+            .iter()
+            .any(|(key, _)| key == "aspect_ratio")
+    );
+    state.update(&mut cx, |app, cx| {
+        let params = app.values.clone();
+        app.set_model("gemini-3-pro-image", cx);
+        app.values = app.reconcile_values(params);
+    });
+    assert_ne!(
+        state.read_with(&cx, |app, _| app.values.get("aspect_ratio").cloned()),
+        Some(json!("1:8"))
+    );
+}
+
 fn http(status: u16, body: impl AsRef<[u8]>) -> easel_core::http::HttpResponse {
     easel_core::http::HttpResponse {
         status,

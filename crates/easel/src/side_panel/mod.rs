@@ -241,6 +241,9 @@ impl Render for SidePanel {
                     .flex_col()
                     .gap(px(8.))
                     .child(div().text_sm().child(inspection.prompt.clone()))
+                    .when(!inspection.suggestion.is_empty(), |body| {
+                        body.child(div().text_sm().child(inspection.suggestion.clone()))
+                    })
                     .children(inspection.rows.iter().map(|(key, value)| {
                         div().flex().flex_col().gap(px(2.)).child(
                             div()

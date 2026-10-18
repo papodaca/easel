@@ -248,12 +248,14 @@ impl BottomStrip {
         let Ok(loaded) = self.history.load_request(&id) else {
             return;
         };
-        let inspection = inspection_from(&loaded);
+        let mut inspection = inspection_from(&loaded);
+        inspection.suggestion =
+            easel_core::text::sanitize_for_display(&self.history.suggestion(&id), DETAIL_LIMIT);
         let model_id = loaded.model_id.clone();
         let params = loaded.params.into_iter().collect();
         self.app_state.update(cx, move |app, cx| {
             app.set_model(&model_id, cx);
-            app.values = params;
+            app.values = app.reconcile_values(params);
             app.inspection = Some(inspection);
             cx.notify();
         });

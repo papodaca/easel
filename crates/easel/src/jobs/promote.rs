@@ -10,6 +10,7 @@ use crate::image_load::decode_image;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Inspection {
     pub prompt: String,
+    pub suggestion: String,
     pub rows: Vec<(String, String)>,
     pub boxes: Vec<BoxElement>,
 }
@@ -41,6 +42,7 @@ pub fn inspection_from(loaded: &LoadedRequest) -> Inspection {
     }
     Inspection {
         prompt: loaded.compiled_prompt.clone(),
+        suggestion: String::new(),
         rows,
         boxes: loaded.box_snapshot.clone(),
     }

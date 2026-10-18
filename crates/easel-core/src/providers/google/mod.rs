@@ -138,9 +138,13 @@ fn image_spec(
     }
 }
 
-fn inline_steps(images: &[crate::job::EncodedImage]) -> Vec<crate::providers::ReferenceStep> {
+fn inline_steps(
+    images: &[crate::job::EncodedImage],
+    max: usize,
+) -> Vec<crate::providers::ReferenceStep> {
     images
         .iter()
+        .take(max)
         .map(|image| {
             crate::providers::ReferenceStep::Inline(crate::providers::ImageInput::RawBase64(
                 image.base64(),
@@ -224,11 +228,17 @@ fn build_google(
             "image_size": image_size,
         }),
     );
-    if request
-        .params
-        .get("grounding")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    let offers_grounding = spec
+        .schema
+        .fields
+        .iter()
+        .any(|field| field.key == "grounding");
+    if offers_grounding
+        && request
+            .params
+            .get("grounding")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     {
         body.insert("tools".into(), json!([{ "type": "google_search" }]));
     }
@@ -304,11 +314,35 @@ fn decode_inline(response: &crate::http::HttpResponse) -> Option<crate::provider
         .and_then(|id| id.as_str())
         .unwrap_or("")
         .to_owned();
+    let suggestion = value
+        .get("search_suggestions")
+        .and_then(|suggestion| suggestion.as_str())
+        .unwrap_or("")
+        .to_owned();
     Some(crate::providers::InlineImage {
         bytes,
         mime,
         interaction_id,
+        suggestion,
     })
+}
+
+pub const BODY_CAP: usize = 20 * 1024 * 1024;
+
+#[must_use]
+pub fn posted_json_len(spec: &ModelSpec, request: &crate::job::JobRequest) -> usize {
+    let inputs: Vec<crate::providers::ImageInput> = request
+        .images
+        .iter()
+        .map(|image| crate::providers::ImageInput::RawBase64(image.base64()))
+        .collect();
+    let http = build_google(spec, request, &inputs);
+    match http.body {
+        crate::http::Body::Json(value) => serde_json::to_vec(&value)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX),
+        _ => 0,
+    }
 }
 
 macro_rules! impl_google {
@@ -331,7 +365,7 @@ macro_rules! impl_google {
                 &self,
                 images: &[crate::job::EncodedImage],
             ) -> Vec<crate::providers::ReferenceStep> {
-                inline_steps(images)
+                inline_steps(images, $spec.capabilities.image_slots.max())
             }
 
             fn build_submit(
@@ -580,5 +614,144 @@ mod tests {
         assert!(!stored.contains(key), "{stored}");
         assert!(!stored.contains("x-goog-api-key"), "{stored}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn google_request(model: &str) -> crate::job::JobRequest {
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("resolution".into(), json!("1K"));
+        params.insert("aspect_ratio".into(), json!("1:1"));
+        crate::job::JobRequest {
+            model_id: model.into(),
+            compiled_prompt: "a cat".into(),
+            params,
+            images: Vec::new(),
+            box_snapshot: Vec::new(),
+            created_at: "2026-10-17T00:00:00Z".into(),
+        }
+    }
+
+    fn body_of(model: &str, grounding: Option<bool>) -> serde_json::Value {
+        use crate::providers::Provider;
+        let mut request = google_request(model);
+        if let Some(value) = grounding {
+            request.params.insert("grounding".into(), json!(value));
+        }
+        let provider: Box<dyn Provider> = match model {
+            "gemini-3.1-flash-lite-image" => Box::new(NanoBanana2Lite),
+            "gemini-3-pro-image" => Box::new(NanoBananaPro),
+            _ => Box::new(NanoBanana21),
+        };
+        let http = provider.build_submit(&request, &[]);
+        let crate::http::Body::Json(body) = http.body else {
+            panic!("json");
+        };
+        body
+    }
+
+    #[test]
+    fn grounding_sends_one_search_tool_and_names_the_thirty_day_copy() {
+        let off = body_of("gemini-nano-banana-2.1", Some(false));
+        assert!(off.get("tools").is_none());
+        let on = body_of("gemini-nano-banana-2.1", Some(true));
+        assert_eq!(on["tools"], json!([{ "type": "google_search" }]));
+        assert!(on.get("image_search").is_none());
+        let help = spec("gemini-nano-banana-2.1")
+            .schema
+            .fields
+            .iter()
+            .find(|field| field.key == "grounding")
+            .and_then(|field| field.help.clone());
+        assert_eq!(
+            help.as_deref(),
+            Some("Google keeps the prompt and the output for 30 days.")
+        );
+        let lite = body_of("gemini-3.1-flash-lite-image", Some(true));
+        assert!(lite.get("tools").is_none());
+        assert!(
+            spec("gemini-3.1-flash-lite-image")
+                .schema
+                .fields
+                .iter()
+                .all(|field| field.key != "grounding")
+        );
+    }
+
+    #[test]
+    fn fourteen_images_are_sent_and_the_fifteenth_is_not() {
+        use crate::job::EncodedImage;
+        use crate::providers::Provider;
+        let images: Vec<EncodedImage> = (0..15)
+            .map(|index| EncodedImage {
+                media_type: "image/png".into(),
+                bytes: vec![index],
+                width: 8,
+                height: 8,
+                content_hash: format!("h{index}"),
+            })
+            .collect();
+        assert_eq!(NanoBanana21.reference_steps(&images).len(), 14);
+        assert_eq!(NanoBanana2Lite.reference_steps(&images).len(), 14);
+        assert_eq!(NanoBananaPro.reference_steps(&images).len(), 14);
+        let mut request = google_request("gemini-nano-banana-2.1");
+        request.images = images;
+        let http = NanoBanana21.build_submit(
+            &request,
+            &request
+                .images
+                .iter()
+                .take(14)
+                .map(|image| crate::providers::ImageInput::RawBase64(image.base64()))
+                .collect::<Vec<_>>(),
+        );
+        let crate::http::Body::Json(body) = http.body else {
+            panic!("json");
+        };
+        assert_eq!(body["input"].as_array().unwrap().len(), 15);
+    }
+
+    #[test]
+    fn a_body_of_twenty_megabytes_stays_sendable_and_one_byte_over_does_not() {
+        use crate::job::EncodedImage;
+        let spec = NanoBanana21::model_spec();
+        let mut request = google_request("gemini-nano-banana-2.1");
+        let mut size = 15_000_000;
+        request.images = vec![EncodedImage {
+            media_type: "image/png".into(),
+            bytes: vec![9; size],
+            width: 8,
+            height: 8,
+            content_hash: "big".into(),
+        }];
+        for _ in 0..6 {
+            let len = super::posted_json_len(spec, &request);
+            let delta = len as isize - super::BODY_CAP as isize;
+            if delta == 0 {
+                break;
+            }
+            let step = (delta.unsigned_abs() * 3 / 4).max(1);
+            if delta > 0 {
+                size = size.saturating_sub(step);
+            } else {
+                size += step;
+            }
+            request.images[0].bytes.resize(size, 9);
+        }
+        let mut len = super::posted_json_len(spec, &request);
+        let mut guard = 0;
+        while len > super::BODY_CAP && guard < 16 {
+            let extra = len - super::BODY_CAP;
+            let step = (extra * 3 / 4).max(1);
+            size = size.saturating_sub(step);
+            request.images[0].bytes.resize(size, 9);
+            len = super::posted_json_len(spec, &request);
+            guard += 1;
+        }
+        while len < super::BODY_CAP {
+            request.compiled_prompt.push('a');
+            len = super::posted_json_len(spec, &request);
+        }
+        assert_eq!(len, super::BODY_CAP);
+        request.compiled_prompt.push('b');
+        assert_eq!(super::posted_json_len(spec, &request), super::BODY_CAP + 1);
     }
 }

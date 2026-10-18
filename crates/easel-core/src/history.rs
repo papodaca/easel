@@ -74,6 +74,8 @@ struct Meta {
     provider: String,
     #[serde(default)]
     interaction_id: String,
+    #[serde(default)]
+    suggestion: String,
     created_at: String,
     cost: Option<f64>,
     prompt: Option<String>,
@@ -153,6 +155,7 @@ impl HistoryStore {
             poll_url: Some(submitted.poll_url.to_string()),
             error: None,
             interaction_id: String::new(),
+            suggestion: String::new(),
         };
         self.write_meta(id, &meta)?;
         self.upsert_row(IndexRow {
@@ -225,6 +228,7 @@ impl HistoryStore {
         id: &JobId,
         request: &JobRequest,
         interaction_id: &str,
+        suggestion: &str,
         result_bytes: &[u8],
         mime: &str,
         thumb_bytes: &[u8],
@@ -253,6 +257,7 @@ impl HistoryStore {
             poll_url: None,
             error: None,
             interaction_id: interaction_id.to_owned(),
+            suggestion: suggestion.to_owned(),
         };
         self.write_meta(id, &meta)?;
         self.upsert_row(IndexRow {
@@ -288,6 +293,7 @@ impl HistoryStore {
             poll_url: None,
             error: Some(error.clone()),
             interaction_id: String::new(),
+            suggestion: String::new(),
         };
         self.write_meta(id, &meta)?;
         self.upsert_row(IndexRow {
@@ -298,6 +304,12 @@ impl HistoryStore {
             cost: None,
         })?;
         Ok(())
+    }
+
+    pub fn suggestion(&self, id: &JobId) -> String {
+        self.read_meta(id)
+            .map(|meta| meta.suggestion)
+            .unwrap_or_default()
     }
 
     pub fn fail(&self, id: &JobId, error: &ProviderError) -> Result<(), StoreError> {
@@ -931,6 +943,7 @@ mod tests {
                 &png_id,
                 &request_with_images(),
                 &interaction,
+                "",
                 &png,
                 "image/png",
                 b"thumb",
@@ -950,6 +963,7 @@ mod tests {
             .complete_inline(
                 &jpeg_id,
                 &request_with_images(),
+                "",
                 "",
                 &jpeg,
                 "image/jpeg",
