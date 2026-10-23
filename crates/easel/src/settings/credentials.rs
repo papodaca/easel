@@ -94,6 +94,34 @@ fn xai_env_beats_the_store_keyed_by_base_url() {
 }
 
 #[test]
+fn chutes_env_beats_the_store_keyed_by_base_url() {
+    let store = MemoryStore::default();
+    store.write(ProviderId::Chutes, "store-key").expect("write");
+    assert!(store.stores_under(ProviderId::Chutes.base_url()));
+    assert_eq!(ProviderId::Chutes.base_url(), "https://api.chutes.ai");
+    let mut session = SessionKeys::default();
+    session.set(ProviderId::Chutes, "session-key");
+    let env = std::collections::HashMap::from([(
+        ProviderId::Chutes.env_var().to_owned(),
+        "env-key".to_owned(),
+    )]);
+    let resolved = resolve_key(ProviderId::Chutes, &env, &store, &session).expect("env");
+    assert_eq!(resolved.0.as_str(), "env-key");
+    assert_eq!(resolved.1, Source::Env);
+    assert_eq!(ProviderId::Chutes.env_var(), "CHUTES_API_KEY");
+
+    let store_read = resolve_key(
+        ProviderId::Chutes,
+        &std::collections::HashMap::new(),
+        &store,
+        &session,
+    )
+    .expect("store");
+    assert_eq!(store_read.0.as_str(), "store-key");
+    assert_eq!(store_read.1, Source::Store);
+}
+
+#[test]
 fn krea_env_beats_the_store_keyed_by_base_url() {
     let store = MemoryStore::default();
     store.write(ProviderId::Krea, "store-key").expect("write");
@@ -496,6 +524,23 @@ async fn xai_settings_probe_uses_get_api_key(cx: &mut TestAppContext) {
             note
         );
     }
+}
+
+#[test]
+fn chutes_probe_is_a_get_of_the_quotas_endpoint() {
+    use crate::settings::key_probe;
+    use easel_core::http::{Body, Method};
+    use easel_core::model_spec::AuthScheme;
+
+    let probe = key_probe(ProviderId::Chutes);
+    assert_eq!(probe.method, Method::Get);
+    assert_eq!(probe.url, "https://api.chutes.ai/users/me/quotas");
+    assert_eq!(probe.auth, Some(ProviderId::Chutes));
+    assert_eq!(probe.body, Body::Empty);
+    assert!(matches!(
+        ProviderId::Chutes.auth_scheme(),
+        AuthScheme::Bearer
+    ));
 }
 
 #[gpui::test]

@@ -12,6 +12,7 @@ pub enum ProviderId {
     OpenAi,
     #[serde(rename = "xai")]
     Xai,
+    Chutes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +31,14 @@ const OPENAI_HOSTS: &[HostRule] = &[HostRule::Exact("api.openai.com")];
 
 const XAI_HOSTS: &[HostRule] = &[HostRule::Exact("api.x.ai")];
 
+const CHUTES_HOSTS: &[HostRule] = &[
+    HostRule::Exact("api.chutes.ai"),
+    HostRule::Exact("vonkaiser-imageclassic.chutes.ai"),
+    HostRule::Exact("vonkaiser-qwen-image-edit-2511.chutes.ai"),
+    HostRule::Exact("vonkaiser-qwen-image-2512.chutes.ai"),
+    HostRule::Exact("vonkaiser-z-image-turbo.chutes.ai"),
+];
+
 impl ProviderId {
     #[must_use]
     pub fn base_url(self) -> &'static str {
@@ -39,6 +48,7 @@ impl ProviderId {
             Self::Google => "https://generativelanguage.googleapis.com",
             Self::OpenAi => "https://api.openai.com",
             Self::Xai => "https://api.x.ai",
+            Self::Chutes => "https://api.chutes.ai",
         }
     }
 
@@ -50,6 +60,7 @@ impl ProviderId {
             Self::Google => "GEMINI_API_KEY",
             Self::OpenAi => "OPENAI_API_KEY",
             Self::Xai => "XAI_API_KEY",
+            Self::Chutes => "CHUTES_API_KEY",
         }
     }
 
@@ -61,6 +72,7 @@ impl ProviderId {
             Self::Google => "Google",
             Self::OpenAi => "OpenAI",
             Self::Xai => "xAI",
+            Self::Chutes => "Chutes",
         }
     }
 
@@ -76,6 +88,7 @@ impl ProviderId {
             },
             Self::OpenAi => AuthScheme::Bearer,
             Self::Xai => AuthScheme::Bearer,
+            Self::Chutes => AuthScheme::Bearer,
         }
     }
 
@@ -87,6 +100,7 @@ impl ProviderId {
             Self::Google => GOOGLE_HOSTS,
             Self::OpenAi => OPENAI_HOSTS,
             Self::Xai => XAI_HOSTS,
+            Self::Chutes => CHUTES_HOSTS,
         }
     }
 
@@ -139,6 +153,7 @@ pub enum ImageSlots {
     SingleWithStyleRefs {
         max_style_refs: usize,
     },
+    None,
 }
 
 fn default_image_key() -> String {
@@ -152,6 +167,7 @@ impl ImageSlots {
             Self::List { max, .. } | Self::Numbered { max } => *max,
             Self::Single => 1,
             Self::SingleWithStyleRefs { max_style_refs } => max_style_refs.saturating_add(1),
+            Self::None => 0,
         }
     }
 }
@@ -375,6 +391,52 @@ mod tests {
             serde_json::json!("xai")
         );
         assert!(ModelRegistry::providers().contains(&ProviderId::Xai));
+    }
+
+    #[test]
+    fn chutes_identity_and_host_allowlist() {
+        assert_eq!(ProviderId::Chutes.env_var(), "CHUTES_API_KEY");
+        assert_eq!(ProviderId::Chutes.display_name(), "Chutes");
+        assert_eq!(ProviderId::Chutes.base_url(), "https://api.chutes.ai");
+        assert!(matches!(
+            ProviderId::Chutes.auth_scheme(),
+            AuthScheme::Bearer
+        ));
+        assert_eq!(
+            serde_json::to_value(ProviderId::Chutes).unwrap(),
+            serde_json::json!("chutes")
+        );
+        assert!(ProviderId::Chutes.allows_url("https://api.chutes.ai/users/me/quotas"));
+        assert!(
+            ProviderId::Chutes.allows_url("https://vonkaiser-imageclassic.chutes.ai/image/flux")
+        );
+        assert!(
+            ProviderId::Chutes
+                .allows_url("https://vonkaiser-qwen-image-edit-2511.chutes.ai/generate")
+        );
+        assert!(
+            ProviderId::Chutes.allows_url("https://vonkaiser-qwen-image-2512.chutes.ai/generate")
+        );
+        assert!(
+            ProviderId::Chutes.allows_url("https://vonkaiser-z-image-turbo.chutes.ai/generate")
+        );
+        assert!(!ProviderId::Chutes.allows_url("https://evil.chutes.ai/x"));
+        assert!(!ProviderId::Chutes.allows_url("http://api.chutes.ai/x"));
+        assert!(!ProviderId::Chutes.allows_url("https://api.chutes.ai.evil.example/x"));
+    }
+
+    #[test]
+    fn the_none_slot_sends_no_images() {
+        use crate::providers::{ImageInput, map_images};
+
+        let slots = ImageSlots::None;
+        assert_eq!(slots.max(), 0);
+        let inputs = vec![
+            ImageInput::RawBase64("one".into()),
+            ImageInput::RawBase64("two".into()),
+        ];
+        assert!(map_images(&slots, &inputs).is_empty());
+        assert!(map_images(&slots, &[]).is_empty());
     }
 
     #[test]

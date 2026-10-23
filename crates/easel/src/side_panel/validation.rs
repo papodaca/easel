@@ -15,6 +15,7 @@ pub(crate) fn missing_key_line(provider: ProviderId) -> String {
         ProviderId::Google => "Google",
         ProviderId::OpenAi => "OpenAI",
         ProviderId::Xai => "xAI",
+        ProviderId::Chutes => "Chutes",
     };
     format!("No {name} API key — open Settings")
 }
@@ -127,5 +128,22 @@ impl Render for Validation {
             );
         }
         column
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use easel_core::model_spec::ProviderId;
+
+    #[test]
+    fn missing_key_lines_name_each_provider() {
+        assert_eq!(
+            super::missing_key_line(ProviderId::Chutes),
+            "No Chutes API key — open Settings"
+        );
+        assert_eq!(
+            super::missing_key_line(ProviderId::Xai),
+            "No xAI API key — open Settings"
+        );
     }
 }

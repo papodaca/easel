@@ -202,7 +202,7 @@ impl AppState {
                     ImageSlots::List { key, .. } if key == "image_urls" => {
                         format!("image_urls[{index}]")
                     }
-                    ImageSlots::List { .. } | ImageSlots::Single => {
+                    ImageSlots::List { .. } | ImageSlots::Single | ImageSlots::None => {
                         format!("ref_image_{index}")
                     }
                 };

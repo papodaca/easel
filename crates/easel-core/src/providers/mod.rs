@@ -236,6 +236,7 @@ pub fn map_images(
                 );
             }
         }
+        ImageSlots::None => {}
     }
     fields
 }

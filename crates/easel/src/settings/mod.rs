@@ -27,6 +27,7 @@ pub fn key_probe(provider: ProviderId) -> HttpRequest {
         ProviderId::Google => "https://generativelanguage.googleapis.com/v1beta/models".to_owned(),
         ProviderId::OpenAi => "https://api.openai.com/v1/models".to_owned(),
         ProviderId::Xai => "https://api.x.ai/v1/api-key".to_owned(),
+        ProviderId::Chutes => "https://api.chutes.ai/users/me/quotas".to_owned(),
     };
     HttpRequest {
         method: Method::Get,
@@ -163,6 +164,7 @@ pub struct SessionKeys {
     google: Option<Zeroizing<String>>,
     openai: Option<Zeroizing<String>>,
     xai: Option<Zeroizing<String>>,
+    chutes: Option<Zeroizing<String>>,
 }
 
 impl SessionKeys {
@@ -174,6 +176,7 @@ impl SessionKeys {
             ProviderId::Google => self.google = Some(key),
             ProviderId::OpenAi => self.openai = Some(key),
             ProviderId::Xai => self.xai = Some(key),
+            ProviderId::Chutes => self.chutes = Some(key),
         }
     }
 
@@ -184,6 +187,7 @@ impl SessionKeys {
             ProviderId::Google => self.google = None,
             ProviderId::OpenAi => self.openai = None,
             ProviderId::Xai => self.xai = None,
+            ProviderId::Chutes => self.chutes = None,
         }
     }
 
@@ -194,6 +198,7 @@ impl SessionKeys {
             ProviderId::Google => self.google.clone(),
             ProviderId::OpenAi => self.openai.clone(),
             ProviderId::Xai => self.xai.clone(),
+            ProviderId::Chutes => self.chutes.clone(),
         }
     }
 }
@@ -606,6 +611,7 @@ fn provider_slug(provider: ProviderId) -> &'static str {
         ProviderId::Google => "google",
         ProviderId::OpenAi => "openai",
         ProviderId::Xai => "xai",
+        ProviderId::Chutes => "chutes",
     }
 }
 
