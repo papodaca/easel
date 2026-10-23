@@ -264,6 +264,54 @@ fn xai_appears_in_the_provider_menu_when_a_key_is_present(cx: &mut TestAppContex
     assert!(providers.contains(&"xAI".to_string()));
 }
 
+#[gpui::test]
+fn chutes_is_hidden_without_a_key_and_lists_the_seven_models_with_one(cx: &mut TestAppContext) {
+    let _env = ProviderEnvGuard::clear();
+    let (_state, panel) = editor_with(cx, Arc::new(SharedKeys::default()));
+    let providers = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.provider_menu().clone()),
+    );
+    assert!(
+        !providers.iter().any(|name| name == "Chutes"),
+        "{providers:?}"
+    );
+
+    let keys = Arc::new(SharedKeys::default());
+    keys.set_session(ProviderId::Chutes, "chutes-key");
+    let (_state, panel) = editor_with(cx, keys);
+    let providers = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.provider_menu().clone()),
+    );
+    assert!(providers.contains(&"Chutes".to_string()), "{providers:?}");
+
+    panel.update(cx, |panel, cx| panel.choose_provider("Chutes", cx));
+    let models = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.model_menu().clone()),
+    );
+    assert_eq!(
+        models,
+        [
+            "FLUX.1 schnell",
+            "Dreamshaper XL",
+            "iLustMix v80",
+            "Juggernaut XL",
+            "Qwen Image Edit 2511",
+            "Qwen Image 2512",
+            "Z-Image Turbo",
+        ]
+    );
+    assert_eq!(
+        selected(
+            cx,
+            panel.read_with(cx, |panel, _| panel.model_menu().clone())
+        ),
+        "FLUX.1 schnell"
+    );
+}
+
 struct ProviderEnvGuard {
     saved: Vec<(&'static str, Option<String>)>,
 }

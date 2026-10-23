@@ -1072,6 +1072,48 @@ fn xai_validation(
     cx.new(|cx| Validation::new(state, keys, cx))
 }
 
+fn chutes_validation(
+    cx: &mut VisualTestContext,
+    state: gpui::Entity<AppState>,
+) -> gpui::Entity<Validation> {
+    let keys: Arc<dyn crate::net::KeyResolver> =
+        Arc::new(MapKeys::default().insert(ProviderId::Chutes, "chutes-key"));
+    cx.new(|cx| Validation::new(state, keys, cx))
+}
+
+fn chutes_submit(app: &AppState) -> easel_core::http::HttpRequest {
+    use easel_core::providers::ReferenceStep;
+
+    let provider = easel_core::providers::resolve_model(&app.model_id).expect("provider");
+    let request = crate::jobs::build_request(app).expect("request");
+    let images = provider
+        .reference_steps(&request.images)
+        .into_iter()
+        .filter_map(|step| match step {
+            ReferenceStep::Inline(image) => Some(image),
+            ReferenceStep::Upload { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    provider.build_submit(&request, &images)
+}
+
+fn chutes_image() -> Arc<crate::image_load::DecodedImage> {
+    decoded(image::RgbaImage::from_pixel(
+        256,
+        256,
+        image::Rgba([20, 40, 60, 255]),
+    ))
+}
+
+fn attach_chutes_prepared(app: &mut AppState, cx: &mut gpui::Context<AppState>, extras: usize) {
+    app.set_image(chutes_image(), cx);
+    for _ in 0..extras {
+        app.scene
+            .add_reference(easel_core::scene::ImageRef::new("ref", 256, 256));
+        app.extras.push(chutes_image());
+    }
+}
+
 fn select_view(
     form: &gpui::Entity<SchemaForm>,
     cx: &VisualTestContext,
@@ -1238,4 +1280,151 @@ fn switching_back_to_flux_keeps_the_prompt_canvas_and_request(cx: &mut TestAppCo
     assert_eq!(prose, "keep this prompt");
     assert!(canvas);
     assert_eq!(after, before);
+}
+
+#[gpui::test]
+fn a_loaded_picture_on_flux_schnell_generates_with_a_count_notice(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("chutes-flux-schnell", cx);
+        app.scene.prose = "a harbor".into();
+        app.set_image(chutes_image(), cx);
+    });
+    let validation = chutes_validation(&mut cx, state.clone());
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert_eq!(
+        validation.read_with(&cx, |validation, cx| validation.send_notice(cx)),
+        Some("0 of 1 images will be sent".to_string())
+    );
+    let body = state.read_with(&cx, |app, _| chutes_submit(app));
+    let easel_core::http::Body::Json(json) = body.body else {
+        panic!("expected json");
+    };
+    assert!(json.get("image_b64s").is_none(), "{json}");
+    assert!(json.get("image_url").is_none(), "{json}");
+    assert!(json.get("images").is_none(), "{json}");
+}
+
+#[gpui::test]
+fn four_pictures_under_qwen_edit_keep_generate_and_send_three(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("gemini-nano-banana-2.1", cx);
+        app.scene.prose = "combine them".into();
+        attach_chutes_prepared(app, cx, 3);
+    });
+    state.update(&mut cx, |app, cx| {
+        app.set_model("chutes-qwen-image-edit-2511", cx)
+    });
+    let validation = chutes_validation(&mut cx, state.clone());
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert_eq!(
+        validation.read_with(&cx, |validation, cx| validation.send_notice(cx)),
+        Some("3 of 4 images will be sent".to_string())
+    );
+    let body = state.read_with(&cx, |app, _| chutes_submit(app));
+    let easel_core::http::Body::Json(json) = body.body else {
+        panic!("expected json");
+    };
+    let refs = json["image_b64s"].as_array().expect("image_b64s");
+    assert_eq!(refs.len(), 3);
+}
+
+#[gpui::test]
+fn qwen_edit_with_nothing_loaded_blocks_generate(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("chutes-qwen-image-edit-2511", cx);
+        app.scene.prose = "make it blue".into();
+    });
+    let validation = chutes_validation(&mut cx, state);
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "Add at least one image."),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn a_missing_chutes_key_disables_generate(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("chutes-flux-schnell", cx);
+        app.scene.prose = "a harbor".into();
+    });
+    let keys: Arc<dyn crate::net::KeyResolver> = Arc::new(MapKeys::default());
+    let validation = cx.new(|cx| Validation::new(state.clone(), keys, cx));
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "No Chutes API key — open Settings"),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    let validation = chutes_validation(&mut cx, state);
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn switching_z_image_to_flux_schnell_carries_and_drops_the_right_values(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("chutes-z-image-turbo", cx);
+        app.scene.prose = "a lighthouse".into();
+        app.values.insert("guidance_scale".into(), json!(0.0));
+        app.values.insert("width".into(), json!(1024));
+        app.set_image(source_image(), cx);
+    });
+    assert_eq!(stored(&state, &cx, "guidance_scale"), Some(json!(0.0)));
+    state.update(&mut cx, |app, cx| app.set_model("chutes-flux-schnell", cx));
+    let (guidance, width, prose, has_image) = state.read_with(&cx, |app, _| {
+        (
+            app.values.get("guidance_scale").cloned(),
+            app.values.get("width").cloned(),
+            app.scene.prose.clone(),
+            app.image.is_some(),
+        )
+    });
+    assert_eq!(guidance, Some(json!(3.5)));
+    assert_eq!(width, Some(json!(1024)));
+    assert_eq!(prose, "a lighthouse");
+    assert!(has_image);
+    let validation = chutes_validation(&mut cx, state);
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert_eq!(
+        validation.read_with(&cx, |validation, cx| validation.send_notice(cx)),
+        Some("0 of 1 images will be sent".to_string())
+    );
+}
+
+#[gpui::test]
+fn a_none_slot_model_refuses_further_pictures(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("chutes-flux-schnell", cx);
+        app.scene.prose = "a harbor".into();
+        app.set_image(source_image(), cx);
+    });
+    let refs = cx.new(|cx| References::new(state.clone(), cx));
+    refs.update(&mut cx, |refs, cx| refs.add_decoded(source_image(), cx));
+    let message = refs.read_with(&cx, |refs, _| refs.refusal().unwrap_or_default());
+    assert!(message.contains("at most 0 images"), "{message}");
+    assert!(state.read_with(&cx, |app, _| app.image.is_some()));
+    assert!(state.read_with(&cx, |app, _| app.scene.source_image.is_some()));
+}
+
+#[gpui::test]
+fn flux3_still_posts_to_bfl_after_the_chutes_additions(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.scene.prose = "a red square".into();
+        app.set_model("chutes-flux-schnell", cx);
+        app.set_model("flux-3-image", cx);
+    });
+    let url = state.read_with(&cx, |app, _| flux_submit(app).url);
+    assert!(url.starts_with("https://api.bfl.ai"), "{url}");
 }
