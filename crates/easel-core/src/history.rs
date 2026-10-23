@@ -1022,6 +1022,13 @@ mod tests {
     }
 
     #[test]
+    fn a_chutes_model_stamps_provider_chutes() {
+        assert_eq!(provider_name("chutes-flux-schnell"), "chutes");
+        assert_eq!(provider_name("chutes-qwen-image-edit-2511"), "chutes");
+        assert_eq!(provider_name("chutes-z-image-turbo"), "chutes");
+    }
+
+    #[test]
     fn an_unknown_model_stores_an_empty_provider_string() {
         assert_eq!(provider_name("not-a-model"), "");
     }

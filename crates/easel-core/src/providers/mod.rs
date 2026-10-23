@@ -1,4 +1,5 @@
 pub mod bfl;
+pub mod chutes;
 pub mod google;
 pub mod krea;
 pub mod openai;
@@ -33,6 +34,13 @@ impl ModelRegistry {
                     openai::GptImage1Mini::model_spec(),
                     openai::GptImage1::model_spec(),
                     xai::GrokImagine::model_spec(),
+                    chutes::FluxSchnell::model_spec(),
+                    chutes::DreamshaperXl::model_spec(),
+                    chutes::ILustMixV80::model_spec(),
+                    chutes::JuggernautXl::model_spec(),
+                    chutes::QwenImageEdit2511::model_spec(),
+                    chutes::QwenImage2512::model_spec(),
+                    chutes::ZImageTurbo::model_spec(),
                 ]
             })
             .as_slice()
@@ -46,6 +54,7 @@ impl ModelRegistry {
             ProviderId::Google,
             ProviderId::OpenAi,
             ProviderId::Xai,
+            ProviderId::Chutes,
         ]
     }
 
@@ -73,6 +82,13 @@ pub fn resolve_model(model_id: &str) -> Option<Box<dyn Provider>> {
         "gpt-image-1-mini" => Some(Box::new(openai::GptImage1Mini)),
         "gpt-image-1" => Some(Box::new(openai::GptImage1)),
         "grok-imagine-image-2.0" => Some(Box::new(xai::GrokImagine)),
+        "chutes-flux-schnell" => Some(Box::new(chutes::FluxSchnell)),
+        "chutes-dreamshaper-xl" => Some(Box::new(chutes::DreamshaperXl)),
+        "chutes-ilustmix-v80" => Some(Box::new(chutes::ILustMixV80)),
+        "chutes-juggernaut-xl" => Some(Box::new(chutes::JuggernautXl)),
+        "chutes-qwen-image-edit-2511" => Some(Box::new(chutes::QwenImageEdit2511)),
+        "chutes-qwen-image-2512" => Some(Box::new(chutes::QwenImage2512)),
+        "chutes-z-image-turbo" => Some(Box::new(chutes::ZImageTurbo)),
         _ => None,
     }
 }

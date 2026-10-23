@@ -276,6 +276,7 @@ impl ProviderEnvGuard {
             "GEMINI_API_KEY",
             "OPENAI_API_KEY",
             "XAI_API_KEY",
+            "CHUTES_API_KEY",
         ];
         let saved = names
             .iter()

@@ -544,6 +544,52 @@ fn chutes_probe_is_a_get_of_the_quotas_endpoint() {
 }
 
 #[gpui::test]
+async fn chutes_settings_probe_classifies_the_quotas_response(cx: &mut TestAppContext) {
+    use easel_core::http::{HttpResponse, Method};
+    use gpui::prelude::*;
+
+    use crate::net::FakeTransport;
+    use crate::notifications::Notifications;
+    use crate::settings::SettingsPanel;
+
+    for (status, note) in [
+        (401, "invalid key"),
+        (200, "key accepted"),
+        (404, "key accepted"),
+    ] {
+        let transport = Arc::new(FakeTransport::scripted(vec![Ok(HttpResponse {
+            status,
+            headers: Vec::new(),
+            body: b"{}".to_vec(),
+        })]));
+        let notes = cx.new(|_| Notifications::new());
+        let panel = cx.new({
+            let notes = notes.clone();
+            let transport = Arc::clone(&transport);
+            move |cx| SettingsPanel::new(notes, transport, cx)
+        });
+        let titles = panel.read_with(cx, |panel, _| panel.provider_titles());
+        assert!(titles.iter().any(|title| title == "Chutes"), "{titles:?}");
+        panel
+            .update(cx, |panel, cx| panel.test_key(ProviderId::Chutes, cx))
+            .await;
+        let seen = transport.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].method, Method::Get);
+        assert_eq!(seen[0].url, "https://api.chutes.ai/users/me/quotas");
+        assert_eq!(seen[0].auth, Some(ProviderId::Chutes));
+        assert!(
+            !seen.iter().any(|request| request.method == Method::Post),
+            "{seen:?}"
+        );
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.row_note(ProviderId::Chutes).to_owned()),
+            note
+        );
+    }
+}
+
+#[gpui::test]
 fn the_provider_menu_selects_which_key_form_is_active(cx: &mut TestAppContext) {
     use gpui::prelude::*;
 
