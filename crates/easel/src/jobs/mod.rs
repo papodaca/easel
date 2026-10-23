@@ -3,6 +3,8 @@ mod runner;
 mod submit;
 
 #[cfg(test)]
+mod chutes_tests;
+#[cfg(test)]
 mod krea_tests;
 #[cfg(test)]
 mod openai_tests;

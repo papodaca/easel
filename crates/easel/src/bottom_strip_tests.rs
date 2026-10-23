@@ -865,6 +865,39 @@ fn restore_of_an_unknown_model_leaves_the_editor(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_chutes_row_restores_and_rearms_the_edit_block(cx: &mut TestAppContext) {
+    let (_root, strip, history, mut cx) = open_root(cx);
+    let editor = easel_core::history::EditorSnapshot {
+        prose: "make it blue".into(),
+        model_id: "chutes-qwen-image-edit-2511".into(),
+        values: serde_json::from_value(serde_json::json!({"true_cfg_scale": 1.0})).unwrap(),
+        aspect_ratio: String::new(),
+    };
+    seed_snapshot(&history, "job1", &editor);
+    let state = strip.read_with(&cx, |strip, _| strip.app_state());
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    strip.update(&mut cx, |strip, cx| strip.press("Restore", cx));
+    let (model, prose, cfg) = state.read_with(&cx, |app, _| {
+        (
+            app.model_id.clone(),
+            app.scene.prose.clone(),
+            app.values.get("true_cfg_scale").cloned(),
+        )
+    });
+    assert_eq!(model, "chutes-qwen-image-edit-2511");
+    assert_eq!(prose, "make it blue");
+    assert_eq!(cfg, Some(serde_json::json!(1.0)));
+    let errors = state.read_with(&cx, |app, _| app.field_errors(0));
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message == "Add at least one image."),
+        "{errors:?}"
+    );
+}
+
+#[gpui::test]
 fn restore_while_compare_is_open_shows_the_editor_again(cx: &mut TestAppContext) {
     let (_root, strip, history, mut cx) = open_root(cx);
     let editor = editor_snapshot("back to the editor", "flux-3-image", 4, "16:9");
