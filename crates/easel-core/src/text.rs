@@ -18,6 +18,19 @@ pub fn sanitize_for_display(text: &str, max_len: usize) -> String {
     cleaned
 }
 
+/// Truncate to a stored-size cap without splitting a character.
+#[must_use]
+pub fn cap_text(text: &str, cap: usize) -> String {
+    let mut out = String::new();
+    for character in text.chars() {
+        if out.len() + character.len_utf8() > cap {
+            break;
+        }
+        out.push(character);
+    }
+    out
+}
+
 fn is_bidi(character: char) -> bool {
     matches!(character, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }

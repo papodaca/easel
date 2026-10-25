@@ -373,12 +373,10 @@ impl HistoryStore {
         Ok(())
     }
 
-    /// The 2x2 grid metadata stored on an entry, when it is a grid row.
     pub fn grid_meta(&self, id: &JobId) -> Option<GridMeta> {
         self.read_meta(id).ok()?.grid
     }
 
-    /// The stored bytes of each requested quadrant file, in request order.
     pub fn quadrant_bytes(
         &self,
         id: &JobId,
@@ -391,11 +389,14 @@ impl HistoryStore {
 
     fn quadrant_file_bytes(&self, id: &JobId, quadrant: usize) -> Option<Vec<u8>> {
         let dir = self.entry_dir(id).ok()?;
-        ["png", "jpg", "webp", "bin"]
-            .iter()
-            .map(|extension| dir.join(format!("quadrant_{quadrant}.{extension}")))
-            .find(|path| path.exists())
-            .and_then(|path| fs::read(path).ok())
+        for extension in ["png", "jpg", "webp", "bin"] {
+            match fs::read(dir.join(format!("quadrant_{quadrant}.{extension}"))) {
+                Ok(bytes) => return Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return None,
+            }
+        }
+        None
     }
 
     /// Promote unpicked quadrants of a 2x2 grid into standalone History rows.
@@ -712,6 +713,7 @@ impl HistoryStore {
     }
 
     /// Insert a new index row directly ahead of an existing row's id.
+    /// A duplicate id is skipped; a missing anchor inserts at the front.
     fn insert_row_before(&self, row: IndexRow, before: &str) -> Result<(), StoreError> {
         let mut rows = self.read_index()?;
         if !rows.iter().any(|existing| existing.id == row.id) {

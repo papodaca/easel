@@ -855,7 +855,16 @@ impl JobRunner {
                     quadrants: Vec::new(),
                 });
             }
-            self.fetch_grid_part(token, 0, settled_cost, prompt, duration, cx);
+            self.fetch_grid_part(
+                token,
+                0,
+                Completion {
+                    cost: settled_cost,
+                    prompt,
+                    duration,
+                },
+                cx,
+            );
             return;
         }
         let Some(http) = self
@@ -924,9 +933,65 @@ impl JobRunner {
         if self.dead(token) || !self.downloading(token) {
             return;
         }
+        let Some(bytes) = self.triage_download(token, response, cx) else {
+            return;
+        };
+        let thumb = easel_core::image_prep::thumbnail(&bytes, 256).unwrap_or_default();
+        if let Some(slot) = self.slot_mut(token) {
+            slot.bytes = Some(bytes.clone());
+            if let Some(cost) = cost {
+                slot.cost = Some(cost);
+            }
+        }
+        let id = self.server_id(token);
+        let stored = id.as_ref().and_then(|id| {
+            self.history
+                .complete(
+                    id,
+                    &bytes,
+                    "image/png",
+                    &thumb,
+                    &Completion {
+                        cost,
+                        prompt,
+                        duration,
+                    },
+                )
+                .err()
+        });
+        if let Some(error) = stored {
+            self.fail(token, ProviderError::Protocol(error.to_string()), cx);
+            return;
+        }
+        if let Some(slot) = self.slot_mut(token) {
+            let path = id
+                .map(|id| format!("history/{}/result.png", id.as_str()))
+                .unwrap_or_else(|| "result.png".into());
+            let state = std::mem::replace(&mut slot.state, JobState::Queued);
+            slot.state = advance(
+                state,
+                JobEvent::Downloaded {
+                    result_path: path,
+                    cost,
+                },
+            );
+        }
+        cx.notify();
+        self.pump(cx);
+    }
+
+    /// Expire or fail a slot on a bad picture download; the usable bytes come
+    /// back when the download is good.
+    fn triage_download(
+        &mut self,
+        token: u64,
+        response: Result<HttpResponse, TransportError>,
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<u8>> {
         match response {
             Ok(response) if matches!(response.status, 403 | 404 | 410) => {
                 self.expire(token, cx);
+                None
             }
             Err(TransportError::TooLarge { .. }) => {
                 self.fail(
@@ -934,8 +999,12 @@ impl JobRunner {
                     ProviderError::Protocol("result exceeded the size limit".into()),
                     cx,
                 );
+                None
             }
-            Err(_) => self.expire(token, cx),
+            Err(_) => {
+                self.expire(token, cx);
+                None
+            }
             Ok(response) => {
                 if decode_image(&response.body, "result").is_err() {
                     self.fail(
@@ -943,51 +1012,9 @@ impl JobRunner {
                         ProviderError::Protocol("unsupported or oversized result".into()),
                         cx,
                     );
-                    return;
+                    return None;
                 }
-                let thumb =
-                    easel_core::image_prep::thumbnail(&response.body, 256).unwrap_or_default();
-                if let Some(slot) = self.slot_mut(token) {
-                    slot.bytes = Some(response.body.clone());
-                    if let Some(cost) = cost {
-                        slot.cost = Some(cost);
-                    }
-                }
-                let id = self.server_id(token);
-                let stored = id.as_ref().and_then(|id| {
-                    self.history
-                        .complete(
-                            id,
-                            &response.body,
-                            "image/png",
-                            &thumb,
-                            &Completion {
-                                cost,
-                                prompt,
-                                duration,
-                            },
-                        )
-                        .err()
-                });
-                if let Some(error) = stored {
-                    self.fail(token, ProviderError::Protocol(error.to_string()), cx);
-                    return;
-                }
-                if let Some(slot) = self.slot_mut(token) {
-                    let path = id
-                        .map(|id| format!("history/{}/result.png", id.as_str()))
-                        .unwrap_or_else(|| "result.png".into());
-                    let state = std::mem::replace(&mut slot.state, JobState::Queued);
-                    slot.state = advance(
-                        state,
-                        JobEvent::Downloaded {
-                            result_path: path,
-                            cost,
-                        },
-                    );
-                }
-                cx.notify();
-                self.pump(cx);
+                Some(response.body)
             }
         }
     }
@@ -996,9 +1023,7 @@ impl JobRunner {
         &mut self,
         token: u64,
         index: usize,
-        cost: Option<f64>,
-        prompt: Option<String>,
-        duration: Option<f64>,
+        completion: Completion,
         cx: &mut Context<Self>,
     ) {
         let Some(url) = self
@@ -1024,7 +1049,7 @@ impl JobRunner {
         cx.spawn(async move |this, cx| {
             let response = task.await;
             this.update(cx, |runner, cx| {
-                runner.finish_grid_part(token, index, response, cost, prompt, duration, cx);
+                runner.finish_grid_part(token, index, response, completion, cx);
             })
             .ok();
         })
@@ -1036,71 +1061,42 @@ impl JobRunner {
         token: u64,
         index: usize,
         response: Result<HttpResponse, TransportError>,
-        cost: Option<f64>,
-        prompt: Option<String>,
-        duration: Option<f64>,
+        completion: Completion,
         cx: &mut Context<Self>,
     ) {
         if self.dead(token) || !self.downloading(token) {
             return;
         }
-        match response {
-            Ok(response) if matches!(response.status, 403 | 404 | 410) => {
-                self.expire(token, cx);
-            }
-            Err(TransportError::TooLarge { .. }) => {
-                self.fail(
-                    token,
-                    ProviderError::Protocol("result exceeded the size limit".into()),
-                    cx,
-                );
-            }
-            Err(_) => self.expire(token, cx),
-            Ok(response) => {
-                if decode_image(&response.body, "result").is_err() {
-                    self.fail(
-                        token,
-                        ProviderError::Protocol("unsupported or oversized result".into()),
-                        cx,
-                    );
-                    return;
-                }
-                let Some(download) = self
-                    .slot_mut(token)
-                    .and_then(|slot| slot.grid_download.as_mut())
-                else {
-                    return;
-                };
-                if index == 0 {
-                    download.grid_bytes = Some(response.body);
-                } else {
-                    download.quadrants.push(response.body);
-                }
-                let next = index + 1;
-                if next <= 4 {
-                    self.fetch_grid_part(token, next, cost, prompt, duration, cx);
-                    return;
-                }
-                self.finish_grid(token, cost, prompt, duration, cx);
-            }
+        let Some(bytes) = self.triage_download(token, response, cx) else {
+            return;
+        };
+        let Some(download) = self
+            .slot_mut(token)
+            .and_then(|slot| slot.grid_download.as_mut())
+        else {
+            return;
+        };
+        if index == 0 {
+            download.grid_bytes = Some(bytes);
+        } else {
+            download.quadrants.push(bytes);
         }
+        let next = index + 1;
+        if next <= 4 {
+            self.fetch_grid_part(token, next, completion, cx);
+            return;
+        }
+        self.finish_grid(token, completion, cx);
     }
 
-    fn finish_grid(
-        &mut self,
-        token: u64,
-        cost: Option<f64>,
-        prompt: Option<String>,
-        duration: Option<f64>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(slot) = self.slots.iter().find(|slot| slot.token == token) else {
+    fn finish_grid(&mut self, token: u64, completion: Completion, cx: &mut Context<Self>) {
+        let Some(download) = self
+            .slot_mut(token)
+            .and_then(|slot| slot.grid_download.take())
+        else {
             return;
         };
-        let Some(download) = slot.grid_download.as_ref() else {
-            return;
-        };
-        let Some(grid_bytes) = download.grid_bytes.clone() else {
+        let Some(grid_bytes) = download.grid_bytes else {
             self.fail(
                 token,
                 ProviderError::Protocol("grid download was incomplete".into()),
@@ -1108,38 +1104,20 @@ impl JobRunner {
             );
             return;
         };
-        let quadrants = download.quadrants.clone();
+        let quadrants = download.quadrants;
         let grid_meta = GridMeta {
             grid_url: download.grid_url.to_string(),
             images: std::array::from_fn(|index| download.quadrant_urls[index].to_string()),
             picked: [false; 4],
         };
-        let Some(slot) = self.slot_mut(token) else {
+        let Some(id) = self.server_id(token) else {
             return;
         };
-        slot.grid_download = None;
-        let Some(id) = slot
-            .submitted
-            .as_ref()
-            .map(|submitted| submitted.job_id.clone())
-        else {
-            return;
-        };
+        let cost = completion.cost;
         let thumb = easel_core::image_prep::thumbnail(&grid_bytes, 256).unwrap_or_default();
         let stored = self
             .history
-            .complete_grid(
-                &id,
-                &grid_bytes,
-                &quadrants,
-                &thumb,
-                grid_meta,
-                &Completion {
-                    cost,
-                    prompt,
-                    duration,
-                },
-            )
+            .complete_grid(&id, &grid_bytes, &quadrants, &thumb, grid_meta, &completion)
             .err();
         if let Some(error) = stored {
             self.fail(token, ProviderError::Protocol(error.to_string()), cx);

@@ -290,15 +290,7 @@ fn json_body(body: &[u8]) -> Result<Value, ProviderError> {
 }
 
 fn cap_text(text: &str) -> String {
-    let mut out = String::new();
-    for character in text.chars() {
-        let next = out.len() + character.len_utf8();
-        if next > STORED_CAP {
-            break;
-        }
-        out.push(character);
-    }
-    out
+    crate::text::cap_text(text, STORED_CAP)
 }
 
 #[cfg(test)]

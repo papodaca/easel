@@ -41,14 +41,6 @@ enum Slot {
 }
 
 impl Slot {
-    fn max(self) -> usize {
-        match self {
-            Self::None => 0,
-            Self::Single { .. } => 1,
-            Self::List { max, .. } => max,
-        }
-    }
-
     fn image_slots(self) -> ImageSlots {
         match self {
             Self::None => ImageSlots::None,
@@ -1329,7 +1321,7 @@ impl crate::providers::Provider for Apiframe {
     }
 
     fn reference_steps(&self, images: &[EncodedImage]) -> Vec<ReferenceStep> {
-        upload_steps(images, self.descriptor.slot.max())
+        upload_steps(images, self.spec().capabilities.image_slots.max())
     }
 
     fn parse_upload(&self, response: &HttpResponse) -> Result<ImageInput, ProviderError> {
@@ -1614,16 +1606,16 @@ fn failed_error(value: &Value) -> ProviderError {
     }
 }
 
-fn image_at(result: &Value, index: usize) -> Option<url::Url> {
-    let raw = result.get("images")?.get(index)?.as_str()?;
-    if !ProviderId::Apiframe.allows_url(raw) {
-        return None;
-    }
-    raw.parse().ok()
+fn image_url_at(result: &Value, index: usize) -> Option<url::Url> {
+    allowed_url(result.get("images")?.get(index)?.as_str())
 }
 
 fn grid_url_of(result: &Value) -> Option<url::Url> {
-    let raw = result.get("gridUrl")?.as_str()?;
+    allowed_url(result.get("gridUrl")?.as_str())
+}
+
+fn allowed_url(raw: Option<&str>) -> Option<url::Url> {
+    let raw = raw?;
     if !ProviderId::Apiframe.allows_url(raw) {
         return None;
     }
@@ -1645,7 +1637,7 @@ fn completed_outcome(descriptor: &Descriptor, value: &Value) -> PollOutcome {
             ));
         };
         let Some(quadrants) = (0..4)
-            .map(|index| image_at(result, index))
+            .map(|index| image_url_at(result, index))
             .collect::<Option<Vec<_>>>()
             .and_then(|urls| <[url::Url; 4]>::try_from(urls).ok())
         else {
@@ -1661,7 +1653,7 @@ fn completed_outcome(descriptor: &Descriptor, value: &Value) -> PollOutcome {
             grid_urls: Some(quadrants),
         }
     } else {
-        let Some(url) = image_at(result, 0) else {
+        let Some(url) = image_url_at(result, 0) else {
             return PollOutcome::Failed(ProviderError::Protocol(
                 "completed poll had no result url".into(),
             ));
@@ -1707,14 +1699,7 @@ fn error_text(body: &[u8]) -> String {
 }
 
 fn cap_text(text: &str) -> String {
-    let mut out = String::new();
-    for character in text.chars() {
-        if out.len() + character.len_utf8() > STORED_CAP {
-            break;
-        }
-        out.push(character);
-    }
-    out
+    crate::text::cap_text(text, STORED_CAP)
 }
 
 #[cfg(test)]
@@ -1810,7 +1795,7 @@ mod tests {
         spec_of(model).schema.defaults()
     }
 
-    fn posted(model: &str, params: BTreeMap<String, Value>, urls: &[&str]) -> (String, Value) {
+    fn posted(model: &str, params: BTreeMap<String, Value>, urls: &[&str]) -> Value {
         let provider = provider(model);
         let inputs: Vec<ImageInput> = urls
             .iter()
@@ -1828,11 +1813,11 @@ mod tests {
         let Body::Json(body) = http.body else {
             panic!("expected json");
         };
-        (http.url, body)
+        body
     }
 
     fn body_of(model: &str, urls: &[&str]) -> Value {
-        posted(model, defaults(model), urls).1
+        posted(model, defaults(model), urls)
     }
 
     fn encoded(seed: u8) -> EncodedImage {
@@ -2214,11 +2199,11 @@ mod tests {
         assert!(body["fluxParams"].get("seed").is_none());
         let mut zero = defaults("apiframe-flux-1.1-pro");
         zero.insert("seed".into(), json!(0));
-        let (_, body) = posted("apiframe-flux-1.1-pro", zero, &[]);
+        let body = posted("apiframe-flux-1.1-pro", zero, &[]);
         assert!(body["fluxParams"].get("seed").is_none());
         let mut set = defaults("apiframe-flux-1.1-pro");
         set.insert("seed".into(), json!(7));
-        let (_, body) = posted("apiframe-flux-1.1-pro", set, &[]);
+        let body = posted("apiframe-flux-1.1-pro", set, &[]);
         assert_eq!(body["fluxParams"]["seed"], 7);
     }
 
@@ -2339,7 +2324,7 @@ mod tests {
         assert_eq!(body["qwenImageParams"]["task_type"], "text-to-image");
         let mut edit = defaults("apiframe-qwen-image");
         edit.insert("task_type".into(), json!("image-edit"));
-        let (_, body) = posted("apiframe-qwen-image", edit, &urls);
+        let body = posted("apiframe-qwen-image", edit, &urls);
         assert_eq!(body["qwenImageParams"]["task_type"], "image-edit");
     }
 

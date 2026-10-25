@@ -88,6 +88,7 @@ pub struct BottomStrip {
     arm_generation: u64,
     thumbs: HashMap<String, Arc<RenderImage>>,
     previews: HashMap<String, Preview>,
+    grid_images: HashMap<String, Vec<Option<Arc<RenderImage>>>>,
     notes: Option<gpui::Entity<Notifications>>,
     reveal: Arc<dyn Fn(&std::path::Path) -> Result<(), String> + Send + Sync>,
     grid_selection: [bool; 4],
@@ -122,6 +123,7 @@ impl BottomStrip {
             arm_generation: 0,
             thumbs: HashMap::new(),
             previews: HashMap::new(),
+            grid_images: HashMap::new(),
             notes: None,
             reveal: Arc::new(open_result_folder),
             grid_selection: [false; 4],
@@ -586,26 +588,8 @@ impl BottomStrip {
             .as_ref()
             .is_some_and(|id| self.history.result_path(id).is_some());
         let preview = id.as_ref().and_then(|id| self.result_preview(id));
-        let mut actions = if self.pending_discard {
-            vec!["Confirm".into(), "Cancel".into()]
-        } else {
-            actions_for(&state)
-                .into_iter()
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        };
-        if has_editor && !self.pending_discard {
-            actions.insert(0, "Restore".into());
-        }
-        if has_file && !self.pending_discard {
-            let at = actions
-                .iter()
-                .position(|label| label == "Save As")
-                .map(|index| index + 1)
-                .unwrap_or(actions.len());
-            actions.insert(at, "Reveal".into());
-        }
         let show_detail = detail.len() > line.len();
+        let actions = self.row_actions(&state, has_editor, has_file, false);
         Some(HistoryDialog {
             image: preview.as_ref().map(|preview| Arc::clone(&preview.image)),
             pixel_size: preview.map(|preview| (preview.width, preview.height)),
@@ -620,6 +604,7 @@ impl BottomStrip {
     }
 
     pub fn grid_dialog(&mut self, cx: &mut Context<Self>) -> Option<GridDialog> {
+        self.app_state.read(cx).history_item.as_ref()?;
         self.rebuild(cx);
         self.sync_modal(cx);
         let item = self.app_state.read(cx).history_item.clone()?;
@@ -637,39 +622,12 @@ impl BottomStrip {
         let state = self.rows[index].state.clone();
         let has_editor = self.rows[index].editor.is_some();
         let has_file = self.history.result_path(&id).is_some();
-        let images: Vec<Option<Arc<RenderImage>>> = self
-            .history
-            .quadrant_bytes(&id, 0..4)
-            .into_iter()
-            .map(|bytes| {
-                bytes
-                    .and_then(|bytes| decode_image(&bytes, "quadrant").ok())
-                    .map(|decoded| decoded.render)
-            })
-            .collect();
-        let mut actions = if self.pending_discard {
-            vec!["Confirm".into(), "Cancel".into()]
-        } else {
-            actions_for(&state)
-                .into_iter()
-                .filter(|label| *label != "Promote")
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        };
-        if has_editor && !self.pending_discard {
-            actions.insert(0, "Restore".into());
-        }
-        if has_file && !self.pending_discard {
-            let at = actions
-                .iter()
-                .position(|label| label == "Save As")
-                .map(|index| index + 1)
-                .unwrap_or(actions.len());
-            actions.insert(at, "Reveal".into());
-        }
+        let picked = grid.picked;
+        let images = self.quadrant_images(&id);
+        let actions = self.row_actions(&state, has_editor, has_file, true);
         Some(GridDialog {
             images,
-            picked: grid.picked,
+            picked,
             selected: self.grid_selection,
             line,
             cost,
@@ -678,6 +636,56 @@ impl BottomStrip {
             actions,
             confirming: self.pending_discard,
         })
+    }
+
+    fn quadrant_images(&mut self, id: &JobId) -> Vec<Option<Arc<RenderImage>>> {
+        if let Some(cached) = self.grid_images.get(id.as_str()) {
+            return cached.clone();
+        }
+        let images: Vec<Option<Arc<RenderImage>>> = self
+            .history
+            .quadrant_bytes(id, 0..4)
+            .into_iter()
+            .map(|bytes| {
+                bytes
+                    .and_then(|bytes| decode_image(&bytes, "quadrant").ok())
+                    .map(|decoded| decoded.render)
+            })
+            .collect();
+        if images.iter().all(Option::is_some) {
+            self.grid_images
+                .insert(id.as_str().to_string(), images.clone());
+        }
+        images
+    }
+
+    fn row_actions(
+        &self,
+        state: &JobState,
+        has_editor: bool,
+        has_file: bool,
+        hide_promote: bool,
+    ) -> Vec<String> {
+        if self.pending_discard {
+            return vec!["Confirm".into(), "Cancel".into()];
+        }
+        let mut actions: Vec<String> = actions_for(state)
+            .into_iter()
+            .filter(|label| !hide_promote || *label != "Promote")
+            .map(str::to_string)
+            .collect();
+        if has_editor {
+            actions.insert(0, "Restore".into());
+        }
+        if has_file {
+            let at = actions
+                .iter()
+                .position(|label| label == "Save As")
+                .map(|index| index + 1)
+                .unwrap_or(actions.len());
+            actions.insert(at, "Reveal".into());
+        }
+        actions
     }
 
     pub fn toggle_grid_quadrant(&mut self, quadrant: usize, cx: &mut Context<Self>) {
@@ -721,8 +729,6 @@ impl BottomStrip {
         }
         let created_at = crate::jobs::utc_now();
         let _ = self.history.pick_quadrants(&id, &selection, &created_at);
-        self.grid_selection = [false; 4];
-        self.grid_open_for = None;
         self.rebuild(cx);
         self.close_modal(cx);
         cx.notify();

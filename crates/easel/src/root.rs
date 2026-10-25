@@ -325,7 +325,7 @@ impl Root {
             details.push(dialog.model.clone());
         }
         let details = details.join(" · ");
-        let rows: Vec<Vec<usize>> = vec![vec![0, 1], vec![2, 3]];
+        let rows: [[usize; 2]; 2] = [[0, 1], [2, 3]];
         cover_below_title_bar("grid-picker-scrim")
             .debug_selector(|| "grid-picker-scrim".into())
             .flex()

@@ -409,16 +409,10 @@ struct ProviderEnvGuard {
 
 impl ProviderEnvGuard {
     fn clear() -> Self {
-        let names = [
-            "BFL_API_KEY",
-            "KREA_API_KEY",
-            "GEMINI_API_KEY",
-            "OPENAI_API_KEY",
-            "XAI_API_KEY",
-            "CHUTES_API_KEY",
-            "DASHSCOPE_API_KEY",
-            "APIFRAME_API_KEY",
-        ];
+        let names: Vec<&'static str> = easel_core::providers::ModelRegistry::providers()
+            .iter()
+            .map(|provider| provider.env_var())
+            .collect();
         let saved = names
             .iter()
             .map(|name| (*name, std::env::var(name).ok()))

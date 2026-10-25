@@ -1263,7 +1263,7 @@ fn closing_the_picker_without_picking_keeps_every_quadrant(cx: &mut TestAppConte
 
 #[gpui::test]
 fn double_clicking_a_grid_row_never_promotes_the_composite(cx: &mut TestAppContext) {
-    let (state, strip, _runner, history, mut cx) =
+    let (_state, strip, _runner, history, mut cx) =
         grid_runner_open(cx, "grid-double", Vec::new());
     seed_grid(&history, "mjgrid4");
     strip.update(&mut cx, |strip, cx| strip.refresh(cx));
@@ -1278,7 +1278,6 @@ fn double_clicking_a_grid_row_never_promotes_the_composite(cx: &mut TestAppConte
     });
     assert!(dialog_open);
     assert!(image.is_none());
-    let _ = &state;
 }
 
 #[gpui::test]
