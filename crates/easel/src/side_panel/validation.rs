@@ -82,6 +82,21 @@ impl Validation {
             let prepared = usize::from(app.image.is_some()) + app.extras.len();
             messages.extend(easel_core::providers::xai::refusal_messages(prepared));
         }
+        if provider == ProviderId::Qwen {
+            let attached =
+                usize::from(app.scene.source_image.is_some()) + app.scene.references.len();
+            let prepared = usize::from(app.image.is_some()) + app.extras.len();
+            if attached > prepared {
+                messages.push("A prepared image is missing.".into());
+            }
+            if let Ok(request) = crate::jobs::build_request(app) {
+                messages.extend(easel_core::providers::qwen::refusal_messages(
+                    app.spec(),
+                    prepared,
+                    &request.images,
+                ));
+            }
+        }
         messages
     }
 
@@ -95,6 +110,11 @@ impl Validation {
         }
         if app.spec().provider == ProviderId::Xai
             && prepared > easel_core::providers::xai::IMAGE_CAP
+        {
+            return None;
+        }
+        if app.spec().provider == ProviderId::Qwen
+            && prepared > app.spec().capabilities.image_slots.max()
         {
             return None;
         }

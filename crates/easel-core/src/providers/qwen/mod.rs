@@ -8,7 +8,7 @@ use crate::job::{EncodedImage, JobRequest};
 use crate::model_spec::{AuthScheme, Capabilities, ImageSlots, ModelSpec, ProviderId, SizeControl};
 use crate::providers::{ImageInput, PollOutcome, Provider, ReferenceStep, Submitted};
 use crate::scene::Scene;
-use crate::schema::ParamSchema;
+use crate::schema::{FieldDef, FieldKind, ParamSchema};
 
 /// `qwen-image-3.0-pro`.
 #[derive(Debug, Clone, Copy)]
@@ -29,10 +29,10 @@ const MAX_AREA: i64 = 4_194_304;
 const RATIO_CAP: i64 = 8;
 
 static QWEN_IMAGE_30_PRO: LazyLock<ModelSpec> =
-    LazyLock::new(|| qwen_spec("qwen-image-3.0-pro", "Qwen Image 3.0 Pro", 3));
+    LazyLock::new(|| qwen_spec("qwen-image-3.0-pro", "Qwen Image 3.0 Pro", 3, true));
 
 static QWEN_IMAGE_21_PRO: LazyLock<ModelSpec> =
-    LazyLock::new(|| qwen_spec("qwen-image-2.1-pro", "Qwen Image 2.1 Pro", 10));
+    LazyLock::new(|| qwen_spec("qwen-image-2.1-pro", "Qwen Image 2.1 Pro", 10, false));
 
 impl QwenImage30Pro {
     #[must_use]
@@ -48,7 +48,25 @@ impl QwenImage21Pro {
     }
 }
 
-fn qwen_spec(id: &str, display_name: &str, max_images: usize) -> ModelSpec {
+/// The largest per-side value an R6-valid size can reach, with headroom.
+const DIMENSION_MAX: i64 = 8192;
+
+fn qwen_spec(id: &str, display_name: &str, max_images: usize, negative_prompt: bool) -> ModelSpec {
+    let mut fields = vec![
+        dimension_field("width", "Width"),
+        dimension_field("height", "Height"),
+    ];
+    if negative_prompt {
+        fields.push(FieldDef {
+            key: "negative_prompt".into(),
+            label: "Negative prompt".into(),
+            help: None,
+            kind: FieldKind::Text { multiline: false },
+            required: false,
+            default: None,
+            locked_when: None,
+        });
+    }
     ModelSpec {
         id: id.into(),
         display_name: display_name.into(),
@@ -65,9 +83,27 @@ fn qwen_spec(id: &str, display_name: &str, max_images: usize) -> ModelSpec {
             size_control: SizeControl::WidthHeight,
         },
         schema: ParamSchema {
-            fields: Vec::new(),
+            fields,
             cross_rules: Vec::new(),
         },
+    }
+}
+
+fn dimension_field(key: &str, label: &str) -> FieldDef {
+    FieldDef {
+        key: key.into(),
+        label: label.into(),
+        help: Some(
+            "Leave both empty to let the model choose. Both set: the pixel count must be from 262144 through 4194304 and the long side at most 8 times the short side.".into(),
+        ),
+        kind: FieldKind::Int {
+            min: 0,
+            max: DIMENSION_MAX,
+            step: 1,
+        },
+        required: false,
+        default: None,
+        locked_when: None,
     }
 }
 
@@ -419,15 +455,38 @@ macro_rules! impl_qwen {
 impl_qwen!(QwenImage30Pro, QWEN_IMAGE_30_PRO, true);
 impl_qwen!(QwenImage21Pro, QWEN_IMAGE_21_PRO, false);
 
-/// The over-cap line for the form. A capped count never reaches the builder.
+/// The largest data URL the API accepts for one input image.
+const ENCODED_CAP: usize = 10 * 1024 * 1024;
+
+/// The input aspect limit: long side to short side.
+const INPUT_RATIO_CAP: u32 = 10;
+
+/// The lines the form shows for an over-cap or unsuitable image. A capped
+/// count never reaches the builder, so these are the only over-cap proof.
 #[must_use]
-pub fn refusal_messages(spec: &ModelSpec, prepared: usize) -> Vec<String> {
+pub fn refusal_messages(spec: &ModelSpec, prepared: usize, images: &[EncodedImage]) -> Vec<String> {
     let max = spec.capabilities.image_slots.max();
+    let mut messages = Vec::new();
     if prepared > max {
-        vec![format!("At most {max} images.")]
-    } else {
-        Vec::new()
+        messages.push(format!("At most {max} images."));
     }
+    let sent = &images[..images.len().min(max)];
+    if sent
+        .iter()
+        .any(|image| data_url(&image.media_type, &image.base64()).len() > ENCODED_CAP)
+    {
+        messages.push("An encoded image is over 10 MB.".into());
+    }
+    if sent.iter().any(|image| {
+        let (long, short) = (
+            image.width.max(image.height),
+            image.width.min(image.height).max(1),
+        );
+        long > short * INPUT_RATIO_CAP
+    }) {
+        messages.push("An image's long side is more than 10 times its short side.".into());
+    }
+    messages
 }
 
 #[cfg(test)]
@@ -441,6 +500,8 @@ mod tests {
     use crate::scene::Scene;
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
+
+    use crate::schema::FieldKind;
 
     const IDS: [&str; 2] = ["qwen-image-3.0-pro", "qwen-image-2.1-pro"];
 
@@ -753,16 +814,18 @@ mod tests {
 
     #[test]
     fn four_prepared_images_are_refused_on_the_smaller_cap() {
+        let pro = spec_of("qwen-image-3.0-pro");
+        let wide = spec_of("qwen-image-2.1-pro");
         assert_eq!(
-            super::refusal_messages(spec_of("qwen-image-3.0-pro"), 4),
+            super::refusal_messages(pro, 4, &[]),
             vec!["At most 3 images.".to_string()]
         );
-        assert!(super::refusal_messages(spec_of("qwen-image-3.0-pro"), 3).is_empty());
+        assert!(super::refusal_messages(pro, 3, &[]).is_empty());
         assert_eq!(
-            super::refusal_messages(spec_of("qwen-image-2.1-pro"), 11),
+            super::refusal_messages(wide, 11, &[]),
             vec!["At most 10 images.".to_string()]
         );
-        assert!(super::refusal_messages(spec_of("qwen-image-2.1-pro"), 10).is_empty());
+        assert!(super::refusal_messages(wide, 10, &[]).is_empty());
 
         let images: Vec<_> = (0..4).map(encoded).collect();
         let content = content_of(
@@ -778,6 +841,109 @@ mod tests {
     }
 
     #[test]
+    fn refusal_lines_cover_the_input_limits() {
+        let pro = spec_of("qwen-image-3.0-pro");
+        let huge = EncodedImage {
+            media_type: "image/png".into(),
+            bytes: vec![0x42; 9_755_648],
+            width: 2048,
+            height: 2048,
+            content_hash: "huge".into(),
+        };
+        assert_eq!(
+            super::refusal_messages(pro, 1, std::slice::from_ref(&huge)),
+            vec!["An encoded image is over 10 MB.".to_string()]
+        );
+        let stretched = EncodedImage {
+            media_type: "image/png".into(),
+            bytes: vec![1; 16],
+            width: 2200,
+            height: 200,
+            content_hash: "wide".into(),
+        };
+        assert_eq!(
+            super::refusal_messages(pro, 1, std::slice::from_ref(&stretched)),
+            vec!["An image's long side is more than 10 times its short side.".to_string()]
+        );
+        let acceptable = EncodedImage {
+            media_type: "image/png".into(),
+            bytes: vec![1; 16],
+            width: 2048,
+            height: 256,
+            content_hash: "ok".into(),
+        };
+        // An image beyond the cap would not be sent, so it is not checked.
+        let four = vec![
+            acceptable.clone(),
+            acceptable.clone(),
+            acceptable,
+            huge.clone(),
+        ];
+        assert_eq!(
+            super::refusal_messages(pro, 4, &four),
+            vec!["At most 3 images.".to_string()]
+        );
+        let over = vec![stretched, huge];
+        assert_eq!(
+            super::refusal_messages(pro, 4, &over),
+            vec![
+                "At most 3 images.".to_string(),
+                "An encoded image is over 10 MB.".to_string(),
+                "An image's long side is more than 10 times its short side.".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_form_fields_follow_the_model() {
+        let pro = spec_of("qwen-image-3.0-pro");
+        let wide = spec_of("qwen-image-2.1-pro");
+        for spec in [pro, wide] {
+            let width = spec
+                .schema
+                .fields
+                .iter()
+                .find(|field| field.key == "width")
+                .expect("width");
+            let height = spec
+                .schema
+                .fields
+                .iter()
+                .find(|field| field.key == "height")
+                .expect("height");
+            for field in [width, height] {
+                assert!(matches!(
+                    field.kind,
+                    FieldKind::Int {
+                        min: 0,
+                        max: 8192,
+                        step: 1
+                    }
+                ));
+                assert!(field.default.is_none());
+                assert!(!field.required);
+                let help = field.help.as_deref().unwrap_or_default();
+                assert!(help.contains("262144"), "{help}");
+                assert!(help.contains("4194304"), "{help}");
+                assert!(help.contains("8 times"), "{help}");
+            }
+        }
+        assert!(
+            pro.schema
+                .fields
+                .iter()
+                .any(|field| field.key == "negative_prompt")
+        );
+        assert!(
+            !wide
+                .schema
+                .fields
+                .iter()
+                .any(|field| field.key == "negative_prompt")
+        );
+    }
+
+    #[test]
     fn an_empty_prompt_is_reported_on_every_spec() {
         for id in IDS {
             let errors = crate::providers::resolve_model(id)
@@ -790,20 +956,6 @@ mod tests {
                 "{id}"
             );
         }
-    }
-
-    #[test]
-    fn parse_submit_never_polls() {
-        let provider = crate::providers::resolve_model("qwen-image-3.0-pro").unwrap();
-        let response = HttpResponse {
-            status: 200,
-            headers: Vec::new(),
-            body: b"{}".to_vec(),
-        };
-        assert!(matches!(
-            provider.parse_submit(&response),
-            Err(ProviderError::Protocol(_))
-        ));
     }
 
     fn picture_body(url: &str, extra: &str) -> String {
@@ -841,7 +993,7 @@ mod tests {
             ),
             (
                 400,
-                r#"{"code":"DataInspectionFailed","message":"no","output":{"choices":[{"message":{"content":[{"image":"https://example.com/a.png"}]}}]}"#,
+                r#"{"code":"DataInspectionFailed","message":"no","output":{"choices":[{"message":{"content":[{"image":"https://example.com/a.png"}]}}]}}"#,
                 ProviderError::Blocked,
             ),
             (

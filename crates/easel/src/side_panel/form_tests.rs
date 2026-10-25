@@ -1428,3 +1428,356 @@ fn flux3_still_posts_to_bfl_after_the_chutes_additions(cx: &mut TestAppContext) 
     let url = state.read_with(&cx, |app, _| flux_submit(app).url);
     assert!(url.starts_with("https://api.bfl.ai"), "{url}");
 }
+
+fn qwen_validation(
+    cx: &mut VisualTestContext,
+    state: gpui::Entity<AppState>,
+) -> gpui::Entity<Validation> {
+    let keys: Arc<dyn crate::net::KeyResolver> =
+        Arc::new(MapKeys::default().insert(ProviderId::Qwen, "qwen-key"));
+    cx.new(|cx| Validation::new(state, keys, cx))
+}
+
+fn qwen_validation_without_key(
+    cx: &mut VisualTestContext,
+    state: gpui::Entity<AppState>,
+) -> gpui::Entity<Validation> {
+    let keys: Arc<dyn crate::net::KeyResolver> = Arc::new(MapKeys::default());
+    cx.new(|cx| Validation::new(state, keys, cx))
+}
+
+fn qwen_image() -> Arc<crate::image_load::DecodedImage> {
+    decoded(image::RgbaImage::from_pixel(
+        256,
+        256,
+        image::Rgba([20, 40, 60, 255]),
+    ))
+}
+
+fn attach_qwen_prepared(app: &mut AppState, cx: &mut gpui::Context<AppState>, extras: usize) {
+    app.set_image(qwen_image(), cx);
+    for _ in 0..extras {
+        app.scene
+            .add_reference(easel_core::scene::ImageRef::new("ref", 256, 256));
+        app.extras.push(qwen_image());
+    }
+}
+
+fn qwen_submit(app: &AppState) -> easel_core::http::HttpRequest {
+    use easel_core::providers::ReferenceStep;
+
+    let provider = easel_core::providers::resolve_model(&app.model_id).expect("provider");
+    let request = crate::jobs::build_request(app).expect("request");
+    let images = provider
+        .reference_steps(&request.images)
+        .into_iter()
+        .filter_map(|step| match step {
+            ReferenceStep::Inline(image) => Some(image),
+            ReferenceStep::Upload { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    provider.build_submit(&request, &images)
+}
+
+#[gpui::test]
+fn the_qwen_form_starts_empty_and_the_negative_prompt_follows_the_model(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("qwen-image-3.0-pro", cx);
+    });
+    assert!(form.read_with(&cx, |form, _| form.has_control("width")));
+    assert!(form.read_with(&cx, |form, _| form.has_control("height")));
+    assert!(form.read_with(&cx, |form, _| form.has_control("negative_prompt")));
+    assert_eq!(stored(&state, &cx, "width"), None);
+    assert_eq!(stored(&state, &cx, "height"), None);
+
+    state.update(&mut cx, |app, cx| {
+        app.set_model("qwen-image-2.1-pro", cx);
+    });
+    assert!(form.read_with(&cx, |form, _| form.has_control("width")));
+    assert!(form.read_with(&cx, |form, _| form.has_control("height")));
+    assert!(!form.read_with(&cx, |form, _| form.has_control("negative_prompt")));
+}
+
+#[gpui::test]
+fn qwen_sizes_gate_generate(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("qwen-image-3.0-pro", cx);
+        app.scene.prose = "a harbor".into();
+    });
+    let validation = qwen_validation(&mut cx, state.clone());
+    let messages = |cx: &VisualTestContext, validation: &gpui::Entity<Validation>| {
+        validation.read_with(cx, |validation, cx| validation.messages(cx))
+    };
+    let enabled = |cx: &VisualTestContext, validation: &gpui::Entity<Validation>| {
+        validation.read_with(cx, |validation, cx| validation.generate_enabled(cx))
+    };
+
+    state.update(&mut cx, |app, _| {
+        app.values.insert("width".into(), json!(1024));
+    });
+    assert!(
+        !enabled(&cx, &validation),
+        "{:?}",
+        messages(&cx, &validation)
+    );
+    assert!(
+        messages(&cx, &validation)
+            .iter()
+            .any(|message| *message == "Set both width and height, or leave both at 0.")
+    );
+
+    state.update(&mut cx, |app, _| {
+        app.values.insert("height".into(), json!(256));
+    });
+    assert!(
+        enabled(&cx, &validation),
+        "{:?}",
+        messages(&cx, &validation)
+    );
+
+    state.update(&mut cx, |app, _| {
+        app.values.insert("width".into(), json!(100));
+        app.values.insert("height".into(), json!(100));
+    });
+    assert!(!enabled(&cx, &validation));
+    assert!(
+        messages(&cx, &validation)
+            .iter()
+            .any(|message| *message == "Width times height must be from 262144 through 4194304.")
+    );
+
+    state.update(&mut cx, |app, _| {
+        app.values.insert("width".into(), json!(2048));
+        app.values.insert("height".into(), json!(200));
+    });
+    assert!(!enabled(&cx, &validation));
+    assert!(
+        messages(&cx, &validation)
+            .iter()
+            .any(|message| *message == "The long side must be at most 8 times the short side.")
+    );
+
+    state.update(&mut cx, |app, _| {
+        app.values.insert("height".into(), json!(256));
+    });
+    assert!(
+        enabled(&cx, &validation),
+        "{:?}",
+        messages(&cx, &validation)
+    );
+}
+
+#[gpui::test]
+fn four_pictures_on_the_small_qwen_cap_disable_generate(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("qwen-image-3.0-pro", cx);
+        app.scene.prose = "a harbor".into();
+        attach_qwen_prepared(app, cx, 3);
+    });
+    let validation = qwen_validation(&mut cx, state.clone());
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "At most 3 images."),
+        "{messages:?}"
+    );
+    assert!(validation.read_with(&cx, |validation, cx| validation.send_notice(cx).is_none()));
+
+    state.update(&mut cx, |app, cx| {
+        app.set_model("qwen-image-2.1-pro", cx);
+    });
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        !messages.iter().any(|message| message.contains("images.")),
+        "{messages:?}"
+    );
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn eleven_pictures_on_the_wide_qwen_cap_disable_generate(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("qwen-image-2.1-pro", cx);
+        app.scene.prose = "a harbor".into();
+        attach_qwen_prepared(app, cx, 9);
+    });
+    let validation = qwen_validation(&mut cx, state.clone());
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+
+    state.update(&mut cx, |app, cx| {
+        app.scene
+            .add_reference(easel_core::scene::ImageRef::new("ref", 256, 256));
+        app.extras.push(qwen_image());
+        cx.notify();
+    });
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "At most 10 images."),
+        "{messages:?}"
+    );
+    assert!(validation.read_with(&cx, |validation, cx| validation.send_notice(cx).is_none()));
+}
+
+#[gpui::test]
+fn a_negative_prompt_stays_only_on_qwen_image_3_0_pro(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("qwen-image-3.0-pro", cx);
+        app.scene.prose = "keep this prompt".into();
+        app.set_image(qwen_image(), cx);
+    });
+    replace_text(&mut cx, &form, "negative_prompt", "blurry");
+    assert_eq!(
+        stored(&state, &cx, "negative_prompt"),
+        Some(json!("blurry"))
+    );
+
+    state.update(&mut cx, |app, cx| {
+        app.set_model("qwen-image-2.1-pro", cx);
+    });
+    assert_eq!(stored(&state, &cx, "negative_prompt"), None);
+    let (prose, canvas) =
+        state.read_with(&cx, |app, _| (app.scene.prose.clone(), app.image.is_some()));
+    assert_eq!(prose, "keep this prompt");
+    assert!(canvas);
+}
+
+#[gpui::test]
+fn qwen_image_gates_cover_the_encoded_size_ratio_and_missing_preparation(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    let mut buffer = image::RgbaImage::new(2000, 2000);
+    let mut noise = 0x1234_5678u32;
+    for pixel in buffer.pixels_mut() {
+        noise = noise.wrapping_mul(1664525).wrapping_add(1013904223);
+        *pixel = image::Rgba([noise as u8, (noise >> 8) as u8, (noise >> 16) as u8, 128]);
+    }
+    let oversized = decoded(buffer);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("qwen-image-3.0-pro", cx);
+        app.scene.prose = "a harbor".into();
+        app.set_image(oversized, cx);
+    });
+    let validation = qwen_validation(&mut cx, state.clone());
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "An encoded image is over 10 MB."),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+
+    let stretched = decoded(image::RgbaImage::from_pixel(
+        3000,
+        256,
+        image::Rgba([20, 40, 60, 255]),
+    ));
+    state.update(&mut cx, |app, cx| {
+        app.set_image(stretched, cx);
+        app.extras.clear();
+    });
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages.iter().any(|message| *message
+            == "An image's long side is more than 10 times its short side."),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+
+    state.update(&mut cx, |app, cx| {
+        app.set_image(qwen_image(), cx);
+        app.scene
+            .add_reference(easel_core::scene::ImageRef::new("ref", 256, 256));
+    });
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "A prepared image is missing."),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn an_empty_prompt_and_a_missing_key_disable_qwen_generate(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("qwen-image-3.0-pro", cx);
+        app.scene.prose = "   ".into();
+    });
+    let validation = qwen_validation_without_key(&mut cx, state.clone());
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(messages.iter().any(|message| message == "Prompt is empty"));
+    assert!(
+        messages
+            .iter()
+            .any(|message| *message == "No Qwen API key — open Settings"),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn switching_from_qwen_back_to_flux_keeps_the_prompt_canvas_and_request(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.scene.prose = "keep this prompt".into();
+        app.set_image(qwen_image(), cx);
+    });
+    let before = state.read_with(&cx, |app, _| flux_submit(app));
+    state.update(&mut cx, |app, cx| {
+        app.set_model("qwen-image-3.0-pro", cx);
+        app.set_model("qwen-image-2.1-pro", cx);
+        app.set_model("flux-3-image", cx);
+    });
+    let (prose, canvas, after) = state.read_with(&cx, |app, _| {
+        (
+            app.scene.prose.clone(),
+            app.image.is_some() && app.scene.source_image.is_some(),
+            flux_submit(app),
+        )
+    });
+    assert_eq!(prose, "keep this prompt");
+    assert!(canvas);
+    assert_eq!(after, before);
+}
+
+#[gpui::test]
+fn a_qwen_edit_sends_data_uris_canvas_first(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("qwen-image-3.0-pro", cx);
+        app.scene.prose = "make it blue".into();
+        attach_qwen_prepared(app, cx, 1);
+    });
+    let http = state.read_with(&cx, |app, _| qwen_submit(app));
+    assert_eq!(http.auth, Some(ProviderId::Qwen));
+    let easel_core::http::Body::Json(body) = http.body else {
+        panic!("expected json");
+    };
+    let content = body["input"]["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 3);
+    assert!(
+        content[0]["image"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/")
+    );
+    assert!(
+        content[1]["image"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/")
+    );
+    assert_eq!(content[2]["text"], "make it blue");
+}
