@@ -4,7 +4,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use easel_core::history::HistoryStore;
+use easel_core::history::{GridMeta, HistoryStore};
 use easel_core::job::JobState;
 use easel_core::providers::JobId;
 use easel_core::providers::bfl::protocol::extract_result_mime;
@@ -48,6 +48,18 @@ pub struct HistoryDialog {
     pub confirming: bool,
 }
 
+pub struct GridDialog {
+    pub images: Vec<Option<Arc<RenderImage>>>,
+    pub picked: [bool; 4],
+    pub selected: [bool; 4],
+    pub line: String,
+    pub cost: Option<f64>,
+    pub model: String,
+    pub prompt: String,
+    pub actions: Vec<String>,
+    pub confirming: bool,
+}
+
 struct Row {
     token: Option<u64>,
     id: Option<JobId>,
@@ -61,6 +73,7 @@ struct Row {
     prompt: String,
     model: String,
     editor: Option<easel_core::history::EditorSnapshot>,
+    grid: Option<GridMeta>,
 }
 
 pub struct BottomStrip {
@@ -77,6 +90,8 @@ pub struct BottomStrip {
     previews: HashMap<String, Preview>,
     notes: Option<gpui::Entity<Notifications>>,
     reveal: Arc<dyn Fn(&std::path::Path) -> Result<(), String> + Send + Sync>,
+    grid_selection: [bool; 4],
+    grid_open_for: Option<HistoryItem>,
 }
 
 impl BottomStrip {
@@ -87,6 +102,7 @@ impl BottomStrip {
         cx: &mut Context<Self>,
     ) -> Self {
         if let Some(runner) = &runner {
+            runner.update(cx, |runner, _| runner.watch_app_state(app_state.clone()));
             let watched = runner.clone();
             cx.observe(&watched, |this, _, cx| {
                 this.rebuild(cx);
@@ -108,6 +124,8 @@ impl BottomStrip {
             previews: HashMap::new(),
             notes: None,
             reveal: Arc::new(open_result_folder),
+            grid_selection: [false; 4],
+            grid_open_for: None,
         }
     }
 
@@ -217,9 +235,21 @@ impl BottomStrip {
             .map(|runner| runner.read(cx).live_jobs())
             .unwrap_or_default();
         let listed = self.history.list().unwrap_or_default();
+        let persisted: std::collections::HashSet<String> = listed
+            .iter()
+            .map(|summary| summary.id.as_str().to_string())
+            .collect();
         let mut seen = std::collections::HashSet::new();
         let mut rows = Vec::new();
         for job in live {
+            let persisted_done = matches!(job.state, JobState::Done { .. })
+                && job
+                    .id
+                    .as_ref()
+                    .is_some_and(|id| persisted.contains(id.as_str()));
+            if persisted_done {
+                continue;
+            }
             if let Some(id) = &job.id {
                 seen.insert(id.as_str().to_string());
             }
@@ -242,6 +272,7 @@ impl BottomStrip {
     fn row_from_live(&mut self, job: LiveJob) -> Row {
         let (line, detail) = copy_for(&job.state, &job.status);
         let thumb = job.id.as_ref().and_then(|id| self.thumb_for(id));
+        let grid = job.id.as_ref().and_then(|id| self.history.grid_meta(id));
         Row {
             token: Some(job.token),
             id: job.id.clone(),
@@ -254,6 +285,7 @@ impl BottomStrip {
             prompt: self.prompt_for(job.prose, job.id.as_ref()),
             model: self.model_for(Some(job.model_id), job.id.as_ref()),
             editor: job.editor,
+            grid,
         }
     }
 
@@ -262,6 +294,7 @@ impl BottomStrip {
         let bytes = self.history.result_bytes(&id).ok();
         let thumb = self.thumb_for(&id);
         let editor = self.history.load_editor(&id).ok().flatten();
+        let grid = self.history.grid_meta(&id);
         Row {
             token: None,
             id: Some(id.clone()),
@@ -280,6 +313,7 @@ impl BottomStrip {
                 Some(&id),
             ),
             editor,
+            grid,
         }
     }
 
@@ -506,6 +540,8 @@ impl BottomStrip {
 
     fn close_modal(&mut self, cx: &mut Context<Self>) {
         self.pending_discard = false;
+        self.grid_selection = [false; 4];
+        self.grid_open_for = None;
         self.app_state
             .update(cx, |app, cx| app.set_history_item(None, cx));
         cx.notify();
@@ -535,6 +571,9 @@ impl BottomStrip {
         self.sync_modal(cx);
         let item = self.app_state.read(cx).history_item.clone()?;
         let index = self.row_for(&item)?;
+        if self.rows[index].grid.is_some() {
+            return None;
+        }
         let id = self.rows[index].id.clone();
         let line = self.rows[index].line.clone();
         let detail = self.rows[index].detail.clone();
@@ -578,6 +617,115 @@ impl BottomStrip {
             actions,
             confirming: self.pending_discard,
         })
+    }
+
+    pub fn grid_dialog(&mut self, cx: &mut Context<Self>) -> Option<GridDialog> {
+        self.rebuild(cx);
+        self.sync_modal(cx);
+        let item = self.app_state.read(cx).history_item.clone()?;
+        let index = self.row_for(&item)?;
+        let grid = self.rows[index].grid.clone()?;
+        if self.grid_open_for.as_ref() != Some(&item) {
+            self.grid_selection = [false; 4];
+            self.grid_open_for = Some(item);
+        }
+        let id = self.rows[index].id.clone()?;
+        let line = self.rows[index].line.clone();
+        let cost = self.rows[index].cost;
+        let model = self.rows[index].model.clone();
+        let prompt = self.rows[index].prompt.clone();
+        let state = self.rows[index].state.clone();
+        let has_editor = self.rows[index].editor.is_some();
+        let has_file = self.history.result_path(&id).is_some();
+        let images: Vec<Option<Arc<RenderImage>>> = self
+            .history
+            .quadrant_bytes(&id, 0..4)
+            .into_iter()
+            .map(|bytes| {
+                bytes
+                    .and_then(|bytes| decode_image(&bytes, "quadrant").ok())
+                    .map(|decoded| decoded.render)
+            })
+            .collect();
+        let mut actions = if self.pending_discard {
+            vec!["Confirm".into(), "Cancel".into()]
+        } else {
+            actions_for(&state)
+                .into_iter()
+                .filter(|label| *label != "Promote")
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        if has_editor && !self.pending_discard {
+            actions.insert(0, "Restore".into());
+        }
+        if has_file && !self.pending_discard {
+            let at = actions
+                .iter()
+                .position(|label| label == "Save As")
+                .map(|index| index + 1)
+                .unwrap_or(actions.len());
+            actions.insert(at, "Reveal".into());
+        }
+        Some(GridDialog {
+            images,
+            picked: grid.picked,
+            selected: self.grid_selection,
+            line,
+            cost,
+            model,
+            prompt,
+            actions,
+            confirming: self.pending_discard,
+        })
+    }
+
+    pub fn toggle_grid_quadrant(&mut self, quadrant: usize, cx: &mut Context<Self>) {
+        let Some(item) = self.app_state.read(cx).history_item.clone() else {
+            return;
+        };
+        let Some(index) = self.row_for(&item) else {
+            return;
+        };
+        let Some(grid) = self.rows.get(index).and_then(|row| row.grid.as_ref()) else {
+            return;
+        };
+        if quadrant >= 4 || grid.picked[quadrant] {
+            return;
+        }
+        self.grid_selection[quadrant] = !self.grid_selection[quadrant];
+        cx.notify();
+    }
+
+    pub fn confirm_grid_pick(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = self.app_state.read(cx).history_item.clone() else {
+            return;
+        };
+        let Some(index) = self.row_for(&item) else {
+            return;
+        };
+        let Some(row) = self.rows.get(index) else {
+            return;
+        };
+        let Some(grid) = row.grid.clone() else {
+            return;
+        };
+        let Some(id) = row.id.clone() else {
+            return;
+        };
+        let selection: Vec<usize> = (0..4)
+            .filter(|quadrant| self.grid_selection[*quadrant] && !grid.picked[*quadrant])
+            .collect();
+        if selection.is_empty() {
+            return;
+        }
+        let created_at = crate::jobs::utc_now();
+        let _ = self.history.pick_quadrants(&id, &selection, &created_at);
+        self.grid_selection = [false; 4];
+        self.grid_open_for = None;
+        self.rebuild(cx);
+        self.close_modal(cx);
+        cx.notify();
     }
 
     fn prompt_for(&self, prose: Option<String>, id: Option<&JobId>) -> String {
@@ -803,6 +951,11 @@ impl Render for BottomStrip {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                            if this.rows.get(index).is_some_and(|row| row.grid.is_some()) {
+                                this.cancel_arm();
+                                this.open_row(index, cx);
+                                return;
+                            }
                             let same = this
                                 .armed
                                 .as_ref()

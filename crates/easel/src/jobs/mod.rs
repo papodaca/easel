@@ -20,6 +20,7 @@ pub use promote::{Inspection, inspection_from, promote};
 #[allow(unused_imports)]
 pub use runner::{JobRunner, LiveJob};
 pub use submit::build_request;
+pub use submit::utc_now;
 
 pub fn data_dir() -> PathBuf {
     if cfg!(test) {

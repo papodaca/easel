@@ -980,3 +980,376 @@ fn reveal_passes_a_folder_with_a_space_as_one_argument() {
     let args: Vec<_> = command.get_args().collect();
     assert_eq!(args, [folder.as_os_str()]);
 }
+
+fn grid_png(seed: u8) -> Vec<u8> {
+    let mut image = image::RgbImage::new(64, 64);
+    image.put_pixel(0, 0, image::Rgb([seed, seed, seed]));
+    easel_core::image_prep::encode_png(&image::DynamicImage::ImageRgb8(image))
+}
+
+fn apiframe_request() -> JobRequest {
+    let mut request = request();
+    request.model_id = "apiframe-midjourney".into();
+    request.compiled_prompt = "a lighthouse maze".into();
+    request.created_at = "2026-10-25T10:00:00Z".into();
+    request
+}
+
+fn apiframe_submit_body(id: &str) -> String {
+    format!(r#"{{"jobId":"{id}","status":"QUEUED"}}"#)
+}
+
+fn mj_completed_body(id: &str) -> String {
+    format!(
+        r#"{{"status":"COMPLETED","creditCost":10,"result":{{"images":["https://cdn2.apiframe.ai/images/{id}-1.png","https://cdn2.apiframe.ai/images/{id}-2.png","https://cdn2.apiframe.ai/images/{id}-3.png","https://cdn2.apiframe.ai/images/{id}-4.png"],"gridUrl":"https://cdn2.apiframe.ai/images/{id}-grid.png"}}}}"#
+    )
+}
+
+fn grid_script(id: &str) -> Vec<Result<easel_core::http::HttpResponse, crate::net::TransportError>> {
+    vec![
+        Ok(http(202, apiframe_submit_body(id))),
+        Ok(http(200, r#"{"status":"QUEUED","progress":0}"#)),
+        Ok(http(200, r#"{"status":"PROCESSING","progress":50}"#)),
+        Ok(http(200, mj_completed_body(id))),
+        Ok(http(200, grid_png(9))),
+        Ok(http(200, grid_png(1))),
+        Ok(http(200, grid_png(2))),
+        Ok(http(200, grid_png(3))),
+        Ok(http(200, grid_png(4))),
+    ]
+}
+
+fn grid_meta_of(history: &HistoryStore, id: &str) -> easel_core::history::GridMeta {
+    history
+        .grid_meta(&JobId::parse(id).unwrap())
+        .unwrap_or_else(|| panic!("no grid meta for {id}"))
+}
+
+fn seed_grid(history: &HistoryStore, id: &str) -> Vec<Vec<u8>> {
+    let grid = JobId::parse(id).unwrap();
+    let submitted = Submitted {
+        job_id: grid.clone(),
+        poll_url: format!("https://api.apiframe.ai/v2/jobs/{id}")
+            .parse()
+            .unwrap(),
+        quote: None,
+    };
+    history.begin(&grid, &apiframe_request(), &submitted, None).unwrap();
+    let quadrants: Vec<Vec<u8>> = (0..4).map(grid_png).collect();
+    let meta = easel_core::history::GridMeta {
+        grid_url: format!("https://cdn2.apiframe.ai/images/{id}-grid.png"),
+        images: std::array::from_fn(|index| {
+            format!("https://cdn2.apiframe.ai/images/{id}-{}.png", index + 1)
+        }),
+        picked: [false; 4],
+    };
+    history
+        .complete_grid(
+            &grid,
+            &grid_png(9),
+            &quadrants,
+            &grid_png(8),
+            meta,
+            &Completion::default(),
+        )
+        .unwrap();
+    quadrants
+}
+
+fn grid_runner_open(
+    cx: &mut TestAppContext,
+    name: &str,
+    script: Vec<Result<easel_core::http::HttpResponse, crate::net::TransportError>>,
+) -> (
+    gpui::Entity<AppState>,
+    gpui::Entity<BottomStrip>,
+    gpui::Entity<crate::jobs::JobRunner>,
+    Arc<HistoryStore>,
+    VisualTestContext,
+) {
+    let root = temp_dir(name);
+    let history = Arc::new(HistoryStore::open(root.join("history")).unwrap());
+    let transport: Arc<dyn crate::net::HttpTransport> =
+        Arc::new(crate::net::FakeTransport::scripted(script));
+    let keys = Arc::new(crate::settings::SharedKeys::default());
+    keys.set_session(
+        easel_core::model_spec::ProviderId::Apiframe,
+        "apiframe-test-key",
+    );
+    let runner = cx.update({
+        let history = Arc::clone(&history);
+        let keys = Arc::clone(&keys);
+        move |cx| {
+            cx.new(|_| {
+                crate::jobs::JobRunner::new(
+                    easel_core::providers::resolve_model,
+                    transport,
+                    Arc::new(crate::settings::Resolver(keys)),
+                    history,
+                )
+            })
+        }
+    });
+    let window = cx.update({
+        let history = Arc::clone(&history);
+        let runner = runner.clone();
+        move |cx| {
+            cx.open_window(WindowOptions::default(), |_window, cx| {
+                let state = cx.new(|_| AppState::new());
+                let strip = cx.new(|cx| BottomStrip::new(state, Some(runner), history, cx));
+                cx.new(|_| RunnerHost { strip })
+            })
+            .unwrap()
+        }
+    });
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let strip = window
+        .root(&mut visual)
+        .unwrap()
+        .read_with(&visual, |host, _| host.strip.clone());
+    let state = strip.read_with(&visual, |strip, _| strip.app_state());
+    (state, strip, runner, history, visual)
+}
+
+fn wait_for_grid_job(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.executor().advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(2500));
+    cx.run_until_parked();
+    cx.executor().advance_clock(std::time::Duration::from_secs(3));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_completed_midjourney_job_downloads_the_grid_and_opens_the_picker(cx: &mut TestAppContext) {
+    let (state, strip, _runner, history, mut cx) =
+        grid_runner_open(cx, "grid-auto", grid_script("mjgrid1"));
+    runner_submit(&strip, &mut cx);
+    wait_for_grid_job(&mut cx);
+
+    let meta = grid_meta_of(&history, "mjgrid1");
+    assert_eq!(meta.picked, [false, false, false, false]);
+    let quadrants = history
+        .quadrant_bytes(&JobId::parse("mjgrid1").unwrap(), 0..4)
+        .into_iter()
+        .map(|bytes| bytes.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(quadrants, [true, true, true, true]);
+    let opened = state.read_with(&cx, |app, _| {
+        app.history_item
+            .clone()
+            .and_then(|item| item.id)
+            .map(|id| id.as_str().to_string())
+    });
+    assert_eq!(opened.as_deref(), Some("mjgrid1"));
+
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    let dialog = strip.update(&mut cx, |strip, cx| {
+        strip.grid_dialog(cx).expect("grid picker open")
+    });
+    assert_eq!(dialog.picked, [false, false, false, false]);
+    assert_eq!(dialog.images.iter().filter(|image| image.is_some()).count(), 4);
+
+    strip.update(&mut cx, |strip, cx| {
+        strip.toggle_grid_quadrant(0, cx);
+        strip.toggle_grid_quadrant(2, cx);
+        strip.confirm_grid_pick(cx);
+    });
+    let ids: Vec<String> = history
+        .list()
+        .unwrap()
+        .iter()
+        .map(|entry| entry.id.as_str().to_string())
+        .collect();
+    assert_eq!(ids, ["mjgrid1-q1", "mjgrid1-q3", "mjgrid1"]);
+    assert_eq!(
+        grid_meta_of(&history, "mjgrid1").picked,
+        [true, false, true, false]
+    );
+    let lines = strip.update(&mut cx, |strip, cx| {
+        strip.refresh(cx);
+        strip.lines()
+    });
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(
+        state.read_with(&cx, |app, _| app.history_item.is_none()),
+        "modal closed after the pick"
+    );
+}
+
+fn runner_submit(strip: &gpui::Entity<BottomStrip>, cx: &mut VisualTestContext) {
+    let runner = strip
+        .read_with(cx, |strip, _| strip.runner.clone())
+        .expect("runner");
+    runner.update(cx, |runner, cx| runner.submit(apiframe_request(), cx));
+}
+
+#[gpui::test]
+fn reopening_a_grid_marks_picked_quadrants_and_mints_the_rest(cx: &mut TestAppContext) {
+    let (state, strip, _runner, history, mut cx) = grid_runner_open(cx, "grid-reopen", Vec::new());
+    seed_grid(&history, "mjgrid2");
+    history
+        .pick_quadrants(&JobId::parse("mjgrid2").unwrap(), &[0, 2], "2026-10-25T10:05:00Z")
+        .unwrap();
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    let grid_index = strip.read_with(&cx, |strip, _| {
+        strip
+            .rows
+            .iter()
+            .position(|row| row.grid.is_some())
+            .expect("grid row in strip")
+    });
+    strip.update(&mut cx, |strip, cx| strip.show(grid_index, cx));
+
+    let dialog = strip.update(&mut cx, |strip, cx| {
+        strip.grid_dialog(cx).expect("grid picker open")
+    });
+    assert_eq!(dialog.picked, [true, false, true, false]);
+    assert_eq!(dialog.selected, [false, false, false, false]);
+    strip.update(&mut cx, |strip, cx| {
+        strip.toggle_grid_quadrant(0, cx);
+    });
+    let selected = strip.read_with(&cx, |strip, _| strip.grid_selection);
+    assert_eq!(selected, [false, false, false, false], "picked stays blocked");
+    strip.update(&mut cx, |strip, cx| {
+        strip.toggle_grid_quadrant(3, cx);
+        strip.confirm_grid_pick(cx);
+    });
+    let ids: Vec<String> = history
+        .list()
+        .unwrap()
+        .iter()
+        .map(|entry| entry.id.as_str().to_string())
+        .collect();
+    assert_eq!(ids, ["mjgrid2-q4", "mjgrid2-q1", "mjgrid2-q3", "mjgrid2"]);
+    assert_eq!(
+        grid_meta_of(&history, "mjgrid2").picked,
+        [true, false, true, true]
+    );
+    assert!(
+        state.read_with(&cx, |app, _| app.history_item.is_none()),
+        "modal closed after the pick"
+    );
+}
+
+#[gpui::test]
+fn closing_the_picker_without_picking_keeps_every_quadrant(cx: &mut TestAppContext) {
+    let (_state, strip, _runner, history, mut cx) =
+        grid_runner_open(cx, "grid-close", Vec::new());
+    seed_grid(&history, "mjgrid3");
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    strip.update(&mut cx, |strip, cx| {
+        strip.toggle_grid_quadrant(1, cx);
+        strip.dismiss_modal(cx);
+    });
+    let ids: Vec<String> = history
+        .list()
+        .unwrap()
+        .iter()
+        .map(|entry| entry.id.as_str().to_string())
+        .collect();
+    assert_eq!(ids, ["mjgrid3"], "{ids:?}");
+
+    open_modal(&mut cx, &strip);
+    let dialog = strip.update(&mut cx, |strip, cx| {
+        strip.grid_dialog(cx).expect("reopened")
+    });
+    assert_eq!(dialog.picked, [false, false, false, false]);
+    assert_eq!(dialog.selected, [false, false, false, false]);
+}
+
+#[gpui::test]
+fn double_clicking_a_grid_row_never_promotes_the_composite(cx: &mut TestAppContext) {
+    let (state, strip, _runner, history, mut cx) =
+        grid_runner_open(cx, "grid-double", Vec::new());
+    seed_grid(&history, "mjgrid4");
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    draw(&mut cx);
+    let point = strip.read_with(&cx, |strip, _| strip.entry_point(0));
+    cx.simulate_event(down(MouseButton::Left, point, 2));
+    let (dialog_open, image) = strip.update(&mut cx, |strip, cx| {
+        (
+            strip.grid_dialog(cx).is_some(),
+            strip.app_state().read(cx).image.clone(),
+        )
+    });
+    assert!(dialog_open);
+    assert!(image.is_none());
+    let _ = &state;
+}
+
+#[gpui::test]
+fn a_busy_modal_blocks_the_grid_auto_open(cx: &mut TestAppContext) {
+    let (state, strip, _runner, history, mut cx) =
+        grid_runner_open(cx, "grid-busy", grid_script("mjgrid5"));
+    state.update(&mut cx, |app, cx| app.set_settings_open(true, cx));
+    runner_submit(&strip, &mut cx);
+    wait_for_grid_job(&mut cx);
+    let opened = state.read_with(&cx, |app, _| app.history_item.clone());
+    assert!(opened.is_none(), "settings modal keeps its place");
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    let lines = strip.read_with(&cx, |strip, _| strip.lines());
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let meta = grid_meta_of(&history, "mjgrid5");
+    assert_eq!(meta.picked, [false, false, false, false]);
+}
+
+#[gpui::test]
+fn picked_quadrants_behave_like_single_image_rows(cx: &mut TestAppContext) {
+    let (_state, strip, _runner, history, mut cx) =
+        grid_runner_open(cx, "grid-standalone", Vec::new());
+    seed_grid(&history, "mjgrid6");
+    history
+        .pick_quadrants(&JobId::parse("mjgrid6").unwrap(), &[0], "2026-10-25T10:05:00Z")
+        .unwrap();
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    let lines = strip.read_with(&cx, |strip, _| strip.lines());
+    assert_eq!(lines.len(), 2, "{lines:?}");
+
+    open_modal(&mut cx, &strip);
+    let dialog = strip.update(&mut cx, |strip, cx| strip.dialog(cx).expect("single dialog"));
+    assert!(dialog.image.is_some());
+    assert_eq!(
+        dialog.actions,
+        vec![
+            "Promote".to_string(),
+            "Save As".to_string(),
+            "Reveal".to_string(),
+            "Compare".to_string(),
+            "Discard".to_string()
+        ]
+    );
+    strip.update(&mut cx, |strip, cx| strip.dismiss_modal(cx));
+
+    draw(&mut cx);
+    let point = strip.read_with(&cx, |strip, _| strip.entry_point(0));
+    cx.simulate_event(down(MouseButton::Left, point, 2));
+    assert!(strip.read_with(&cx, |strip, cx| {
+        strip.app_state().read(cx).image.is_some()
+    }));
+
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    // Discarding the grid row removes only the grid entry.
+    let grid_index = strip.read_with(&cx, |strip, _| {
+        strip
+            .rows
+            .iter()
+            .position(|row| row.grid.is_some())
+            .expect("grid row in strip")
+    });
+    strip.update(&mut cx, |strip, cx| {
+        strip.select(grid_index, cx);
+        strip.press("Discard", cx);
+        strip.press("Confirm", cx);
+    });
+    let ids: Vec<String> = history
+        .list()
+        .unwrap()
+        .iter()
+        .map(|entry| entry.id.as_str().to_string())
+        .collect();
+    assert_eq!(ids, ["mjgrid6-q1"], "{ids:?}");
+}

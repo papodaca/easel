@@ -35,7 +35,7 @@ pub fn build_request(app: &AppState) -> Result<JobRequest, String> {
     })
 }
 
-fn utc_now() -> String {
+pub fn utc_now() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())

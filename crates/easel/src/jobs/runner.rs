@@ -5,19 +5,27 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use easel_core::error::ProviderError;
-use easel_core::history::{Completion, HistoryStore};
+use easel_core::history::{Completion, GridMeta, HistoryStore};
 use easel_core::http::HttpResponse;
 use easel_core::job::{JobEvent, JobRequest, JobState, advance};
 use easel_core::model_spec::ProviderId;
 use easel_core::providers::{ImageInput, PollOutcome, Provider, ReferenceStep, Submitted};
 use gpui::Context;
 
+use crate::app_state::HistoryItem;
 use crate::image_load::decode_image;
 use crate::net::{HttpTransport, KeyResolver, TransportError};
 
 const MAX_ACTIVE: usize = 4;
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+struct GridDownload {
+    grid_url: url::Url,
+    quadrant_urls: [url::Url; 4],
+    grid_bytes: Option<Vec<u8>>,
+    quadrants: Vec<Vec<u8>>,
+}
 
 struct Slot {
     token: u64,
@@ -32,6 +40,7 @@ struct Slot {
     status: String,
     cost: Option<f64>,
     last_outcome: Option<PollOutcome>,
+    grid_download: Option<GridDownload>,
 }
 
 pub struct LiveJob {
@@ -60,6 +69,7 @@ pub struct JobRunner {
         gpui::Entity<crate::app_state::AppState>,
         gpui::Entity<crate::notifications::Notifications>,
     )>,
+    app_watch: Option<gpui::Entity<crate::app_state::AppState>>,
 }
 
 impl JobRunner {
@@ -82,6 +92,7 @@ impl JobRunner {
             uploads: HashMap::new(),
             next_token: 1,
             sunset_watch: None,
+            app_watch: None,
         }
     }
 
@@ -111,6 +122,7 @@ impl JobRunner {
             status: "Queued".into(),
             cost: None,
             last_outcome: None,
+            grid_download: None,
         });
         match (self.resolve)(&model_id) {
             Some(provider) => {
@@ -143,6 +155,11 @@ impl JobRunner {
         notes: gpui::Entity<crate::notifications::Notifications>,
     ) {
         self.sunset_watch = Some((app, notes));
+    }
+
+    /// The app state the runner opens the 2x2 Grid Picker modal on.
+    pub fn watch_app_state(&mut self, app: gpui::Entity<crate::app_state::AppState>) {
+        self.app_watch = Some(app);
     }
 
     pub fn dismiss(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -285,6 +302,7 @@ impl JobRunner {
                 status: "Polling".into(),
                 cost: None,
                 last_outcome: None,
+                grid_download: None,
             });
             self.schedule_poll(token, cx);
         }
@@ -822,12 +840,24 @@ impl JobRunner {
             settled_cost,
             prompt,
             duration,
-            ..
+            grid_urls,
         } = outcome
         else {
             return;
         };
         self.arm_deadline(token, cx);
+        if let Some(quadrant_urls) = grid_urls {
+            if let Some(slot) = self.slot_mut(token) {
+                slot.grid_download = Some(GridDownload {
+                    grid_url: url,
+                    quadrant_urls,
+                    grid_bytes: None,
+                    quadrants: Vec::new(),
+                });
+            }
+            self.fetch_grid_part(token, 0, settled_cost, prompt, duration, cx);
+            return;
+        }
         let Some(http) = self
             .providers
             .get(&token)
@@ -960,6 +990,204 @@ impl JobRunner {
                 self.pump(cx);
             }
         }
+    }
+
+    fn fetch_grid_part(
+        &mut self,
+        token: u64,
+        index: usize,
+        cost: Option<f64>,
+        prompt: Option<String>,
+        duration: Option<f64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(url) = self
+            .slots
+            .iter()
+            .find(|slot| slot.token == token)
+            .and_then(|slot| slot.grid_download.as_ref())
+            .map(|download| match index {
+                0 => download.grid_url.clone(),
+                quadrant => download.quadrant_urls[quadrant - 1].clone(),
+            })
+        else {
+            return;
+        };
+        let Some(http) = self
+            .providers
+            .get(&token)
+            .map(|provider| provider.download_request(&url))
+        else {
+            return;
+        };
+        let task = self.transport.request(http, cx);
+        cx.spawn(async move |this, cx| {
+            let response = task.await;
+            this.update(cx, |runner, cx| {
+                runner.finish_grid_part(token, index, response, cost, prompt, duration, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn finish_grid_part(
+        &mut self,
+        token: u64,
+        index: usize,
+        response: Result<HttpResponse, TransportError>,
+        cost: Option<f64>,
+        prompt: Option<String>,
+        duration: Option<f64>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dead(token) || !self.downloading(token) {
+            return;
+        }
+        match response {
+            Ok(response) if matches!(response.status, 403 | 404 | 410) => {
+                self.expire(token, cx);
+            }
+            Err(TransportError::TooLarge { .. }) => {
+                self.fail(
+                    token,
+                    ProviderError::Protocol("result exceeded the size limit".into()),
+                    cx,
+                );
+            }
+            Err(_) => self.expire(token, cx),
+            Ok(response) => {
+                if decode_image(&response.body, "result").is_err() {
+                    self.fail(
+                        token,
+                        ProviderError::Protocol("unsupported or oversized result".into()),
+                        cx,
+                    );
+                    return;
+                }
+                let Some(download) = self
+                    .slot_mut(token)
+                    .and_then(|slot| slot.grid_download.as_mut())
+                else {
+                    return;
+                };
+                if index == 0 {
+                    download.grid_bytes = Some(response.body);
+                } else {
+                    download.quadrants.push(response.body);
+                }
+                let next = index + 1;
+                if next <= 4 {
+                    self.fetch_grid_part(token, next, cost, prompt, duration, cx);
+                    return;
+                }
+                self.finish_grid(token, cost, prompt, duration, cx);
+            }
+        }
+    }
+
+    fn finish_grid(
+        &mut self,
+        token: u64,
+        cost: Option<f64>,
+        prompt: Option<String>,
+        duration: Option<f64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.slots.iter().find(|slot| slot.token == token) else {
+            return;
+        };
+        let Some(download) = slot.grid_download.as_ref() else {
+            return;
+        };
+        let Some(grid_bytes) = download.grid_bytes.clone() else {
+            self.fail(
+                token,
+                ProviderError::Protocol("grid download was incomplete".into()),
+                cx,
+            );
+            return;
+        };
+        let quadrants = download.quadrants.clone();
+        let grid_meta = GridMeta {
+            grid_url: download.grid_url.to_string(),
+            images: std::array::from_fn(|index| download.quadrant_urls[index].to_string()),
+            picked: [false; 4],
+        };
+        let Some(slot) = self.slot_mut(token) else {
+            return;
+        };
+        slot.grid_download = None;
+        let Some(id) = slot
+            .submitted
+            .as_ref()
+            .map(|submitted| submitted.job_id.clone())
+        else {
+            return;
+        };
+        let thumb = easel_core::image_prep::thumbnail(&grid_bytes, 256).unwrap_or_default();
+        let stored = self
+            .history
+            .complete_grid(
+                &id,
+                &grid_bytes,
+                &quadrants,
+                &thumb,
+                grid_meta,
+                &Completion {
+                    cost,
+                    prompt,
+                    duration,
+                },
+            )
+            .err();
+        if let Some(error) = stored {
+            self.fail(token, ProviderError::Protocol(error.to_string()), cx);
+            return;
+        }
+        if let Some(slot) = self.slot_mut(token) {
+            slot.bytes = Some(grid_bytes);
+            if let Some(cost) = cost {
+                slot.cost = Some(cost);
+            }
+            let state = std::mem::replace(&mut slot.state, JobState::Queued);
+            slot.state = advance(
+                state,
+                JobEvent::Downloaded {
+                    result_path: format!("history/{}/result.png", id.as_str()),
+                    cost,
+                },
+            );
+        }
+        self.open_grid_modal(token, &id, cx);
+        cx.notify();
+        self.pump(cx);
+    }
+
+    fn open_grid_modal(
+        &mut self,
+        token: u64,
+        id: &easel_core::providers::JobId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(app) = self.app_watch.clone() else {
+            return;
+        };
+        let state = app.read(cx);
+        let settings_open = state.settings_open;
+        let history_item = state.history_item.clone();
+        if settings_open || history_item.is_some() {
+            return;
+        }
+        app.update(cx, |app, cx| {
+            app.set_history_item(
+                Some(HistoryItem {
+                    token: Some(token),
+                    id: Some(id.clone()),
+                }),
+                cx,
+            );
+        });
     }
 
     fn deadline(&mut self, token: u64, cx: &mut Context<Self>) {

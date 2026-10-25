@@ -6,7 +6,7 @@ use gpui::{
 use crate::actions::{ActualSize, CloseSettings, Fit, Open, Paste, Quit, SaveAs, Settings};
 use crate::app_state::AppState;
 use crate::assets;
-use crate::bottom_strip::{BottomStrip, HistoryDialog};
+use crate::bottom_strip::{BottomStrip, GridDialog, HistoryDialog};
 use crate::canvas::Canvas;
 use crate::chrome::{self, TitleBar};
 use crate::image_load::{self, prompt_failure_text};
@@ -312,6 +312,180 @@ impl Root {
             )
     }
 
+    fn grid_picker_modal(&self, dialog: GridDialog) -> impl IntoElement {
+        let strip = self.bottom_strip.clone();
+        let count = dialog.selected.iter().filter(|picked| **picked).count();
+        let actions = dialog.actions.clone();
+        let confirming = dialog.confirming;
+        let mut details = vec![dialog.line.clone()];
+        if let Some(cost) = dialog.cost {
+            details.push(format!("{cost:.2}"));
+        }
+        if !dialog.model.is_empty() {
+            details.push(dialog.model.clone());
+        }
+        let details = details.join(" · ");
+        let rows: Vec<Vec<usize>> = vec![vec![0, 1], vec![2, 3]];
+        cover_below_title_bar("grid-picker-scrim")
+            .debug_selector(|| "grid-picker-scrim".into())
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme::color(0x11111b, 0.72))
+            .on_mouse_down(MouseButton::Left, {
+                let strip = strip.clone();
+                move |_, _, cx| {
+                    strip.update(cx, |strip, cx| strip.dismiss_modal(cx));
+                }
+            })
+            .child(
+                div()
+                    .id("grid-picker-dialog")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .flex()
+                    .flex_col()
+                    .w(px(480.))
+                    .max_h(px(640.))
+                    .bg(rgb(theme::PANEL))
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .rounded_md()
+                    .overflow_hidden()
+                    .text_color(rgb(theme::TEXT))
+                    .child(pane_header("Pick from 2×2 Grid").child({
+                        let strip = strip.clone();
+                        Button::ghost("grid-picker-close", "Close").on_click(move |_, _, cx| {
+                            strip.update(cx, |strip, cx| strip.dismiss_modal(cx));
+                        })
+                    }))
+                    .child(
+                        div()
+                            .id("grid-picker-body")
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .gap(px(12.))
+                            .overflow_y_scroll()
+                            .p(px(16.))
+                            .child(div().flex().flex_col().gap(px(8.)).children(
+                                rows.into_iter().map(|row| {
+                                    div().flex().flex_row().gap(px(8.)).children(
+                                        row.into_iter().map(|quadrant| {
+                                            let strip = strip.clone();
+                                            let image = dialog.images[quadrant].clone();
+                                            let picked = dialog.picked[quadrant];
+                                            let selected = dialog.selected[quadrant];
+                                            let border = if selected {
+                                                theme::BORDER_FOCUSED
+                                            } else {
+                                                theme::BORDER
+                                            };
+                                            div()
+                                                .id(("grid-quadrant", quadrant))
+                                                .debug_selector(move || {
+                                                    format!("grid-quadrant-{quadrant}")
+                                                })
+                                                .relative()
+                                                .flex_1()
+                                                .border_1()
+                                                .border_color(rgb(border))
+                                                .bg(rgb(theme::SURFACE))
+                                                .when(!picked, |cell| {
+                                                    cell.on_mouse_down(
+                                                        MouseButton::Left,
+                                                        move |_, _, cx| {
+                                                            strip.update(cx, |strip, cx| {
+                                                                strip.toggle_grid_quadrant(
+                                                                    quadrant, cx,
+                                                                );
+                                                            });
+                                                        },
+                                                    )
+                                                })
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .h(px(140.))
+                                                        .children(image.map(|image| {
+                                                            img(image).max_w_full().max_h_full()
+                                                        })),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .absolute()
+                                                        .top(px(4.))
+                                                        .left(px(4.))
+                                                        .px(px(4.))
+                                                        .bg(rgb(theme::PANEL))
+                                                        .border_1()
+                                                        .border_color(rgb(theme::BORDER))
+                                                        .text_xs()
+                                                        .child(if picked {
+                                                            "Added".to_owned()
+                                                        } else {
+                                                            format!("{}", quadrant + 1)
+                                                        }),
+                                                )
+                                        }),
+                                    )
+                                }),
+                            ))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(theme::TEXT_MUTED))
+                                    .child(details),
+                            )
+                            .child(div().text_sm().child(dialog.prompt))
+                            .when(confirming, |body| {
+                                body.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme::TEXT_MUTED))
+                                        .child("Discard this result?"),
+                                )
+                            })
+                            .child(
+                                Button::filled(
+                                    "grid-add-selected",
+                                    format!("Add to History ({count})"),
+                                )
+                                .disabled(count == 0 || confirming)
+                                .on_click({
+                                    let strip = strip.clone();
+                                    move |_, _, cx| {
+                                        strip.update(cx, |strip, cx| {
+                                            strip.confirm_grid_pick(cx);
+                                        });
+                                    }
+                                }),
+                            )
+                            .child(div().flex().flex_row().flex_wrap().gap(px(6.)).children(
+                                actions.into_iter().map(|label| {
+                                    let id = label.clone();
+                                    let name = label.clone();
+                                    let shown = label;
+                                    let strip = strip.clone();
+                                    div()
+                                        .debug_selector(move || format!("grid-action-{id}"))
+                                        .child(
+                                            Button::ghost(format!("grid-{name}"), shown).on_click(
+                                                move |_, _, cx| {
+                                                    strip.update(cx, |strip, cx| {
+                                                        strip.press(&name, cx);
+                                                    });
+                                                },
+                                            ),
+                                        )
+                                }),
+                            )),
+                    ),
+            )
+    }
+
     fn set_status(&mut self, text: &'static str, cx: &mut Context<Self>) {
         self.notifications
             .update(cx, |notifications, cx| notifications.set_status(text, cx));
@@ -554,14 +728,20 @@ impl Render for Root {
                     .child(self.bottom_strip.clone()),
             )
             .child(self.status_bar.clone());
-        let history_dialog = self.bottom_strip.update(cx, |strip, cx| strip.dialog(cx));
-        let content = content
-            .when_some(history_dialog, |root, dialog| {
+        let grid_dialog = self
+            .bottom_strip
+            .update(cx, |strip, cx| strip.grid_dialog(cx));
+        let content = if let Some(grid_dialog) = grid_dialog {
+            content.child(self.grid_picker_modal(grid_dialog))
+        } else {
+            let history_dialog = self.bottom_strip.update(cx, |strip, cx| strip.dialog(cx));
+            content.when_some(history_dialog, |root, dialog| {
                 root.child(self.history_modal(dialog))
             })
-            .when(self.app_state.read(cx).settings_open, |root| {
-                root.child(self.settings_modal(cx))
-            });
+        }
+        .when(self.app_state.read(cx).settings_open, |root| {
+            root.child(self.settings_modal(cx))
+        });
 
         let root = cx.entity();
         chrome::client_side_decorations(
