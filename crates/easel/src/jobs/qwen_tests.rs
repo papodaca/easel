@@ -336,6 +336,7 @@ fn a_picture_url_with_a_query_is_requested_with_it(cx: &mut TestAppContext) {
     let seen = harness.transport.seen();
     assert_eq!(seen.len(), 2);
     assert_eq!(seen[1].url, url);
+    assert!(seen[1].redact_query);
     let states = harness.runner.read_with(cx, |runner, _| runner.states());
     assert!(matches!(states[0], JobState::Done { .. }), "{states:?}");
 }

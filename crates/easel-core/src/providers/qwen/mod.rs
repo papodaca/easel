@@ -367,8 +367,10 @@ fn classify(response: &HttpResponse) -> Result<Submitted, ProviderError> {
     }
 }
 
-/// True when a result URL is safe to fetch: HTTPS, no userinfo, and a public
-/// literal host. Names are left to the deferred DNS check.
+/// True when a result URL is safe to fetch: HTTPS, no userinfo, and a
+/// literal host outside the private, loopback, and link-local ranges.
+/// Hostnames resolve at request time without a DNS screen, which the plan
+/// defers to follow-up work.
 #[must_use]
 pub fn is_downloadable(url: &url::Url) -> bool {
     if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
@@ -386,14 +388,19 @@ fn is_private_v4(ip: &std::net::Ipv4Addr) -> bool {
     let octets = ip.octets();
     ip.is_loopback()
         || ip.is_link_local()
+        || ip.is_unspecified()
         || octets[0] == 10
         || (octets[0] == 172 && (16..=31).contains(&octets[1]))
         || (octets[0] == 192 && octets[1] == 168)
 }
 
 fn is_private_v6(ip: &std::net::Ipv6Addr) -> bool {
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return is_private_v4(&mapped);
+    }
     let segments = ip.segments();
     ip.is_loopback()
+        || ip.is_unspecified()
         || segments[0] & 0xffc0 == 0xfe80 // link-local fe80::/10
         || segments[0] & 0xfe00 == 0xfc00 // unique local fc00::/7
 }
@@ -1121,12 +1128,17 @@ mod tests {
             "http://example.com/a.png",
             "https://user:pass@example.com/a.png",
             "https://127.0.0.1/a.png",
+            "https://0.0.0.0/a.png",
             "https://10.0.0.9/a.png",
             "https://172.16.0.9/a.png",
             "https://172.31.0.9/a.png",
             "https://192.168.1.9/a.png",
             "https://169.254.1.9/a.png",
             "https://[::1]/a.png",
+            "https://[::]/a.png",
+            "https://[::ffff:127.0.0.1]/a.png",
+            "https://[::ffff:10.0.0.9]/a.png",
+            "https://[::ffff:169.254.1.9]/a.png",
             "https://[fe80::1]/a.png",
             "https://[fd00::1]/a.png",
         ];
