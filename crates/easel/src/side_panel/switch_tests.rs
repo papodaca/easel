@@ -265,6 +265,97 @@ fn xai_appears_in_the_provider_menu_when_a_key_is_present(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn apiframe_is_hidden_without_a_key_and_lists_all_fifty_models_with_one(cx: &mut TestAppContext) {
+    let _env = ProviderEnvGuard::clear();
+    let (_state, panel) = editor_with(cx, Arc::new(SharedKeys::default()));
+    let providers = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.provider_menu().clone()),
+    );
+    assert!(
+        !providers.iter().any(|name| name == "Apiframe"),
+        "{providers:?}"
+    );
+
+    let keys = Arc::new(SharedKeys::default());
+    keys.set_session(ProviderId::Apiframe, "apiframe-key");
+    let (_state, panel) = editor_with(cx, keys);
+    let providers = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.provider_menu().clone()),
+    );
+    assert!(providers.contains(&"Apiframe".to_string()), "{providers:?}");
+
+    panel.update(cx, |panel, cx| panel.choose_provider("Apiframe", cx));
+    let models = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.model_menu().clone()),
+    );
+    assert_eq!(
+        models,
+        [
+            "Midjourney",
+            "Nano Banana",
+            "Nano Banana Pro",
+            "Nano Banana 2",
+            "Nano Banana 2 Lite",
+            "Flux 1.1 Pro",
+            "Flux 1.1 Pro Ultra",
+            "Flux 2 Pro",
+            "Flux 2 Dev",
+            "Flux 2 Flex",
+            "Flux 2 Max",
+            "Seedream 3",
+            "Seedream 3.1",
+            "Seedream 4",
+            "Seedream 4.5",
+            "Seedream 5 Lite",
+            "Seedream 5.0 Pro",
+            "Ideogram V2",
+            "Ideogram V2 Turbo",
+            "Ideogram V2a",
+            "Ideogram V2a Turbo",
+            "Ideogram V3 Balanced",
+            "Ideogram V3 Turbo",
+            "Ideogram V3 Quality",
+            "Ideogram V4 Balanced",
+            "Ideogram V4 Turbo",
+            "Ideogram V4 Quality",
+            "Ideogram Character",
+            "Stable Diffusion 3.5 Large",
+            "Stable Diffusion 3.5 Large Turbo",
+            "Stable Diffusion 3.5 Medium",
+            "Stable Diffusion 3",
+            "Imagen 3",
+            "Imagen 3 Fast",
+            "Imagen 4",
+            "Imagen 4 Ultra",
+            "Imagen 4 Fast",
+            "DALL-E 3",
+            "DALL-E 2",
+            "GPT Image 1.5",
+            "Kling Image",
+            "Qwen Image",
+            "Qwen Image 2",
+            "Qwen Image 2 Pro",
+            "Wan Image 2.6",
+            "Wan Image 2.7",
+            "Wan Image 2.7 Pro",
+            "Grok Image 2",
+            "Grok Image Fast",
+            "Reve Create",
+        ]
+    );
+    assert_eq!(
+        selected(
+            cx,
+            panel.read_with(cx, |panel, _| panel.model_menu().clone())
+        ),
+        "Midjourney"
+    );
+}
+
+#[gpui::test]
 fn chutes_is_hidden_without_a_key_and_lists_the_seven_models_with_one(cx: &mut TestAppContext) {
     let _env = ProviderEnvGuard::clear();
     let (_state, panel) = editor_with(cx, Arc::new(SharedKeys::default()));
@@ -325,6 +416,8 @@ impl ProviderEnvGuard {
             "OPENAI_API_KEY",
             "XAI_API_KEY",
             "CHUTES_API_KEY",
+            "DASHSCOPE_API_KEY",
+            "APIFRAME_API_KEY",
         ];
         let saved = names
             .iter()
@@ -544,4 +637,59 @@ fn switching_back_to_flux_keeps_the_prompt_and_posts_to_bfl(cx: &mut TestAppCont
             .url
     });
     assert!(url.starts_with("https://api.bfl.ai/"), "{url}");
+}
+
+#[gpui::test]
+fn switching_between_bfl_and_apiframe_disarms_boxes_and_keeps_the_state(cx: &mut TestAppContext) {
+    let state = app(cx);
+    state.update(cx, |app, cx| {
+        app.scene.prose = "keep this prompt".into();
+        app.set_image(crate::side_panel::form_tests::source_image(), cx);
+        app.scene.add_box(
+            Rect {
+                x: 10,
+                y: 10,
+                w: 100,
+                h: 80,
+            },
+            BoxKind::Layout,
+        );
+        app.set_aspect_ratio("16:9", cx);
+    });
+    assert!(state.read_with(cx, |app, _| app.box_tool_enabled()));
+    state.update(cx, |app, cx| app.set_model("apiframe-flux-2-pro", cx));
+    let (armed, prose, canvas, boxes, aspect) = state.read_with(cx, |app, _| {
+        (
+            app.box_tool_enabled(),
+            app.scene.prose.clone(),
+            app.image.is_some() && app.scene.source_image.is_some(),
+            app.scene.boxes.len(),
+            app.values.get("aspect_ratio").cloned(),
+        )
+    });
+    assert!(!armed, "the Box tool is disarmed on Apiframe models");
+    assert_eq!(prose, "keep this prompt");
+    assert!(canvas);
+    assert_eq!(boxes, 1);
+    assert_eq!(aspect, Some(json!("16:9")));
+
+    state.update(cx, |app, cx| {
+        app.values.insert("resolution".into(), json!("1 MP"));
+        app.set_aspect_ratio("match_input_image", cx);
+    });
+    state.update(cx, |app, cx| app.set_model("apiframe-qwen-image-2", cx));
+    let (resolution, aspect, boxes, prose, canvas) = state.read_with(cx, |app, _| {
+        (
+            app.values.get("resolution").cloned(),
+            app.values.get("aspect_ratio").cloned(),
+            app.scene.boxes.len(),
+            app.scene.prose.clone(),
+            app.image.is_some(),
+        )
+    });
+    assert_eq!(resolution, None, "qwen-image-2 has no resolution field");
+    assert_eq!(aspect, Some(json!("1:1")), "match_input_image resets");
+    assert_eq!(boxes, 1);
+    assert_eq!(prose, "keep this prompt");
+    assert!(canvas);
 }

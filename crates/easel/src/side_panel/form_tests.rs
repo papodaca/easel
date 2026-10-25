@@ -849,7 +849,7 @@ fn source_strength_stays_visible_without_an_image(cx: &mut TestAppContext) {
     assert_eq!(text, "0.99");
 }
 
-fn source_image() -> Arc<crate::image_load::DecodedImage> {
+pub(crate) fn source_image() -> Arc<crate::image_load::DecodedImage> {
     let mut image = crate::image_load::decode_image(&png_bytes(), "pixel.png").unwrap();
     image.size = easel_core::geometry::Size { w: 64, h: 64 };
     Arc::new(image)
@@ -1780,4 +1780,104 @@ fn a_qwen_edit_sends_data_uris_canvas_first(cx: &mut TestAppContext) {
             .starts_with("data:image/")
     );
     assert_eq!(content[2]["text"], "make it blue");
+}
+
+fn apiframe_validation(
+    cx: &mut VisualTestContext,
+    state: gpui::Entity<AppState>,
+) -> gpui::Entity<Validation> {
+    let keys: Arc<dyn crate::net::KeyResolver> =
+        Arc::new(MapKeys::default().insert(ProviderId::Apiframe, "apiframe-key"));
+    cx.new(|cx| Validation::new(state, keys, cx))
+}
+
+#[gpui::test]
+fn a_missing_apiframe_key_disables_generate_until_a_key_exists(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("apiframe-midjourney", cx);
+        app.scene.prose = "a lighthouse".into();
+    });
+    let keys: Arc<dyn crate::net::KeyResolver> = Arc::new(MapKeys::default());
+    let validation = cx.new(|cx| Validation::new(state.clone(), keys, cx));
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| *message == "No Apiframe API key — open Settings"),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    let validation = apiframe_validation(&mut cx, state);
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn apiframe_reference_notices_follow_each_model_slot_cap(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.scene.prose = "a harbor".into();
+        attach_prepared(app, cx, 1);
+    });
+    let enabled = |cx: &VisualTestContext, validation: &gpui::Entity<Validation>| {
+        validation.read_with(cx, |validation, cx| validation.generate_enabled(cx))
+    };
+    let notice = |cx: &VisualTestContext, validation: &gpui::Entity<Validation>| {
+        validation.read_with(cx, |validation, cx| validation.send_notice(cx))
+    };
+
+    state.update(&mut cx, |app, cx| app.set_model("apiframe-flux-2-pro", cx));
+    let validation = apiframe_validation(&mut cx, state.clone());
+    assert!(enabled(&cx, &validation));
+    assert_eq!(notice(&cx, &validation), None);
+
+    state.update(&mut cx, |app, cx| {
+        app.set_model("apiframe-stable-diffusion-3.5-large", cx)
+    });
+    assert!(enabled(&cx, &validation));
+    assert_eq!(
+        notice(&cx, &validation),
+        Some("1 of 2 images will be sent".to_string())
+    );
+
+    state.update(&mut cx, |app, cx| app.set_model("apiframe-dall-e-3", cx));
+    assert!(enabled(&cx, &validation));
+    assert_eq!(
+        notice(&cx, &validation),
+        Some("0 of 2 images will be sent".to_string())
+    );
+}
+
+#[gpui::test]
+fn apiframe_qwen_image_task_type_gates_generate(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("apiframe-qwen-image", cx);
+        app.scene.prose = "make it blue".into();
+    });
+    let validation = apiframe_validation(&mut cx, state.clone());
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    state.update(&mut cx, |app, _| {
+        app.values.insert("task_type".into(), json!("image-edit"));
+    });
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| *message == "Add at least one image."),
+        "{messages:?}"
+    );
+    state.update(&mut cx, |app, _| {
+        app.values
+            .insert("task_type".into(), json!("text-to-image"));
+    });
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    state.update(&mut cx, |app, _| {
+        app.values.insert("task_type".into(), json!("image-edit"));
+    });
+    state.update(&mut cx, |app, cx| {
+        attach_prepared(app, cx, 0);
+    });
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
 }
