@@ -1,3 +1,4 @@
+pub mod apiframe;
 pub mod bfl;
 pub mod chutes;
 pub mod google;
@@ -20,7 +21,7 @@ impl ModelRegistry {
         static SPECS: OnceLock<Vec<&'static ModelSpec>> = OnceLock::new();
         SPECS
             .get_or_init(|| {
-                vec![
+                let mut specs = vec![
                     bfl::flux3::model_spec(),
                     bfl::flux2_pro::model_spec(),
                     krea::krea3::model_spec(),
@@ -44,7 +45,13 @@ impl ModelRegistry {
                     chutes::ZImageTurbo::model_spec(),
                     qwen::QwenImage30Pro::model_spec(),
                     qwen::QwenImage21Pro::model_spec(),
-                ]
+                ];
+                specs.extend(
+                    apiframe::descriptors()
+                        .iter()
+                        .map(|descriptor| &descriptor.spec),
+                );
+                specs
             })
             .as_slice()
     }
@@ -96,7 +103,10 @@ pub fn resolve_model(model_id: &str) -> Option<Box<dyn Provider>> {
         "chutes-z-image-turbo" => Some(Box::new(chutes::ZImageTurbo)),
         "qwen-image-3.0-pro" => Some(Box::new(qwen::QwenImage30Pro)),
         "qwen-image-2.1-pro" => Some(Box::new(qwen::QwenImage21Pro)),
-        _ => None,
+        other => match apiframe::resolve(other) {
+            Some(provider) => Some(Box::new(provider)),
+            None => None,
+        },
     }
 }
 use serde::{Deserialize, Serialize};
