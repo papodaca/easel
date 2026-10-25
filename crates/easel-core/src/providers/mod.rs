@@ -59,6 +59,7 @@ impl ModelRegistry {
             ProviderId::Xai,
             ProviderId::Chutes,
             ProviderId::Qwen,
+            ProviderId::Apiframe,
         ]
     }
 
@@ -157,6 +158,7 @@ pub struct Submitted {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum PollOutcome {
     InFlight {
         status: String,
@@ -167,6 +169,8 @@ pub enum PollOutcome {
         settled_cost: Option<f64>,
         prompt: Option<String>,
         duration: Option<f64>,
+        /// Midjourney only: the four quadrant URLs beside the 2x2 composite.
+        grid_urls: Option<[url::Url; 4]>,
     },
     Failed(ProviderError),
     Cancelled,

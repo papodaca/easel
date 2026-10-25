@@ -822,6 +822,7 @@ impl JobRunner {
             settled_cost,
             prompt,
             duration,
+            ..
         } = outcome
         else {
             return;
@@ -1089,6 +1090,7 @@ impl JobRunner {
                 ProviderId::Xai => "xai",
                 ProviderId::Chutes => "chutes",
                 ProviderId::Qwen => "qwen",
+                ProviderId::Apiframe => "apiframe",
             })
             .unwrap_or("unknown");
         format!("{label}:{content_hash}")

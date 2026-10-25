@@ -41,6 +41,7 @@ impl PollPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum JobEvent {
     SlotFreed,
     Submitted(Submitted),
@@ -285,6 +286,7 @@ mod tests {
                     settled_cost: None,
                     prompt: None,
                     duration: None,
+                    grid_urls: None,
                 })
             ),
             JobState::Downloading

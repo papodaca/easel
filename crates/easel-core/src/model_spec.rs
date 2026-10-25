@@ -14,6 +14,7 @@ pub enum ProviderId {
     Xai,
     Chutes,
     Qwen,
+    Apiframe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +43,12 @@ const CHUTES_HOSTS: &[HostRule] = &[
 
 const QWEN_HOSTS: &[HostRule] = &[HostRule::Exact("maas.qwencloudapi.com")];
 
+const APIFRAME_HOSTS: &[HostRule] = &[
+    HostRule::Exact("api.apiframe.ai"),
+    HostRule::Exact("cdn2.apiframe.ai"),
+    HostRule::Suffix(".apiframe.ai"),
+];
+
 impl ProviderId {
     #[must_use]
     pub fn base_url(self) -> &'static str {
@@ -53,6 +60,7 @@ impl ProviderId {
             Self::Xai => "https://api.x.ai",
             Self::Chutes => "https://api.chutes.ai",
             Self::Qwen => "https://maas.qwencloudapi.com",
+            Self::Apiframe => "https://api.apiframe.ai",
         }
     }
 
@@ -66,6 +74,7 @@ impl ProviderId {
             Self::Xai => "XAI_API_KEY",
             Self::Chutes => "CHUTES_API_KEY",
             Self::Qwen => "DASHSCOPE_API_KEY",
+            Self::Apiframe => "APIFRAME_API_KEY",
         }
     }
 
@@ -79,6 +88,7 @@ impl ProviderId {
             Self::Xai => "xAI",
             Self::Chutes => "Chutes",
             Self::Qwen => "Qwen",
+            Self::Apiframe => "Apiframe",
         }
     }
 
@@ -96,6 +106,9 @@ impl ProviderId {
             Self::Xai => AuthScheme::Bearer,
             Self::Chutes => AuthScheme::Bearer,
             Self::Qwen => AuthScheme::Bearer,
+            Self::Apiframe => AuthScheme::HeaderKey {
+                header: "X-API-Key".into(),
+            },
         }
     }
 
@@ -109,6 +122,7 @@ impl ProviderId {
             Self::Xai => XAI_HOSTS,
             Self::Chutes => CHUTES_HOSTS,
             Self::Qwen => QWEN_HOSTS,
+            Self::Apiframe => APIFRAME_HOSTS,
         }
     }
 
@@ -459,6 +473,28 @@ mod tests {
             .map(|spec| spec.id.as_str())
             .collect();
         assert_eq!(ids, ["qwen-image-3.0-pro", "qwen-image-2.1-pro"]);
+    }
+
+    #[test]
+    fn apiframe_identity_and_host_allowlist() {
+        use crate::providers::ModelRegistry;
+
+        assert_eq!(ProviderId::Apiframe.env_var(), "APIFRAME_API_KEY");
+        assert_eq!(ProviderId::Apiframe.display_name(), "Apiframe");
+        assert_eq!(ProviderId::Apiframe.base_url(), "https://api.apiframe.ai");
+        assert!(matches!(
+            ProviderId::Apiframe.auth_scheme(),
+            AuthScheme::HeaderKey { ref header } if header == "X-API-Key"
+        ));
+        assert_eq!(
+            serde_json::to_value(ProviderId::Apiframe).unwrap(),
+            serde_json::json!("apiframe")
+        );
+        assert!(ProviderId::Apiframe.allows_url("https://api.apiframe.ai/v2/images/generate"));
+        assert!(ProviderId::Apiframe.allows_url("https://cdn2.apiframe.ai/images/a.png"));
+        assert!(!ProviderId::Apiframe.allows_url("http://api.apiframe.ai"));
+        assert!(!ProviderId::Apiframe.allows_url("https://apiframe.ai.evil.example/x"));
+        assert!(ModelRegistry::providers().contains(&ProviderId::Apiframe));
     }
 
     #[test]

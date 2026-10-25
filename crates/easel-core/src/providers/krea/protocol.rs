@@ -196,6 +196,7 @@ fn ready_outcome(value: &Value) -> PollOutcome {
         settled_cost: None,
         prompt: None,
         duration: None,
+        grid_urls: None,
     }
 }
 
@@ -529,6 +530,7 @@ mod tests {
             settled_cost: None,
             prompt: None,
             duration: None,
+            grid_urls: None,
         };
         assert!(cancel_request(&submitted, Some(&ready)).is_none());
     }

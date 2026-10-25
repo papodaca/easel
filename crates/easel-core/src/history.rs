@@ -29,6 +29,14 @@ pub struct Completion {
     pub duration: Option<f64>,
 }
 
+/// A Midjourney 2x2 composite stored beside its four quadrant files.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GridMeta {
+    pub grid_url: String,
+    pub images: [String; 4],
+    pub picked: [bool; 4],
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     pub id: JobId,
@@ -94,6 +102,8 @@ struct Meta {
     duration: Option<f64>,
     poll_url: Option<String>,
     error: Option<ProviderError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grid: Option<GridMeta>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +171,7 @@ impl HistoryStore {
             duration: None,
             poll_url: Some(submitted.poll_url.to_string()),
             error: None,
+            grid: None,
             interaction_id: String::new(),
             suggestion: String::new(),
         };
@@ -264,6 +275,7 @@ impl HistoryStore {
             duration: None,
             poll_url: None,
             error: None,
+            grid: None,
             interaction_id: interaction_id.to_owned(),
             suggestion: suggestion.to_owned(),
         };
@@ -301,6 +313,7 @@ impl HistoryStore {
             duration: None,
             poll_url: None,
             error: Some(error.clone()),
+            grid: None,
             interaction_id: String::new(),
             suggestion: String::new(),
         };
@@ -313,6 +326,136 @@ impl HistoryStore {
             cost: None,
         })?;
         Ok(())
+    }
+
+    /// Write a finished Midjourney 2x2 composite plus its four quadrant files.
+    pub fn complete_grid(
+        &self,
+        id: &JobId,
+        grid_bytes: &[u8],
+        quadrants: &[Vec<u8>],
+        thumb_bytes: &[u8],
+        grid: GridMeta,
+        completion: &Completion,
+    ) -> Result<(), StoreError> {
+        if quadrants.len() != 4 {
+            return Err(StoreError::Protocol(
+                "a 2x2 grid needs exactly four quadrants".into(),
+            ));
+        }
+        let dir = self.entry_dir(id)?;
+        let file_name = image_file_name(grid_bytes, "result")?;
+        write_private(&dir.join(&file_name), grid_bytes)?;
+        write_private(&dir.join("thumb.jpg"), thumb_bytes)?;
+        for (index, bytes) in quadrants.iter().enumerate() {
+            let name = image_file_name(bytes, &format!("quadrant_{index}"))?;
+            write_private(&dir.join(name), bytes)?;
+        }
+        let mut meta = self.read_meta(id)?;
+        meta.cost = completion.cost.or(meta.cost);
+        meta.prompt = completion.prompt.clone();
+        meta.duration = completion.duration;
+        meta.poll_url = None;
+        meta.error = None;
+        meta.state = JobState::Done {
+            result_path: file_name,
+            cost: meta.cost,
+        };
+        meta.grid = Some(grid);
+        self.write_meta(id, &meta)?;
+        self.upsert_row(IndexRow {
+            id: id.as_str().to_string(),
+            created_at: meta.created_at.clone(),
+            state: meta.state.clone(),
+            bytes: dir_bytes(&dir)?,
+            cost: meta.cost,
+        })?;
+        Ok(())
+    }
+
+    /// The 2x2 grid metadata stored on an entry, when it is a grid row.
+    pub fn grid_meta(&self, id: &JobId) -> Option<GridMeta> {
+        self.read_meta(id).ok()?.grid
+    }
+
+    /// The stored bytes of each requested quadrant file, in request order.
+    pub fn quadrant_bytes(
+        &self,
+        id: &JobId,
+        quadrants: std::ops::Range<usize>,
+    ) -> Vec<Option<Vec<u8>>> {
+        quadrants
+            .map(|quadrant| self.quadrant_file_bytes(id, quadrant))
+            .collect()
+    }
+
+    fn quadrant_file_bytes(&self, id: &JobId, quadrant: usize) -> Option<Vec<u8>> {
+        let dir = self.entry_dir(id).ok()?;
+        ["png", "jpg", "webp", "bin"]
+            .iter()
+            .map(|extension| dir.join(format!("quadrant_{quadrant}.{extension}")))
+            .find(|path| path.exists())
+            .and_then(|path| fs::read(path).ok())
+    }
+
+    /// Promote unpicked quadrants of a 2x2 grid into standalone History rows.
+    pub fn pick_quadrants(
+        &self,
+        grid_id: &JobId,
+        quadrants: &[usize],
+        created_at: &str,
+    ) -> Result<Vec<JobId>, StoreError> {
+        let mut meta = self.read_meta(grid_id)?;
+        if meta.grid.is_none() {
+            return Err(StoreError::Protocol("entry has no 2x2 grid".into()));
+        }
+        let created_at = if created_at >= meta.created_at.as_str() {
+            created_at.to_owned()
+        } else {
+            meta.created_at.clone()
+        };
+        let request_bytes =
+            fs::read(self.entry_dir(grid_id)?.join("request.json")).map_err(io_err)?;
+        let mut minted = Vec::new();
+        for &quadrant in quadrants {
+            if quadrant >= 4 {
+                return Err(StoreError::Protocol("quadrant index out of range".into()));
+            }
+            if meta.grid.as_ref().is_some_and(|grid| grid.picked[quadrant]) {
+                continue;
+            }
+            let Some(bytes) = self.quadrant_file_bytes(grid_id, quadrant) else {
+                return Err(StoreError::Io("quadrant file is missing".into()));
+            };
+            let id = JobId::parse(&format!("{}-q{}", grid_id.as_str(), quadrant + 1))
+                .map_err(StoreError::Protocol)?;
+            let dir = self.prepare_dir(&id)?;
+            write_private(&dir.join("request.json"), &request_bytes)?;
+            let file_name = image_file_name(&bytes, "result")?;
+            write_private(&dir.join(&file_name), &bytes)?;
+            let thumb = crate::image_prep::thumbnail(&bytes, 256).unwrap_or_default();
+            write_private(&dir.join("thumb.jpg"), &thumb)?;
+            let state = JobState::Done {
+                result_path: file_name,
+                cost: None,
+            };
+            self.insert_row_before(
+                IndexRow {
+                    id: id.as_str().to_string(),
+                    created_at: created_at.clone(),
+                    state,
+                    bytes: dir_bytes(&dir)?,
+                    cost: None,
+                },
+                grid_id.as_str(),
+            )?;
+            if let Some(grid) = meta.grid.as_mut() {
+                grid.picked[quadrant] = true;
+            }
+            self.write_meta(grid_id, &meta)?;
+            minted.push(id);
+        }
+        Ok(minted)
     }
 
     pub fn suggestion(&self, id: &JobId) -> String {
@@ -568,6 +711,19 @@ impl HistoryStore {
         self.write_index(&rows)
     }
 
+    /// Insert a new index row directly ahead of an existing row's id.
+    fn insert_row_before(&self, row: IndexRow, before: &str) -> Result<(), StoreError> {
+        let mut rows = self.read_index()?;
+        if !rows.iter().any(|existing| existing.id == row.id) {
+            let position = rows
+                .iter()
+                .position(|existing| existing.id == before)
+                .unwrap_or(0);
+            rows.insert(position, row);
+        }
+        self.write_index(&rows)
+    }
+
     fn write_index(&self, rows: &[IndexRow]) -> Result<(), StoreError> {
         let bytes = serde_json::to_vec_pretty(&IndexFile {
             entries: rows.to_vec(),
@@ -613,6 +769,15 @@ fn dir_bytes(dir: &Path) -> Result<u64, StoreError> {
     Ok(total)
 }
 
+fn image_file_name(bytes: &[u8], stem: &str) -> Result<String, StoreError> {
+    match extract_result_mime(None, bytes) {
+        Some("image/png") => Ok(format!("{stem}.png")),
+        Some("image/jpeg") => Ok(format!("{stem}.jpg")),
+        Some("image/webp") => Ok(format!("{stem}.webp")),
+        _ => Err(StoreError::Protocol("unsupported result format".into())),
+    }
+}
+
 fn provider_name(model_id: &str) -> String {
     use crate::model_spec::ProviderId;
     use crate::providers::ModelRegistry;
@@ -628,6 +793,7 @@ fn provider_name(model_id: &str) -> String {
             ProviderId::Xai => "xai",
             ProviderId::Chutes => "chutes",
             ProviderId::Qwen => "qwen",
+            ProviderId::Apiframe => "apiframe",
         })
         .unwrap_or("")
         .to_owned()
@@ -1164,5 +1330,179 @@ mod tests {
             store.result_path(&id).unwrap(),
             root.join("binjob/result.png")
         );
+    }
+
+    fn grid_png(seed: u8) -> Vec<u8> {
+        let mut image = image::RgbImage::new(64, 64);
+        image.put_pixel(0, 0, image::Rgb([seed, seed, seed]));
+        crate::image_prep::encode_png(&image::DynamicImage::ImageRgb8(image))
+    }
+
+    fn grid_request() -> JobRequest {
+        let mut request = request_with_images();
+        request.created_at = "2026-10-25T10:00:00Z".into();
+        request
+    }
+
+    fn grid_meta() -> super::GridMeta {
+        super::GridMeta {
+            grid_url: "https://cdn2.apiframe.ai/images/grid.png".into(),
+            images: [
+                "https://cdn2.apiframe.ai/images/a.png".into(),
+                "https://cdn2.apiframe.ai/images/b.png".into(),
+                "https://cdn2.apiframe.ai/images/c.png".into(),
+                "https://cdn2.apiframe.ai/images/d.png".into(),
+            ],
+            picked: [false; 4],
+        }
+    }
+
+    fn begin_grid(store: &HistoryStore, id: &str) -> Vec<Vec<u8>> {
+        let grid_id = JobId::parse(id).unwrap();
+        store
+            .begin(
+                &grid_id,
+                &grid_request(),
+                &submitted(id),
+                Some(&sample_editor()),
+            )
+            .unwrap();
+        let quadrants: Vec<Vec<u8>> = (0..4).map(grid_png).collect();
+        store
+            .complete_grid(
+                &grid_id,
+                &grid_png(9),
+                &quadrants,
+                b"thumb",
+                grid_meta(),
+                &Completion::default(),
+            )
+            .unwrap();
+        quadrants
+    }
+
+    #[test]
+    fn complete_grid_writes_the_composite_and_four_quadrants() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        let id = JobId::parse("gridjob").unwrap();
+        let quadrants = begin_grid(&store, "gridjob");
+        assert!(root.join("gridjob/result.png").is_file());
+        assert!(root.join("gridjob/thumb.jpg").is_file());
+        for quadrant in 0..4 {
+            assert!(
+                root.join(format!("gridjob/quadrant_{quadrant}.png"))
+                    .is_file()
+            );
+        }
+        assert_eq!(store.grid_meta(&id).unwrap(), grid_meta());
+        assert_eq!(
+            store
+                .quadrant_bytes(&id, 0..4)
+                .into_iter()
+                .map(|bytes| bytes.unwrap())
+                .collect::<Vec<_>>(),
+            quadrants
+        );
+        let listed = store.list().unwrap();
+        assert!(matches!(listed[0].state, JobState::Done { .. }));
+        assert!(root.join("gridjob/meta.json").is_file());
+    }
+
+    #[test]
+    fn pick_quadrants_mints_standalone_rows_above_the_grid() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        let id = JobId::parse("gridpick").unwrap();
+        let quadrants = begin_grid(&store, "gridpick");
+
+        let minted = store
+            .pick_quadrants(&id, &[0, 2], "2026-10-25T10:05:00Z")
+            .unwrap();
+        assert_eq!(
+            minted
+                .iter()
+                .map(|minted| minted.as_str().to_string())
+                .collect::<Vec<_>>(),
+            ["gridpick-q1", "gridpick-q3"]
+        );
+        let ids: Vec<_> = store
+            .list()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.id.as_str().to_string())
+            .collect();
+        assert_eq!(ids, ["gridpick-q1", "gridpick-q3", "gridpick"]);
+        assert_eq!(
+            store.grid_meta(&id).unwrap().picked,
+            [true, false, true, false]
+        );
+        for (name, quadrant) in [("gridpick-q1", 0usize), ("gridpick-q3", 2)] {
+            let picked = JobId::parse(name).unwrap();
+            assert_eq!(
+                fs::read(root.join(name).join("result.png")).unwrap(),
+                quadrants[quadrant]
+            );
+            assert!(root.join(name).join("thumb.jpg").is_file());
+            let loaded = store.load_request(&picked).unwrap();
+            assert_eq!(loaded.compiled_prompt, "a fox");
+            assert_eq!(loaded.model_id, "flux-3-image");
+            assert_eq!(
+                store.load_editor(&picked).unwrap().as_ref(),
+                Some(&sample_editor())
+            );
+        }
+        let again = store
+            .pick_quadrants(&id, &[0, 3], "2026-10-25T10:06:00Z")
+            .unwrap();
+        assert_eq!(
+            again
+                .iter()
+                .map(|minted| minted.as_str().to_string())
+                .collect::<Vec<_>>(),
+            ["gridpick-q4"]
+        );
+        assert_eq!(
+            store.grid_meta(&id).unwrap().picked,
+            [true, false, true, true]
+        );
+        let ids: Vec<_> = store
+            .list()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.id.as_str().to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            ["gridpick-q4", "gridpick-q1", "gridpick-q3", "gridpick"]
+        );
+    }
+
+    #[test]
+    fn removing_the_grid_keeps_standalone_quadrant_rows() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        let id = JobId::parse("gridremove").unwrap();
+        begin_grid(&store, "gridremove");
+        store
+            .pick_quadrants(&id, &[1, 3], "2026-10-25T10:05:00Z")
+            .unwrap();
+
+        store.remove(&id).unwrap();
+        assert!(!root.join("gridremove").exists());
+        assert!(store.grid_meta(&id).is_none());
+        for name in ["gridremove-q2", "gridremove-q4"] {
+            let picked = JobId::parse(name).unwrap();
+            assert!(store.result_path(&picked).unwrap().is_file());
+            assert!(store.load_request(&picked).is_ok());
+            assert!(store.load_editor(&picked).unwrap().is_some());
+        }
+        let ids: Vec<_> = store
+            .list()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.id.as_str().to_string())
+            .collect();
+        assert_eq!(ids, ["gridremove-q2", "gridremove-q4"]);
     }
 }

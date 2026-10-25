@@ -174,6 +174,7 @@ fn ready_outcome(value: &Value) -> PollOutcome {
             .and_then(Value::as_str)
             .map(str::to_string),
         duration: value.pointer("/result/duration").and_then(Value::as_f64),
+        grid_urls: None,
     }
 }
 
@@ -541,11 +542,13 @@ mod tests {
                 settled_cost,
                 prompt,
                 duration,
+                grid_urls,
             } => {
                 assert_eq!(url.as_str(), "https://delivery.bfl.ai/img.png");
                 assert_eq!(settled_cost, Some(4.5));
                 assert_eq!(prompt.as_deref(), Some("expanded"));
                 assert_eq!(duration, Some(3.5));
+                assert_eq!(grid_urls, None);
             }
             other => panic!("{other:?}"),
         }

@@ -588,6 +588,23 @@ fn qwen_probe_is_a_get_of_the_generation_url() {
     assert!(matches!(ProviderId::Qwen.auth_scheme(), AuthScheme::Bearer));
 }
 
+#[test]
+fn apiframe_probe_is_a_get_of_the_me_endpoint() {
+    use crate::settings::key_probe;
+    use easel_core::http::{Body, Method};
+    use easel_core::model_spec::AuthScheme;
+
+    let probe = key_probe(ProviderId::Apiframe);
+    assert_eq!(probe.method, Method::Get);
+    assert_eq!(probe.url, "https://api.apiframe.ai/v2/me");
+    assert_eq!(probe.auth, Some(ProviderId::Apiframe));
+    assert_eq!(probe.body, Body::Empty);
+    assert!(matches!(
+        ProviderId::Apiframe.auth_scheme(),
+        AuthScheme::HeaderKey { ref header } if header == "X-API-Key"
+    ));
+}
+
 #[gpui::test]
 async fn chutes_settings_probe_classifies_the_quotas_response(cx: &mut TestAppContext) {
     use easel_core::http::{HttpResponse, Method};
@@ -676,6 +693,54 @@ async fn qwen_settings_probe_classifies_the_generation_response(cx: &mut TestApp
         );
         assert_eq!(
             panel.read_with(cx, |panel, _| panel.row_note(ProviderId::Qwen).to_owned()),
+            note
+        );
+    }
+}
+
+#[gpui::test]
+async fn apiframe_settings_probe_classifies_the_me_response(cx: &mut TestAppContext) {
+    use easel_core::http::{HttpResponse, Method};
+    use gpui::prelude::*;
+
+    use crate::net::FakeTransport;
+    use crate::notifications::Notifications;
+    use crate::settings::SettingsPanel;
+
+    for (status, note) in [
+        (401, "invalid key"),
+        (403, "invalid key"),
+        (200, "key accepted"),
+    ] {
+        let transport = Arc::new(FakeTransport::scripted(vec![Ok(HttpResponse {
+            status,
+            headers: Vec::new(),
+            body: b"{}".to_vec(),
+        })]));
+        let notes = cx.new(|_| Notifications::new());
+        let panel = cx.new({
+            let notes = notes.clone();
+            let transport = Arc::clone(&transport);
+            move |cx| SettingsPanel::new(notes, transport, cx)
+        });
+        let titles = panel.read_with(cx, |panel, _| panel.provider_titles());
+        assert!(titles.iter().any(|title| title == "Apiframe"), "{titles:?}");
+        panel
+            .update(cx, |panel, cx| panel.test_key(ProviderId::Apiframe, cx))
+            .await;
+        let seen = transport.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].method, Method::Get);
+        assert_eq!(seen[0].url, "https://api.apiframe.ai/v2/me");
+        assert_eq!(seen[0].auth, Some(ProviderId::Apiframe));
+        assert!(
+            !seen.iter().any(|request| request.method == Method::Post),
+            "{seen:?}"
+        );
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel
+                .row_note(ProviderId::Apiframe)
+                .to_owned()),
             note
         );
     }

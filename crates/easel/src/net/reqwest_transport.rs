@@ -345,6 +345,7 @@ fn credential_name(name: &str) -> bool {
             | "set-cookie"
             | "x-key"
             | "x-goog-api-key"
+            | "x-api-key"
     )
 }
 
@@ -858,6 +859,37 @@ mod tests {
         let debug = format!("{http:?}");
         assert!(debug.contains("<redacted>"), "{debug}");
         assert!(!debug.contains("krea-key-9f3a"), "{debug}");
+    }
+
+    #[test]
+    fn the_apiframe_x_api_key_header_is_redacted() {
+        install_capture();
+        let mut http = request(Method::Get, "https://api.apiframe.ai/v2/me", Body::Empty);
+        http.headers.push(HttpHeader {
+            name: "X-API-Key".into(),
+            value: "apiframe-secret-key-zz".into(),
+            sensitive: false,
+        });
+        let debug = format!("{http:?}");
+        assert!(debug.contains("apiframe-secret-key-zz"), "{debug}");
+        super::log_request(&http, super::display_url(&http).as_str());
+        let logged = lines_for("https://api.apiframe.ai/v2/me");
+        assert!(logged.contains("<redacted>"), "{logged}");
+        assert!(!logged.contains("apiframe-secret-key-zz"), "{logged}");
+
+        http.auth = Some(ProviderId::Apiframe);
+        super::apply_auth(
+            &mut http,
+            &MapKeys::default().insert(ProviderId::Apiframe, "apiframe-sent-key-zz"),
+        )
+        .expect("auth");
+        let debug = format!("{http:?}");
+        assert!(debug.contains("<redacted>"), "{debug}");
+        assert!(!debug.contains("apiframe-sent-key-zz"), "{debug}");
+        assert!(matches!(
+            ProviderId::Apiframe.auth_scheme(),
+            easel_core::model_spec::AuthScheme::HeaderKey { ref header } if header == "X-API-Key"
+        ));
     }
 
     #[test]

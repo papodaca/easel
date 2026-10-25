@@ -86,6 +86,7 @@ pub struct MapKeys {
     xai: Option<String>,
     chutes: Option<String>,
     qwen: Option<String>,
+    apiframe: Option<String>,
 }
 
 #[cfg(test)]
@@ -99,6 +100,7 @@ impl MapKeys {
             ProviderId::Xai => self.xai = Some(key.into()),
             ProviderId::Chutes => self.chutes = Some(key.into()),
             ProviderId::Qwen => self.qwen = Some(key.into()),
+            ProviderId::Apiframe => self.apiframe = Some(key.into()),
         }
         self
     }
@@ -115,6 +117,7 @@ impl KeyResolver for MapKeys {
             ProviderId::Xai => self.xai.clone(),
             ProviderId::Chutes => self.chutes.clone(),
             ProviderId::Qwen => self.qwen.clone(),
+            ProviderId::Apiframe => self.apiframe.clone(),
         };
         key.map(Zeroizing::new)
     }
