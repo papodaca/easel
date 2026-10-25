@@ -12,6 +12,7 @@ pub fn credits_request() -> HttpRequest {
         auth: Some(ProviderId::Bfl),
         body: Body::Empty,
         max_body_bytes: 64 * 1024,
+        redact_query: false,
     }
 }
 

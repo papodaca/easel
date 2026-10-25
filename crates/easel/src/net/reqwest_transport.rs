@@ -62,7 +62,7 @@ impl HttpTransport for ReqwestTransport {
         cx: &mut App,
     ) -> Task<Result<HttpResponse, TransportError>> {
         let method = method_label(request.method).to_owned();
-        let url = request.url.clone();
+        let display_url = display_url(&request);
         let client = self.client.clone();
         let keys = Arc::clone(&self.keys);
         let budget = self.budget(&request);
@@ -75,7 +75,10 @@ impl HttpTransport for ReqwestTransport {
             Ok(response) => Ok(response),
             Err(err) => match err.downcast::<TransportFailure>() {
                 Ok(failure) => Err(failure.0),
-                Err(_) => Err(TransportError::Network { method, url }),
+                Err(_) => Err(TransportError::Network {
+                    method,
+                    url: display_url,
+                }),
             },
         })
     }
@@ -100,9 +103,10 @@ async fn execute(
 ) -> Result<HttpResponse, TransportError> {
     let method = method_label(request.method).to_owned();
     let url = request.url.clone();
+    let display_url = display_url(&request);
     ensure_url(&url)?;
     apply_auth(&mut request, keys)?;
-    log_request(&request);
+    log_request(&request, &display_url);
 
     let reqwest_method = match request.method {
         Method::Get => reqwest::Method::GET,
@@ -115,7 +119,7 @@ async fn execute(
             header.name.as_str(),
             header_value(header).map_err(|_| TransportError::Network {
                 method: method.clone(),
-                url: url.clone(),
+                url: display_url.clone(),
             })?,
         );
     }
@@ -124,13 +128,13 @@ async fn execute(
         Body::Multipart { parts } => {
             builder.multipart(multipart_form(parts).map_err(|_| TransportError::Network {
                 method: method.clone(),
-                url: url.clone(),
+                url: display_url.clone(),
             })?)
         }
         Body::Json(value) => {
             let bytes = serde_json::to_vec(value).map_err(|_| TransportError::Network {
                 method: method.clone(),
-                url: url.clone(),
+                url: display_url.clone(),
             })?;
             builder
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -144,11 +148,11 @@ async fn execute(
     let response = builder
         .send()
         .await
-        .map_err(|err| map_reqwest(err, &method, &url))?;
+        .map_err(|err| map_reqwest(err, &method, &display_url))?;
     let status = response.status().as_u16();
-    log::debug!("{method} {url} status {status}");
+    log::debug!("{method} {display_url} status {status}");
     let headers = response_headers(&response);
-    let body = read_body(response, request.max_body_bytes, &method, &url).await?;
+    let body = read_body(response, request.max_body_bytes, &method, &display_url).await?;
     Ok(HttpResponse {
         status,
         headers,
@@ -267,9 +271,9 @@ fn map_reqwest(err: reqwest::Error, method: &str, url: &str) -> TransportError {
     }
 }
 
-fn log_request(request: &HttpRequest) {
+fn log_request(request: &HttpRequest, display_url: &str) {
     let method = method_label(request.method);
-    let url = &request.url;
+    let url = display_url;
     log::debug!("{method} {url}");
     for header in &request.headers {
         if header.sensitive || credential_name(&header.name) {
@@ -283,6 +287,18 @@ fn log_request(request: &HttpRequest) {
         let end = bytes.len().min(1024);
         let text = String::from_utf8_lossy(&bytes[..end]);
         log::trace!("{method} {url} body {text}");
+    }
+}
+
+/// The URL as logs and transport errors report it: the query is `<redacted>`
+/// for requests that asked for it, and the scheme, host, and path stay.
+fn display_url(request: &HttpRequest) -> String {
+    if !request.redact_query {
+        return request.url.clone();
+    }
+    match request.url.split_once('?') {
+        Some((base, _)) => format!("{base}?<redacted>"),
+        None => request.url.clone(),
     }
 }
 
@@ -436,6 +452,7 @@ mod tests {
             auth: None,
             body,
             max_body_bytes: 1024,
+            redact_query: false,
         }
     }
 
@@ -865,11 +882,55 @@ mod tests {
             value: key.into(),
             sensitive: false,
         });
-        super::log_request(&http);
+        super::log_request(&http, super::display_url(&http).as_str());
         let logged = lines_for(url);
         assert!(logged.contains("<redacted>"), "{logged}");
         assert!(!logged.contains(key), "{logged}");
         assert!(!logged.contains("key="), "{logged}");
+    }
+
+    #[gpui::test]
+    async fn a_redacted_picture_get_sends_the_query_and_logs_it_masked(cx: &mut TestAppContext) {
+        install_capture();
+        let mut server = server();
+        let mock = server
+            .mock("GET", "/a.png?Expires=170&Signature=abc")
+            .with_status(200)
+            .create_async()
+            .await;
+        let transport = boot(cx, MapKeys::default());
+        let url = format!("{}/a.png?Expires=170&Signature=abc", server.url());
+        let mut http = request(Method::Get, &url, Body::Empty);
+        http.redact_query = true;
+        let response = dispatch(cx, &transport, http).await.expect("picture");
+        assert_eq!(response.status, 200);
+        mock.assert_async().await;
+        let logged = lines_for(&format!("{}/a.png", server.url()));
+        assert!(logged.contains("<redacted>"), "{logged}");
+        assert!(!logged.contains("Expires=170"), "{logged}");
+        assert!(!logged.contains("Signature=abc"), "{logged}");
+    }
+
+    #[gpui::test]
+    async fn a_redacted_transport_error_keeps_the_path_and_masks_the_query(
+        cx: &mut TestAppContext,
+    ) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("addr");
+        drop(listener);
+        let transport = boot_timeout(cx, Duration::from_secs(1));
+        let mut http = request(
+            Method::Get,
+            format!("http://{address}/a.png?Expires=secret&Signature=top"),
+            Body::Empty,
+        );
+        http.redact_query = true;
+        let err = dispatch(cx, &transport, http).await.expect_err("refused");
+        let text = err.to_string();
+        assert!(text.contains("<redacted>"), "{text}");
+        assert!(text.contains("/a.png"), "{text}");
+        assert!(!text.contains("Expires=secret"), "{text}");
+        assert!(!text.contains("Signature=top"), "{text}");
     }
 
     #[gpui::test]

@@ -341,6 +341,7 @@ fn refused_poll(submitted: &Submitted) -> HttpRequest {
         auth: Some(ProviderId::Chutes),
         body: Body::Empty,
         max_body_bytes: 1024,
+        redact_query: false,
     }
 }
 
@@ -376,6 +377,7 @@ fn build_chutes(spec: &ModelSpec, request: &JobRequest, images: &[ImageInput]) -
         auth: Some(ProviderId::Chutes),
         body: Body::Json(Value::Object(body)),
         max_body_bytes: 100 * 1024 * 1024,
+        redact_query: false,
     }
 }
 

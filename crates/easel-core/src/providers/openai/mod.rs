@@ -396,6 +396,7 @@ fn build_openai(
         auth: Some(ProviderId::OpenAi),
         body: Body::Json(Value::Object(body)),
         max_body_bytes: 100 * 1024 * 1024,
+        redact_query: false,
     }
 }
 
@@ -441,6 +442,7 @@ macro_rules! impl_openai {
                     auth: Some(ProviderId::OpenAi),
                     body: crate::http::Body::Empty,
                     max_body_bytes: 1024,
+                    redact_query: false,
                 }
             }
 

@@ -163,6 +163,7 @@ fn refused_poll(submitted: &Submitted) -> HttpRequest {
         auth: Some(ProviderId::Qwen),
         body: Body::Empty,
         max_body_bytes: 1024,
+        redact_query: false,
     }
 }
 
@@ -184,7 +185,6 @@ fn image_entry(request: &JobRequest, images: &[ImageInput], index: usize) -> Val
     };
     json!({ "image": url })
 }
-
 /// The whole Qwen protocol: one POST, the answer carries image URLs to download.
 fn build_qwen(
     spec: &ModelSpec,
@@ -242,7 +242,120 @@ fn build_qwen(
         auth: Some(ProviderId::Qwen),
         body: Body::Json(Value::Object(body)),
         max_body_bytes: 100 * 1024 * 1024,
+        redact_query: false,
     }
+}
+
+fn body_value(response: &HttpResponse) -> Value {
+    serde_json::from_slice(&response.body).unwrap_or(Value::Null)
+}
+
+fn body_code(value: &Value) -> &str {
+    value
+        .get("code")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("")
+}
+
+fn body_message(value: &Value) -> &str {
+    value
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("")
+}
+
+fn is_moderation(code: &str) -> bool {
+    code == "DataInspectionFailed" || code == "data_inspection_failed"
+}
+
+fn is_throttling(code: &str) -> bool {
+    code == "Throttling" || code.starts_with("Throttling.")
+}
+
+/// The first image URL in a 200 body, or none when the body carries no picture.
+fn first_image_url(value: &Value) -> Option<url::Url> {
+    let content = value
+        .get("output")?
+        .get("choices")?
+        .get(0)?
+        .get("message")?
+        .get("content")?
+        .as_array()?;
+    for entry in content {
+        if let Some(url) = entry.get("image").and_then(Value::as_str) {
+            return url::Url::parse(url).ok();
+        }
+    }
+    None
+}
+
+/// Classify one synchronous response per the Qwen error catalog.
+fn classify(response: &HttpResponse) -> Result<Submitted, ProviderError> {
+    let value = body_value(response);
+    let code = body_code(&value);
+    if is_moderation(code) {
+        return Err(ProviderError::Blocked);
+    }
+    if is_throttling(code) {
+        return Err(ProviderError::RateLimited { retry_after: None });
+    }
+    match response.status {
+        401 => Err(ProviderError::Auth),
+        404 => Err(ProviderError::ModelNotFound),
+        400 if body_message(&value) == "Model not exist." => Err(ProviderError::ModelNotFound),
+        429 => Err(ProviderError::RateLimited { retry_after: None }),
+        200 if first_image_url(&value).is_some() => Err(ProviderError::Protocol(
+            "qwen returns an image url on the submit response".into(),
+        )),
+        200 => Err(ProviderError::NoImage),
+        status => Err(ProviderError::Http {
+            status,
+            body: String::from_utf8_lossy(&response.body).into_owned(),
+        }),
+    }
+}
+
+/// True when a result URL is safe to fetch: HTTPS, no userinfo, and a public
+/// literal host. Names are left to the deferred DNS check.
+#[must_use]
+pub fn is_downloadable(url: &url::Url) -> bool {
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => !is_private_v4(&ip),
+        Some(url::Host::Ipv6(ip)) => !is_private_v6(&ip),
+        Some(url::Host::Domain(_)) => true,
+        None => false,
+    }
+}
+
+fn is_private_v4(ip: &std::net::Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    ip.is_loopback()
+        || ip.is_link_local()
+        || octets[0] == 10
+        || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 168)
+}
+
+fn is_private_v6(ip: &std::net::Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    ip.is_loopback()
+        || segments[0] & 0xffc0 == 0xfe80 // link-local fe80::/10
+        || segments[0] & 0xfe00 == 0xfc00 // unique local fc00::/7
 }
 
 macro_rules! impl_qwen {
@@ -277,10 +390,21 @@ macro_rules! impl_qwen {
                 refused_poll(submitted)
             }
 
-            fn parse_submit(&self, _response: &HttpResponse) -> Result<Submitted, ProviderError> {
-                Err(ProviderError::Protocol(
-                    "qwen returns an image url on the submit response".into(),
-                ))
+            fn parse_submit(&self, response: &HttpResponse) -> Result<Submitted, ProviderError> {
+                classify(response)
+            }
+
+            fn picture_url(&self, response: &HttpResponse) -> Option<url::Url> {
+                if response.status != 200 {
+                    return None;
+                }
+                first_image_url(&body_value(response))
+            }
+
+            fn download_request(&self, url: &url::Url) -> HttpRequest {
+                let mut request = crate::providers::plain_download(url);
+                request.redact_query = true;
+                request
             }
 
             fn parse_poll(&self, _response: &HttpResponse) -> PollOutcome {
@@ -680,5 +804,179 @@ mod tests {
             provider.parse_submit(&response),
             Err(ProviderError::Protocol(_))
         ));
+    }
+
+    fn picture_body(url: &str, extra: &str) -> String {
+        format!(
+            r#"{{"output":{{"choices":[{{"message":{{"content":[{{"image":"{url}"}}{extra}]}}}}]}}}}"#
+        )
+    }
+
+    fn response(status: u16, body: &str) -> HttpResponse {
+        HttpResponse {
+            status,
+            headers: Vec::new(),
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn classification_follows_the_error_catalog() {
+        let provider = crate::providers::resolve_model("qwen-image-3.0-pro").unwrap();
+        let cases: Vec<(u16, &str, ProviderError)> = vec![
+            (
+                401,
+                r#"{"code":"InvalidApiKey","message":"no"}"#,
+                ProviderError::Auth,
+            ),
+            (
+                404,
+                r#"{"code":"model_not_found","message":"no"}"#,
+                ProviderError::ModelNotFound,
+            ),
+            (
+                400,
+                r#"{"code":"InvalidParameter","message":"Model not exist."}"#,
+                ProviderError::ModelNotFound,
+            ),
+            (
+                400,
+                r#"{"code":"DataInspectionFailed","message":"no","output":{"choices":[{"message":{"content":[{"image":"https://example.com/a.png"}]}}]}"#,
+                ProviderError::Blocked,
+            ),
+            (
+                400,
+                r#"{"code":"data_inspection_failed","message":"no"}"#,
+                ProviderError::Blocked,
+            ),
+            (
+                429,
+                r#"{"code":"SystemBusy","message":"slow"}"#,
+                ProviderError::RateLimited { retry_after: None },
+            ),
+            (
+                400,
+                r#"{"code":"InvalidParameter","message":"bad size"}"#,
+                ProviderError::Http {
+                    status: 400,
+                    body: r#"{"code":"InvalidParameter","message":"bad size"}"#.into(),
+                },
+            ),
+            (
+                500,
+                r#"{"code":"InternalError","message":"boom"}"#,
+                ProviderError::Http {
+                    status: 500,
+                    body: r#"{"code":"InternalError","message":"boom"}"#.into(),
+                },
+            ),
+        ];
+        for (status, body, expected) in cases {
+            let error = provider.parse_submit(&response(status, body)).unwrap_err();
+            assert_eq!(error, expected, "{status} {body}");
+        }
+    }
+
+    #[test]
+    fn a_throttling_code_is_rate_limited_on_any_status() {
+        let provider = crate::providers::resolve_model("qwen-image-3.0-pro").unwrap();
+        for status in [200, 400, 403, 429] {
+            for code in ["Throttling", "Throttling.RateQuota"] {
+                let body = format!(r#"{{"code":"{code}","message":"slow"}}"#);
+                assert_eq!(
+                    provider.parse_submit(&response(status, &body)).unwrap_err(),
+                    ProviderError::RateLimited { retry_after: None },
+                    "{status} {code}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_200_with_a_picture_url_reports_it_and_never_polls() {
+        let provider = crate::providers::resolve_model("qwen-image-3.0-pro").unwrap();
+        let body = picture_body(
+            "https://dashscope-result-sz.oss-cn-shenzhen.aliyuncs.com/a.png",
+            "",
+        );
+        let parsed = response(200, &body);
+        assert_eq!(
+            provider.picture_url(&parsed).map(|url| url.to_string()),
+            Some("https://dashscope-result-sz.oss-cn-shenzhen.aliyuncs.com/a.png".into())
+        );
+        assert!(matches!(
+            provider.parse_submit(&parsed),
+            Err(ProviderError::Protocol(_))
+        ));
+
+        let two = picture_body(
+            "https://dashscope-result-sz.oss-cn-shenzhen.aliyuncs.com/first.png",
+            r#",{"image":"https://dashscope-result-sz.oss-cn-shenzhen.aliyuncs.com/second.png"}"#,
+        );
+        assert_eq!(
+            provider
+                .picture_url(&response(200, &two))
+                .map(|url| url.to_string()),
+            Some("https://dashscope-result-sz.oss-cn-shenzhen.aliyuncs.com/first.png".into())
+        );
+    }
+
+    #[test]
+    fn a_200_without_a_picture_url_is_no_image() {
+        let provider = crate::providers::resolve_model("qwen-image-3.0-pro").unwrap();
+        for body in [
+            r#"{"output":{"choices":[{"message":{"content":[{"text":"hi"}]}}]}}"#,
+            r#"{"output":{}}"#,
+            r#"not json"#,
+            r#"{}"#,
+        ] {
+            let parsed = response(200, body);
+            assert!(provider.picture_url(&parsed).is_none(), "{body}");
+            assert_eq!(
+                provider.parse_submit(&parsed).unwrap_err(),
+                ProviderError::NoImage,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_200_body_never_reports_a_picture_url() {
+        let provider = crate::providers::resolve_model("qwen-image-3.0-pro").unwrap();
+        let body = picture_body(
+            "https://dashscope-result-sz.oss-cn-shenzhen.aliyuncs.com/a.png",
+            "",
+        );
+        assert!(provider.picture_url(&response(400, &body)).is_none());
+    }
+
+    #[test]
+    fn result_urls_are_screened_for_a_public_https_host() {
+        let ok = [
+            "https://dashscope-result-sz.oss-cn-shenzhen.aliyuncs.com/a.png?Expires=1&Signature=s",
+            "https://example.com/a.png",
+            "https://8.8.8.8/a.png",
+        ];
+        let refused = [
+            "http://example.com/a.png",
+            "https://user:pass@example.com/a.png",
+            "https://127.0.0.1/a.png",
+            "https://10.0.0.9/a.png",
+            "https://172.16.0.9/a.png",
+            "https://172.31.0.9/a.png",
+            "https://192.168.1.9/a.png",
+            "https://169.254.1.9/a.png",
+            "https://[::1]/a.png",
+            "https://[fe80::1]/a.png",
+            "https://[fd00::1]/a.png",
+        ];
+        for url in ok {
+            let parsed: url::Url = url.parse().unwrap();
+            assert!(super::is_downloadable(&parsed), "{url}");
+        }
+        for url in refused {
+            let parsed: url::Url = url.parse().unwrap();
+            assert!(!super::is_downloadable(&parsed), "{url}");
+        }
     }
 }

@@ -46,6 +46,7 @@ pub fn poll_request(submitted: &Submitted) -> HttpRequest {
         auth: Some(ProviderId::Krea),
         body: Body::Empty,
         max_body_bytes: 2 * 1024 * 1024,
+        redact_query: false,
     }
 }
 
@@ -69,6 +70,7 @@ pub fn cancel_request(submitted: &Submitted, last: Option<&PollOutcome>) -> Opti
         auth: Some(ProviderId::Krea),
         body: Body::Empty,
         max_body_bytes: 64 * 1024,
+        redact_query: false,
     })
 }
 

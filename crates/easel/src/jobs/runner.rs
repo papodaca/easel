@@ -17,6 +17,8 @@ use crate::net::{HttpTransport, KeyResolver, TransportError};
 
 const MAX_ACTIVE: usize = 4;
 
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+
 struct Slot {
     token: u64,
     state: JobState,
@@ -463,6 +465,18 @@ impl JobRunner {
             self.finish_inline(token, image, cx);
             return;
         }
+        let picture = self
+            .providers
+            .get(&token)
+            .and_then(|provider| provider.picture_url(&response));
+        if let Some(url) = picture {
+            if easel_core::providers::qwen::is_downloadable(&url) {
+                self.download_picture(token, url, cx);
+            } else {
+                self.finish_unpolled(token, ProviderError::NoImage, cx);
+            }
+            return;
+        }
         let parsed = self
             .providers
             .get(&token)
@@ -585,6 +599,51 @@ impl JobRunner {
             slot.local_id = Some(id);
         }
         self.fail(token, error, cx);
+    }
+
+    /// The slot stays in Submitting while the picture bytes are fetched.
+    fn download_picture(&mut self, token: u64, url: url::Url, cx: &mut Context<Self>) {
+        let Some(http) = self
+            .providers
+            .get(&token)
+            .map(|provider| provider.download_request(&url))
+        else {
+            self.fail(token, ProviderError::Protocol("unknown model".into()), cx);
+            return;
+        };
+        let task = self.transport.request(http, cx);
+        cx.spawn(async move |this, cx| {
+            let response = task.await;
+            this.update(cx, |runner, cx| runner.finish_picture(token, response, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn finish_picture(
+        &mut self,
+        token: u64,
+        response: Result<HttpResponse, TransportError>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dead(token) {
+            return;
+        }
+        let png = match response {
+            Ok(response) if response.status == 200 && response.body.starts_with(PNG_SIGNATURE) => {
+                Some(easel_core::providers::InlineImage {
+                    bytes: response.body,
+                    mime: "image/png".into(),
+                    interaction_id: String::new(),
+                    suggestion: String::new(),
+                })
+            }
+            _ => None,
+        };
+        match png {
+            Some(image) => self.finish_inline(token, image, cx),
+            None => self.finish_unpolled(token, ProviderError::NoImage, cx),
+        }
     }
 
     fn probe_beta(&mut self, token: u64, cx: &mut Context<Self>) {
@@ -1934,6 +1993,7 @@ mod tests {
                         auth: Some(ProviderId::Bfl),
                         body: Body::Empty,
                         max_body_bytes: 1024,
+                        redact_query: false,
                     },
                     content_hash: image.content_hash.clone(),
                 })

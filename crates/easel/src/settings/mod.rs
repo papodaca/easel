@@ -37,6 +37,7 @@ pub fn key_probe(provider: ProviderId) -> HttpRequest {
         auth: Some(provider),
         body: Body::Empty,
         max_body_bytes: 64 * 1024,
+        redact_query: false,
     }
 }
 

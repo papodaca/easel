@@ -54,6 +54,7 @@ fn upload_request(image: &EncodedImage) -> HttpRequest {
             }],
         },
         max_body_bytes: 2 * 1024 * 1024,
+        redact_query: false,
     }
 }
 

@@ -74,6 +74,8 @@ pub struct HttpRequest {
     pub auth: Option<ProviderId>,
     pub body: Body,
     pub max_body_bytes: u64,
+    /// Log and report the query as `<redacted>` while still sending it.
+    pub redact_query: bool,
 }
 
 impl fmt::Debug for HttpRequest {
@@ -121,6 +123,7 @@ mod tests {
             auth: Some(ProviderId::Bfl),
             body: Body::Json(json!({"prompt": "super-secret-body"})),
             max_body_bytes: 1024,
+            redact_query: false,
         };
         let request_debug = format!("{request:?}");
         assert!(!request_debug.contains("super-secret"));

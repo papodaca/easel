@@ -101,6 +101,7 @@ impl Provider for Krea {
             auth: Some(ProviderId::Krea),
             body: Body::Json(Value::Object(body)),
             max_body_bytes: 2 * 1024 * 1024,
+            redact_query: false,
         }
     }
 

@@ -239,6 +239,7 @@ impl crate::providers::Provider for Flux3 {
             auth: Some(crate::model_spec::ProviderId::Bfl),
             body: crate::http::Body::Empty,
             max_body_bytes: 2 * 1024 * 1024,
+            redact_query: false,
         }
     }
 
@@ -489,6 +490,7 @@ fn build_submit(
         auth: Some(ProviderId::Bfl),
         body: Body::Json(serde_json::Value::Object(body)),
         max_body_bytes: 100 * 1024 * 1024,
+        redact_query: false,
     }
 }
 

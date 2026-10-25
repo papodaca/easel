@@ -85,6 +85,7 @@ impl Provider for GrokImagine {
             auth: Some(ProviderId::Xai),
             body: Body::Empty,
             max_body_bytes: 1024,
+            redact_query: false,
         }
     }
 
@@ -234,6 +235,7 @@ fn build_xai(spec: &ModelSpec, request: &JobRequest, images: &[ImageInput]) -> H
         auth: Some(ProviderId::Xai),
         body: Body::Json(Value::Object(body)),
         max_body_bytes: 100 * 1024 * 1024,
+        redact_query: false,
     }
 }
 

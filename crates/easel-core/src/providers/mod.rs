@@ -319,6 +319,11 @@ pub trait Provider {
 
     fn parse_submit(&self, response: &HttpResponse) -> Result<Submitted, ProviderError>;
 
+    /// The picture URL a 200 submit response carries, when it does.
+    fn picture_url(&self, _response: &HttpResponse) -> Option<url::Url> {
+        None
+    }
+
     fn inline_image(&self, _response: &HttpResponse) -> Option<InlineImage> {
         None
     }
@@ -338,14 +343,21 @@ pub trait Provider {
     }
 
     fn download_request(&self, url: &url::Url) -> HttpRequest {
-        HttpRequest {
-            method: Method::Get,
-            url: url.to_string(),
-            headers: Vec::new(),
-            auth: None,
-            body: Body::Empty,
-            max_body_bytes: 100 * 1024 * 1024,
-        }
+        plain_download(url)
+    }
+}
+
+/// The unauthenticated GET every provider uses to fetch picture bytes.
+#[must_use]
+pub fn plain_download(url: &url::Url) -> HttpRequest {
+    HttpRequest {
+        method: Method::Get,
+        url: url.to_string(),
+        headers: Vec::new(),
+        auth: None,
+        body: Body::Empty,
+        max_body_bytes: 100 * 1024 * 1024,
+        redact_query: false,
     }
 }
 

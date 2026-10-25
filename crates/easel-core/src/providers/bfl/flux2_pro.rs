@@ -106,6 +106,7 @@ impl Provider for Flux2Pro {
             auth: Some(ProviderId::Bfl),
             body: Body::Json(Value::Object(body)),
             max_body_bytes: 100 * 1024 * 1024,
+            redact_query: false,
         }
     }
 
@@ -117,6 +118,7 @@ impl Provider for Flux2Pro {
             auth: Some(ProviderId::Bfl),
             body: Body::Empty,
             max_body_bytes: 2 * 1024 * 1024,
+            redact_query: false,
         }
     }
 

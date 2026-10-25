@@ -253,6 +253,7 @@ fn build_google(
         auth: Some(ProviderId::Google),
         body: Body::Json(Value::Object(body)),
         max_body_bytes: 100 * 1024 * 1024,
+        redact_query: false,
     }
 }
 
@@ -264,6 +265,7 @@ fn refused_poll(submitted: &crate::providers::Submitted) -> crate::http::HttpReq
         auth: Some(ProviderId::Google),
         body: crate::http::Body::Empty,
         max_body_bytes: 1024,
+        redact_query: false,
     }
 }
 
