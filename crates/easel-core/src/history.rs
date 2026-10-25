@@ -627,6 +627,7 @@ fn provider_name(model_id: &str) -> String {
             ProviderId::OpenAi => "openai",
             ProviderId::Xai => "xai",
             ProviderId::Chutes => "chutes",
+            ProviderId::Qwen => "qwen",
         })
         .unwrap_or("")
         .to_owned()
@@ -1026,6 +1027,12 @@ mod tests {
         assert_eq!(provider_name("chutes-flux-schnell"), "chutes");
         assert_eq!(provider_name("chutes-qwen-image-edit-2511"), "chutes");
         assert_eq!(provider_name("chutes-z-image-turbo"), "chutes");
+    }
+
+    #[test]
+    fn a_qwen_model_stamps_provider_qwen() {
+        assert_eq!(provider_name("qwen-image-3.0-pro"), "qwen");
+        assert_eq!(provider_name("qwen-image-2.1-pro"), "qwen");
     }
 
     #[test]

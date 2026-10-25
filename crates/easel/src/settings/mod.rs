@@ -28,6 +28,7 @@ pub fn key_probe(provider: ProviderId) -> HttpRequest {
         ProviderId::OpenAi => "https://api.openai.com/v1/models".to_owned(),
         ProviderId::Xai => "https://api.x.ai/v1/api-key".to_owned(),
         ProviderId::Chutes => "https://api.chutes.ai/users/me/quotas".to_owned(),
+        ProviderId::Qwen => easel_core::providers::qwen::GENERATION_URL.to_owned(),
     };
     HttpRequest {
         method: Method::Get,
@@ -165,6 +166,7 @@ pub struct SessionKeys {
     openai: Option<Zeroizing<String>>,
     xai: Option<Zeroizing<String>>,
     chutes: Option<Zeroizing<String>>,
+    qwen: Option<Zeroizing<String>>,
 }
 
 impl SessionKeys {
@@ -177,6 +179,7 @@ impl SessionKeys {
             ProviderId::OpenAi => self.openai = Some(key),
             ProviderId::Xai => self.xai = Some(key),
             ProviderId::Chutes => self.chutes = Some(key),
+            ProviderId::Qwen => self.qwen = Some(key),
         }
     }
 
@@ -188,6 +191,7 @@ impl SessionKeys {
             ProviderId::OpenAi => self.openai = None,
             ProviderId::Xai => self.xai = None,
             ProviderId::Chutes => self.chutes = None,
+            ProviderId::Qwen => self.qwen = None,
         }
     }
 
@@ -199,6 +203,7 @@ impl SessionKeys {
             ProviderId::OpenAi => self.openai.clone(),
             ProviderId::Xai => self.xai.clone(),
             ProviderId::Chutes => self.chutes.clone(),
+            ProviderId::Qwen => self.qwen.clone(),
         }
     }
 }
@@ -612,6 +617,7 @@ fn provider_slug(provider: ProviderId) -> &'static str {
         ProviderId::OpenAi => "openai",
         ProviderId::Xai => "xai",
         ProviderId::Chutes => "chutes",
+        ProviderId::Qwen => "qwen",
     }
 }
 

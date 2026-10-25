@@ -3,6 +3,7 @@ pub mod chutes;
 pub mod google;
 pub mod krea;
 pub mod openai;
+pub mod qwen;
 pub mod xai;
 
 use std::sync::OnceLock;
@@ -41,6 +42,8 @@ impl ModelRegistry {
                     chutes::QwenImageEdit2511::model_spec(),
                     chutes::QwenImage2512::model_spec(),
                     chutes::ZImageTurbo::model_spec(),
+                    qwen::QwenImage30Pro::model_spec(),
+                    qwen::QwenImage21Pro::model_spec(),
                 ]
             })
             .as_slice()
@@ -55,6 +58,7 @@ impl ModelRegistry {
             ProviderId::OpenAi,
             ProviderId::Xai,
             ProviderId::Chutes,
+            ProviderId::Qwen,
         ]
     }
 
@@ -89,6 +93,8 @@ pub fn resolve_model(model_id: &str) -> Option<Box<dyn Provider>> {
         "chutes-qwen-image-edit-2511" => Some(Box::new(chutes::QwenImageEdit2511)),
         "chutes-qwen-image-2512" => Some(Box::new(chutes::QwenImage2512)),
         "chutes-z-image-turbo" => Some(Box::new(chutes::ZImageTurbo)),
+        "qwen-image-3.0-pro" => Some(Box::new(qwen::QwenImage30Pro)),
+        "qwen-image-2.1-pro" => Some(Box::new(qwen::QwenImage21Pro)),
         _ => None,
     }
 }

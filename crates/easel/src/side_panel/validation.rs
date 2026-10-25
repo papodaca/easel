@@ -16,6 +16,7 @@ pub(crate) fn missing_key_line(provider: ProviderId) -> String {
         ProviderId::OpenAi => "OpenAI",
         ProviderId::Xai => "xAI",
         ProviderId::Chutes => "Chutes",
+        ProviderId::Qwen => "Qwen",
     };
     format!("No {name} API key — open Settings")
 }
@@ -144,6 +145,10 @@ mod tests {
         assert_eq!(
             super::missing_key_line(ProviderId::Xai),
             "No xAI API key — open Settings"
+        );
+        assert_eq!(
+            super::missing_key_line(ProviderId::Qwen),
+            "No Qwen API key — open Settings"
         );
     }
 }

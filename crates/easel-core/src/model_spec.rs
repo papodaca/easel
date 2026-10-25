@@ -13,6 +13,7 @@ pub enum ProviderId {
     #[serde(rename = "xai")]
     Xai,
     Chutes,
+    Qwen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,8 @@ const CHUTES_HOSTS: &[HostRule] = &[
     HostRule::Exact("vonkaiser-z-image-turbo.chutes.ai"),
 ];
 
+const QWEN_HOSTS: &[HostRule] = &[HostRule::Exact("maas.qwencloudapi.com")];
+
 impl ProviderId {
     #[must_use]
     pub fn base_url(self) -> &'static str {
@@ -49,6 +52,7 @@ impl ProviderId {
             Self::OpenAi => "https://api.openai.com",
             Self::Xai => "https://api.x.ai",
             Self::Chutes => "https://api.chutes.ai",
+            Self::Qwen => "https://maas.qwencloudapi.com",
         }
     }
 
@@ -61,6 +65,7 @@ impl ProviderId {
             Self::OpenAi => "OPENAI_API_KEY",
             Self::Xai => "XAI_API_KEY",
             Self::Chutes => "CHUTES_API_KEY",
+            Self::Qwen => "DASHSCOPE_API_KEY",
         }
     }
 
@@ -73,6 +78,7 @@ impl ProviderId {
             Self::OpenAi => "OpenAI",
             Self::Xai => "xAI",
             Self::Chutes => "Chutes",
+            Self::Qwen => "Qwen",
         }
     }
 
@@ -89,6 +95,7 @@ impl ProviderId {
             Self::OpenAi => AuthScheme::Bearer,
             Self::Xai => AuthScheme::Bearer,
             Self::Chutes => AuthScheme::Bearer,
+            Self::Qwen => AuthScheme::Bearer,
         }
     }
 
@@ -101,6 +108,7 @@ impl ProviderId {
             Self::OpenAi => OPENAI_HOSTS,
             Self::Xai => XAI_HOSTS,
             Self::Chutes => CHUTES_HOSTS,
+            Self::Qwen => QWEN_HOSTS,
         }
     }
 
@@ -423,6 +431,34 @@ mod tests {
         assert!(!ProviderId::Chutes.allows_url("https://evil.chutes.ai/x"));
         assert!(!ProviderId::Chutes.allows_url("http://api.chutes.ai/x"));
         assert!(!ProviderId::Chutes.allows_url("https://api.chutes.ai.evil.example/x"));
+    }
+
+    #[test]
+    fn qwen_identity_and_host_allowlist() {
+        use crate::providers::ModelRegistry;
+
+        assert_eq!(ProviderId::Qwen.env_var(), "DASHSCOPE_API_KEY");
+        assert_eq!(ProviderId::Qwen.display_name(), "Qwen");
+        assert_eq!(ProviderId::Qwen.base_url(), "https://maas.qwencloudapi.com");
+        assert!(matches!(ProviderId::Qwen.auth_scheme(), AuthScheme::Bearer));
+        assert_eq!(
+            serde_json::to_value(ProviderId::Qwen).unwrap(),
+            serde_json::json!("qwen")
+        );
+        assert!(ProviderId::Qwen.allows_url(
+            "https://maas.qwencloudapi.com/api/v1/services/aigc/multimodal-generation/generation"
+        ));
+        assert!(!ProviderId::Qwen.allows_url("https://dashscope-intl.aliyuncs.com/api/v1/models"));
+        assert!(!ProviderId::Qwen.allows_url("https://api.x.ai/v1/api-key"));
+        assert!(!ProviderId::Qwen.allows_url("http://maas.qwencloudapi.com/x"));
+        assert!(!ProviderId::Qwen.allows_url("https://maas.qwencloudapi.com.evil.example/x"));
+        assert!(ModelRegistry::providers().contains(&ProviderId::Qwen));
+        let ids: Vec<_> = ModelRegistry::specs()
+            .iter()
+            .filter(|spec| spec.provider == ProviderId::Qwen)
+            .map(|spec| spec.id.as_str())
+            .collect();
+        assert_eq!(ids, ["qwen-image-3.0-pro", "qwen-image-2.1-pro"]);
     }
 
     #[test]

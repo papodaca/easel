@@ -122,6 +122,34 @@ fn chutes_env_beats_the_store_keyed_by_base_url() {
 }
 
 #[test]
+fn qwen_env_beats_the_store_keyed_by_base_url() {
+    let store = MemoryStore::default();
+    store.write(ProviderId::Qwen, "store-key").expect("write");
+    assert!(store.stores_under(ProviderId::Qwen.base_url()));
+    assert_eq!(ProviderId::Qwen.base_url(), "https://maas.qwencloudapi.com");
+    let mut session = SessionKeys::default();
+    session.set(ProviderId::Qwen, "session-key");
+    let env = std::collections::HashMap::from([(
+        ProviderId::Qwen.env_var().to_owned(),
+        "env-key".to_owned(),
+    )]);
+    let resolved = resolve_key(ProviderId::Qwen, &env, &store, &session).expect("env");
+    assert_eq!(resolved.0.as_str(), "env-key");
+    assert_eq!(resolved.1, Source::Env);
+    assert_eq!(ProviderId::Qwen.env_var(), "DASHSCOPE_API_KEY");
+
+    let store_read = resolve_key(
+        ProviderId::Qwen,
+        &std::collections::HashMap::new(),
+        &store,
+        &session,
+    )
+    .expect("store");
+    assert_eq!(store_read.0.as_str(), "store-key");
+    assert_eq!(store_read.1, Source::Store);
+}
+
+#[test]
 fn krea_env_beats_the_store_keyed_by_base_url() {
     let store = MemoryStore::default();
     store.write(ProviderId::Krea, "store-key").expect("write");
@@ -543,6 +571,23 @@ fn chutes_probe_is_a_get_of_the_quotas_endpoint() {
     ));
 }
 
+#[test]
+fn qwen_probe_is_a_get_of_the_generation_url() {
+    use crate::settings::key_probe;
+    use easel_core::http::{Body, Method};
+    use easel_core::model_spec::AuthScheme;
+
+    let probe = key_probe(ProviderId::Qwen);
+    assert_eq!(probe.method, Method::Get);
+    assert_eq!(
+        probe.url,
+        "https://maas.qwencloudapi.com/api/v1/services/aigc/multimodal-generation/generation"
+    );
+    assert_eq!(probe.auth, Some(ProviderId::Qwen));
+    assert_eq!(probe.body, Body::Empty);
+    assert!(matches!(ProviderId::Qwen.auth_scheme(), AuthScheme::Bearer));
+}
+
 #[gpui::test]
 async fn chutes_settings_probe_classifies_the_quotas_response(cx: &mut TestAppContext) {
     use easel_core::http::{HttpResponse, Method};
@@ -584,6 +629,53 @@ async fn chutes_settings_probe_classifies_the_quotas_response(cx: &mut TestAppCo
         );
         assert_eq!(
             panel.read_with(cx, |panel, _| panel.row_note(ProviderId::Chutes).to_owned()),
+            note
+        );
+    }
+}
+
+#[gpui::test]
+async fn qwen_settings_probe_classifies_the_generation_response(cx: &mut TestAppContext) {
+    use easel_core::http::{HttpResponse, Method};
+    use gpui::prelude::*;
+
+    use crate::net::FakeTransport;
+    use crate::notifications::Notifications;
+    use crate::settings::SettingsPanel;
+
+    for (status, note) in [
+        (401, "invalid key"),
+        (400, "key accepted"),
+        (404, "key accepted"),
+        (405, "key accepted"),
+        (429, "key accepted"),
+    ] {
+        let transport = Arc::new(FakeTransport::scripted(vec![Ok(HttpResponse {
+            status,
+            headers: Vec::new(),
+            body: b"{}".to_vec(),
+        })]));
+        let notes = cx.new(|_| Notifications::new());
+        let panel = cx.new({
+            let notes = notes.clone();
+            let transport = Arc::clone(&transport);
+            move |cx| SettingsPanel::new(notes, transport, cx)
+        });
+        let titles = panel.read_with(cx, |panel, _| panel.provider_titles());
+        assert!(titles.iter().any(|title| title == "Qwen"), "{titles:?}");
+        panel
+            .update(cx, |panel, cx| panel.test_key(ProviderId::Qwen, cx))
+            .await;
+        let seen = transport.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].method, Method::Get);
+        assert_eq!(seen[0].auth, Some(ProviderId::Qwen));
+        assert!(
+            !seen.iter().any(|request| request.method == Method::Post),
+            "{seen:?}"
+        );
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.row_note(ProviderId::Qwen).to_owned()),
             note
         );
     }
