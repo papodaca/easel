@@ -83,10 +83,8 @@ impl Validation {
             messages.extend(easel_core::providers::xai::refusal_messages(prepared));
         }
         if provider == ProviderId::Qwen {
-            let attached =
-                usize::from(app.scene.source_image.is_some()) + app.scene.references.len();
             let prepared = usize::from(app.image.is_some()) + app.extras.len();
-            if attached > prepared {
+            if image_count > prepared {
                 messages.push("A prepared image is missing.".into());
             }
             if let Ok(request) = crate::jobs::build_request(app) {

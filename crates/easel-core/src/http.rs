@@ -78,12 +78,27 @@ pub struct HttpRequest {
     pub redact_query: bool,
 }
 
+impl HttpRequest {
+    /// The URL as logs and reports show it: the query becomes `<redacted>`
+    /// for requests that asked for it, while the GET still sends the original.
+    #[must_use]
+    pub fn display_url(&self) -> String {
+        if !self.redact_query {
+            return self.url.clone();
+        }
+        match self.url.split_once('?') {
+            Some((base, _)) => format!("{base}?<redacted>"),
+            None => self.url.clone(),
+        }
+    }
+}
+
 impl fmt::Debug for HttpRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("HttpRequest")
             .field("method", &self.method)
-            .field("url", &self.url)
+            .field("url", &self.display_url())
             .field("headers", &self.headers)
             .field("auth", &self.auth)
             .field("body", &self.body)

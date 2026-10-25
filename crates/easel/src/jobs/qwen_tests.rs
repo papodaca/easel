@@ -34,6 +34,12 @@ fn picture_body(url: &str) -> String {
     format!(r#"{{"output":{{"choices":[{{"message":{{"content":[{{"image":"{url}"}}]}}}}]}}}}"#)
 }
 
+fn two_picture_body(first: &str, second: &str) -> String {
+    format!(
+        r#"{{"output":{{"choices":[{{"message":{{"content":[{{"image":"{first}"}},{{"image":"{second}"}}]}}}}]}}}}"#
+    )
+}
+
 struct Harness {
     runner: gpui::Entity<JobRunner>,
     transport: Arc<FakeTransport>,
@@ -166,9 +172,9 @@ fn two_image_urls_keep_the_first_and_fetch_it_once(cx: &mut TestAppContext) {
         vec![
             Ok(http(
                 200,
-                picture_body(OSS_RESULT).replace(
-                    r#"}]}]}}"#,
-                    r#"},{"image":"https://dashscope-result-sz.oss-cn-shenzhen.aliyuncs.com/b.png"}]}]}}"#,
+                two_picture_body(
+                    OSS_RESULT,
+                    "https://dashscope-result-sz.oss-cn-shenzhen.aliyuncs.com/b.png",
                 ),
             )),
             Ok(http(200, first.clone())),

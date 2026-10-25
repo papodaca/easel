@@ -293,13 +293,7 @@ fn log_request(request: &HttpRequest, display_url: &str) {
 /// The URL as logs and transport errors report it: the query is `<redacted>`
 /// for requests that asked for it, and the scheme, host, and path stay.
 fn display_url(request: &HttpRequest) -> String {
-    if !request.redact_query {
-        return request.url.clone();
-    }
-    match request.url.split_once('?') {
-        Some((base, _)) => format!("{base}?<redacted>"),
-        None => request.url.clone(),
-    }
+    request.display_url()
 }
 
 fn body_bytes(body: &Body) -> Vec<u8> {

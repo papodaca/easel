@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use serde_json::{Map, Value, json};
@@ -27,6 +28,9 @@ const MAX_AREA: i64 = 4_194_304;
 
 /// The long side may be at most this many times the short side.
 const RATIO_CAP: i64 = 8;
+
+/// The guard firing when a 200 body still carries a picture URL.
+const PICTURE_URL_GUARD: &str = "qwen returns an image url on the submit response";
 
 static QWEN_IMAGE_30_PRO: LazyLock<ModelSpec> =
     LazyLock::new(|| qwen_spec("qwen-image-3.0-pro", "Qwen Image 3.0 Pro", 3, true));
@@ -93,9 +97,9 @@ fn dimension_field(key: &str, label: &str) -> FieldDef {
     FieldDef {
         key: key.into(),
         label: label.into(),
-        help: Some(
-            "Leave both empty to let the model choose. Both set: the pixel count must be from 262144 through 4194304 and the long side at most 8 times the short side.".into(),
-        ),
+        help: Some(format!(
+            "Leave both empty to let the model choose. Both set: the pixel count must be from {MIN_AREA} through {MAX_AREA} and the long side at most {RATIO_CAP} times the short side."
+        )),
         kind: FieldKind::Int {
             min: 0,
             max: DIMENSION_MAX,
@@ -107,7 +111,7 @@ fn dimension_field(key: &str, label: &str) -> FieldDef {
     }
 }
 
-fn dimension(values: &std::collections::BTreeMap<String, Value>, key: &str) -> i64 {
+fn dimension(values: &BTreeMap<String, Value>, key: &str) -> i64 {
     values
         .get(key)
         .and_then(Value::as_i64)
@@ -130,7 +134,7 @@ fn size_parameter(width: i64, height: i64) -> Option<String> {
     Some(format!("{width}*{height}"))
 }
 
-fn validate_size(values: &std::collections::BTreeMap<String, Value>) -> Vec<FieldError> {
+fn validate_size(values: &BTreeMap<String, Value>) -> Vec<FieldError> {
     let width = dimension(values, "width");
     let height = dimension(values, "height");
     match (width, height) {
@@ -171,7 +175,7 @@ fn pair_error(key: &str) -> FieldError {
 fn validate_qwen(
     spec: &ModelSpec,
     scene: &Scene,
-    values: &std::collections::BTreeMap<String, Value>,
+    values: &BTreeMap<String, Value>,
     image_count: usize,
 ) -> Vec<FieldError> {
     let ctx = crate::schema::RuleContext {
@@ -352,9 +356,9 @@ fn classify(response: &HttpResponse) -> Result<Submitted, ProviderError> {
         404 => Err(ProviderError::ModelNotFound),
         400 if body_message(&value) == "Model not exist." => Err(ProviderError::ModelNotFound),
         429 => Err(ProviderError::RateLimited { retry_after: None }),
-        200 if first_image_url(&value).is_some() => Err(ProviderError::Protocol(
-            "qwen returns an image url on the submit response".into(),
-        )),
+        200 if first_image_url(&value).is_some() => {
+            Err(ProviderError::Protocol(PICTURE_URL_GUARD.into()))
+        }
         200 => Err(ProviderError::NoImage),
         status => Err(ProviderError::Http {
             status,
@@ -404,7 +408,7 @@ macro_rules! impl_qwen {
             fn validate_for_submit(
                 &self,
                 scene: &Scene,
-                values: &std::collections::BTreeMap<String, Value>,
+                values: &BTreeMap<String, Value>,
                 image_count: usize,
             ) -> Vec<FieldError> {
                 validate_qwen(&$spec, scene, values, image_count)
@@ -444,9 +448,7 @@ macro_rules! impl_qwen {
             }
 
             fn parse_poll(&self, _response: &HttpResponse) -> PollOutcome {
-                PollOutcome::Failed(ProviderError::Protocol(
-                    "qwen returns an image url on the submit response".into(),
-                ))
+                PollOutcome::Failed(ProviderError::Protocol(PICTURE_URL_GUARD.into()))
             }
         }
     };
@@ -461,6 +463,12 @@ const ENCODED_CAP: usize = 10 * 1024 * 1024;
 /// The input aspect limit: long side to short side.
 const INPUT_RATIO_CAP: u32 = 10;
 
+/// The data URL length without building it: `data:` plus the media type plus
+/// `;base64,` plus standard padded base64 of the bytes.
+fn encoded_url_len(media_type: &str, bytes: usize) -> usize {
+    5 + media_type.len() + 8 + 4 * bytes.div_ceil(3)
+}
+
 /// The lines the form shows for an over-cap or unsuitable image. A capped
 /// count never reaches the builder, so these are the only over-cap proof.
 #[must_use]
@@ -473,7 +481,7 @@ pub fn refusal_messages(spec: &ModelSpec, prepared: usize, images: &[EncodedImag
     let sent = &images[..images.len().min(max)];
     if sent
         .iter()
-        .any(|image| data_url(&image.media_type, &image.base64()).len() > ENCODED_CAP)
+        .any(|image| encoded_url_len(&image.media_type, image.bytes.len()) > ENCODED_CAP)
     {
         messages.push("An encoded image is over 10 MB.".into());
     }
