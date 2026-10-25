@@ -3,6 +3,8 @@ mod runner;
 mod submit;
 
 #[cfg(test)]
+mod apiframe_tests;
+#[cfg(test)]
 mod chutes_tests;
 #[cfg(test)]
 mod krea_tests;
