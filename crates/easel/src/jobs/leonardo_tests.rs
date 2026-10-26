@@ -476,7 +476,6 @@ fn restoring_a_completed_history_row_restores_the_editor(cx: &mut TestAppContext
         .unwrap()
         .expect("editor snapshot");
 
-    // The same steps bottom_strip::restore_selected performs for a history row.
     let state = cx.update(|cx| cx.new(|_| crate::app_state::AppState::new()));
     state.update(cx, |app, cx| {
         app.set_model("leonardo-ideogram-v4.0", cx);

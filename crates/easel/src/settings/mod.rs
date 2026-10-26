@@ -30,7 +30,7 @@ pub fn key_probe(provider: ProviderId) -> HttpRequest {
         ProviderId::Chutes => "https://api.chutes.ai/users/me/quotas".to_owned(),
         ProviderId::Qwen => easel_core::providers::qwen::GENERATION_URL.to_owned(),
         ProviderId::Apiframe => "https://api.apiframe.ai/v2/me".to_owned(),
-        ProviderId::Leonardo => "https://cloud.leonardo.ai/api/rest/v2/models".to_owned(),
+        ProviderId::Leonardo => format!("{}/api/rest/v2/models", ProviderId::Leonardo.base_url()),
     };
     HttpRequest {
         method: Method::Get,

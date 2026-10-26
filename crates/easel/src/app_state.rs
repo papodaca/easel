@@ -126,8 +126,6 @@ impl AppState {
         let incoming_defaults = spec.schema.defaults();
         let mut values = incoming_defaults.clone();
         for (key, value) in &self.values {
-            // An untouched field adopts the incoming model's default; an edited
-            // value carries over only when the incoming schema accepts it.
             if outgoing_defaults.get(key) == Some(value) && incoming_defaults.contains_key(key) {
                 continue;
             }
@@ -152,19 +150,13 @@ impl AppState {
         if self.spec().provider != easel_core::model_spec::ProviderId::Leonardo {
             return max;
         }
-        let single_image_slot = matches!(
+        // On multi-guidance models only the style slot takes more than one
+        // image; every other selected slot sends just the first.
+        let style_or_unset = matches!(
             self.values.get("guidance_type").and_then(Value::as_str),
-            Some(
-                "content"
-                    | "image_to_image"
-                    | "character"
-                    | "depth"
-                    | "edge"
-                    | "pose"
-                    | "text_image"
-            )
+            None | Some("style")
         );
-        if single_image_slot { 1 } else { max }
+        if style_or_unset { max } else { 1 }
     }
 
     pub fn reconcile_values(

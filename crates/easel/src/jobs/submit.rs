@@ -19,9 +19,9 @@ pub fn build_request(app: &AppState) -> Result<JobRequest, String> {
     // images, so never fail preparation on a small or unsent image.
     let limit = if app.spec().provider == ProviderId::Leonardo {
         options.min_side = 128;
-        Some(app.max_sent_images())
+        app.max_sent_images()
     } else {
-        None
+        usize::MAX
     };
     let mut sources: Vec<&crate::image_load::DecodedImage> = Vec::new();
     if let Some(image) = &app.image {
@@ -29,7 +29,7 @@ pub fn build_request(app: &AppState) -> Result<JobRequest, String> {
     }
     sources.extend(app.extras.iter().map(std::convert::AsRef::as_ref));
     let mut images = Vec::new();
-    for image in sources.into_iter().take(limit.unwrap_or(usize::MAX)) {
+    for image in sources.into_iter().take(limit) {
         images.push(
             prepare_for_upload(&image.rgba_for_export, options).map_err(|err| err.to_string())?,
         );

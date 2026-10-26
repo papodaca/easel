@@ -20,6 +20,7 @@ use crate::schema::{CrossRule, FieldDef, FieldKind, ParamSchema, RuleContext};
 pub const GENERATIONS_URL: &str = "https://cloud.leonardo.ai/api/rest/v2/generations";
 const GENERATION_URL: &str = "https://cloud.leonardo.ai/api/rest/v1/generations";
 const STORED_CAP: usize = 64 * 1024;
+const KREA_STYLE_MAX_IMAGES: usize = 10;
 
 const STYLE_STRENGTHS: &[&str] = &["LOW", "MID", "HIGH", "ULTRA", "MAX"];
 const CONTENT_STRENGTHS: &[&str] = &["LOW", "MID", "HIGH", "ULTRA"];
@@ -225,7 +226,7 @@ static STYLE_TABLE: &[(&str, &str)] = &[
 ];
 
 #[must_use]
-pub fn style_label(uuid: &str) -> &str {
+fn style_label(uuid: &str) -> &str {
     STYLE_TABLE
         .iter()
         .find(|(_, candidate)| *candidate == uuid)
@@ -239,7 +240,6 @@ fn style_uuid(label: &str) -> Option<&'static str> {
         .map(|(_, uuid)| *uuid)
 }
 
-// Per-model style UUID lists, in the order of docs/api/leonardo.create.md.
 static STYLE_PHOENIX: &[&str] = &[
     "debdf72a-91a4-467b-bf61-cc02bdeb69c6",
     "9fdc5e8c-4d13-49b4-9ce6-5a74cbb19177",
@@ -505,7 +505,6 @@ static STYLE_GPT: &[&str] = &[
     "1db308ce-c7ad-4d10-96fd-592fa6b75cc4",
 ];
 
-// Dimension value tables extracted from docs/api/leonardo.create.md.
 static FLUX3_DIMS: &[i64] = &[
     672, 720, 768, 832, 864, 880, 912, 1024, 1152, 1184, 1216, 1248, 1344, 1360, 1456, 1536, 1568,
     1680, 1728, 1776, 1824, 2048, 2288, 2368, 2416, 2512, 2688, 2736, 2896, 3072, 3136, 3344, 3456,
@@ -887,6 +886,20 @@ const fn guidance_type(options: &'static [&'static str], default: &'static str) 
     Extra::GuidanceType { options, default }
 }
 
+fn guidance_strength_of(params: &BTreeMap<String, Value>) -> &str {
+    params
+        .get("guidance_strength")
+        .and_then(Value::as_str)
+        .unwrap_or("MID")
+}
+
+fn guidance_type_of<'a>(desc: &ModelDesc, params: &'a BTreeMap<String, Value>) -> &'a str {
+    params
+        .get("guidance_type")
+        .and_then(Value::as_str)
+        .unwrap_or(guidance_type_default(desc))
+}
+
 fn guidance_type_default(desc: &ModelDesc) -> &'static str {
     desc.fields
         .iter()
@@ -911,7 +924,6 @@ pub struct ModelDesc {
 }
 
 impl ModelDesc {
-    /// The form fields this model exposes, in schema order.
     fn schema_fields(&self) -> Vec<FieldDef> {
         let mut fields = Vec::new();
         match &self.dims {
@@ -977,7 +989,7 @@ impl ModelDesc {
                 key: "guidances".into(),
             },
             GuidanceMode::KreaStyle => ImageSlots::List {
-                max: 10,
+                max: KREA_STYLE_MAX_IMAGES,
                 key: "style".into(),
             },
             GuidanceMode::ImageReference { max_images } => ImageSlots::List {
@@ -1088,15 +1100,7 @@ fn bool_field(key: &str, default: Option<bool>) -> FieldDef {
 #[derive(Debug, Clone, Copy)]
 pub struct LeonardoModel(&'static ModelDesc);
 
-impl LeonardoModel {
-    #[must_use]
-    pub fn descriptor(&self) -> &'static ModelDesc {
-        self.0
-    }
-}
-
 static MODELS: [ModelDesc; 43] = [
-    // 1-2. Phoenix
     ModelDesc {
         id: "leonardo-phoenix-v1.0",
         name: "Phoenix 1.0",
@@ -1161,7 +1165,6 @@ static MODELS: [ModelDesc; 43] = [
             GUIDANCE_STRENGTH,
         ],
     },
-    // 3-4. Lucid
     ModelDesc {
         id: "leonardo-lucid-origin",
         name: "Lucid Origin",
@@ -1220,7 +1223,6 @@ static MODELS: [ModelDesc; 43] = [
             GUIDANCE_STRENGTH,
         ],
     },
-    // 5-13. SDXL presets
     ModelDesc {
         id: "leonardo-kino-xl",
         name: "Cinematic Kino",
@@ -1419,7 +1421,6 @@ static MODELS: [ModelDesc; 43] = [
         default_style: "Dynamic",
         fields: SDXL_FIELDS_FAST_MEDIUM,
     },
-    // 14-15. FLUX Dev / Schnell
     ModelDesc {
         id: "leonardo-flux-dev",
         name: "FLUX Dev",
@@ -1476,7 +1477,6 @@ static MODELS: [ModelDesc; 43] = [
             GUIDANCE_STRENGTH,
         ],
     },
-    // 16-19. Kontext and FLUX Pro partner models
     ModelDesc {
         id: "leonardo-flux-kontext-pro",
         name: "FLUX.1 Kontext",
@@ -1551,7 +1551,6 @@ static MODELS: [ModelDesc; 43] = [
         default_style: "",
         fields: &[ENHANCE_AUTO],
     },
-    // 20-23. Ideogram
     ModelDesc {
         id: "leonardo-ideogram-v3.0",
         name: "Ideogram 3.0",
@@ -1632,7 +1631,6 @@ static MODELS: [ModelDesc; 43] = [
             seed(2_147_483_647),
         ],
     },
-    // 24-28. Nano Banana family
     ModelDesc {
         id: "leonardo-gemini-2.5-flash-image",
         name: "Nano Banana",
@@ -1718,7 +1716,6 @@ static MODELS: [ModelDesc; 43] = [
         default_style: "Dynamic",
         fields: &[ENHANCE_AUTO, STYLE, seed(2_147_483_638)],
     },
-    // 29-32. Seedream
     ModelDesc {
         id: "leonardo-seedream-4.0",
         name: "Seedream 4.0",
@@ -1800,7 +1797,6 @@ static MODELS: [ModelDesc; 43] = [
         default_style: "",
         fields: &[sel("output_format", OUTPUT_FORMATS, "jpeg"), ENHANCE_AUTO],
     },
-    // 33-36. GPT Image partner models
     ModelDesc {
         id: "leonardo-gpt-image-1.5",
         name: "GPT Image-1.5",
@@ -1886,7 +1882,6 @@ static MODELS: [ModelDesc; 43] = [
             STYLE,
         ],
     },
-    // 37-39. Recraft and Krea Turbo
     ModelDesc {
         id: "leonardo-recraft-v4",
         name: "Recraft V4",
@@ -1940,7 +1935,6 @@ static MODELS: [ModelDesc; 43] = [
         default_style: "",
         fields: &[ENHANCE_AUTO],
     },
-    // 40. Krea 2
     ModelDesc {
         id: "leonardo-krea-2",
         name: "Krea 2",
@@ -1965,7 +1959,6 @@ static MODELS: [ModelDesc; 43] = [
             GUIDANCE_STRENGTH,
         ],
     },
-    // 41-42. Aurora upscalers
     ModelDesc {
         id: "leonardo-aurora-upscaler-creative",
         name: "Aurora Upscaler Creative",
@@ -1996,7 +1989,6 @@ static MODELS: [ModelDesc; 43] = [
             seed(2_147_483_647),
         ],
     },
-    // 43. Remove Background
     ModelDesc {
         id: "leonardo-remove-bg",
         name: "Remove Background",
@@ -2030,8 +2022,6 @@ static MODELS: [ModelDesc; 43] = [
     },
 ];
 
-/// The shared SDXL preset field block: mode, contrast, prompt enhance, style,
-/// negative prompt, transparency, tiling, seed, and guidance controls.
 static SDXL_FIELDS_FAST_MEDIUM: &[Extra] = &[
     sel("mode", MODE_FAST_QUALITY, "FAST"),
     CONTRAST_MEDIUM,
@@ -2146,14 +2136,7 @@ impl Provider for LeonardoModel {
                 continue;
             }
             match extra {
-                Extra::Select { .. } => {
-                    if let Some(text) = value.as_str()
-                        && !text.is_empty()
-                    {
-                        params.insert(extra.key().into(), json!(text));
-                    }
-                }
-                Extra::Text { .. } => {
+                Extra::Select { .. } | Extra::Text { .. } => {
                     if let Some(text) = value.as_str()
                         && !text.is_empty()
                     {
@@ -2169,7 +2152,7 @@ impl Provider for LeonardoModel {
                     if let Some(number) = value.as_i64()
                         && number > 0
                     {
-                        params.insert("seed".into(), json!(number));
+                        params.insert(extra.key().into(), json!(number));
                     }
                 }
                 Extra::Int { .. } => {
@@ -2233,23 +2216,11 @@ impl Provider for LeonardoModel {
 }
 
 fn build_guidances(desc: &ModelDesc, request: &JobRequest, images: &[ImageInput]) -> Option<Value> {
-    let strength = || {
-        request
-            .params
-            .get("guidance_strength")
-            .and_then(Value::as_str)
-            .unwrap_or("MID")
-            .to_owned()
-    };
+    let strength = || guidance_strength_of(&request.params).to_owned();
     match desc.guidance {
         GuidanceMode::None => None,
         GuidanceMode::MultiSlot { max_images, .. } => {
-            let slot = request
-                .params
-                .get("guidance_type")
-                .and_then(Value::as_str)
-                .unwrap_or(guidance_type_default(desc))
-                .to_owned();
+            let slot = guidance_type_of(desc, &request.params).to_owned();
             let cap = if slot == "style" { max_images } else { 1 };
             let entries: Vec<Value> = images
                 .iter()
@@ -2266,7 +2237,7 @@ fn build_guidances(desc: &ModelDesc, request: &JobRequest, images: &[ImageInput]
         GuidanceMode::KreaStyle => {
             let entries: Vec<Value> = images
                 .iter()
-                .take(10)
+                .take(KREA_STYLE_MAX_IMAGES)
                 .map(|input| strength_entry(input, &strength()))
                 .collect();
             (!entries.is_empty()).then(|| json!({ "style": entries }))
@@ -2347,29 +2318,27 @@ fn validate(
     if let DimensionRule::FromInputImage { min_side } = desc.dims
         && let Some((width, height)) = first_slot(scene)
     {
-        {
-            let (prep_w, prep_h) = crate::image_prep::fit_pixels(width, height, 4_000_000);
-            if prep_w < min_side || prep_h < min_side {
+        let (prep_w, prep_h) = crate::image_prep::fit_pixels(width, height, 4_000_000);
+        if prep_w < min_side || prep_h < min_side {
+            errors.push(FieldError {
+                key: "images".into(),
+                message: format!("Input image must be at least {min_side}×{min_side}."),
+                approved_max: None,
+            });
+        } else {
+            let factor = values
+                .get("upscale_factor")
+                .and_then(Value::as_str)
+                .and_then(|text| text.parse::<i64>().ok())
+                .unwrap_or(2);
+            let out_w = i64::from(prep_w) * factor;
+            let out_h = i64::from(prep_h) * factor;
+            if out_w > 16_384 || out_h > 16_384 || out_w * out_h > 64_000_000 {
                 errors.push(FieldError {
                     key: "images".into(),
-                    message: format!("Input image must be at least {min_side}×{min_side}."),
+                    message: "Upscaled image exceeds 16384px or 64 MP limit.".into(),
                     approved_max: None,
                 });
-            } else {
-                let factor = values
-                    .get("upscale_factor")
-                    .and_then(Value::as_str)
-                    .and_then(|text| text.parse::<i64>().ok())
-                    .unwrap_or(2);
-                let out_w = i64::from(prep_w) * factor;
-                let out_h = i64::from(prep_h) * factor;
-                if out_w > 16_384 || out_h > 16_384 || out_w * out_h > 64_000_000 {
-                    errors.push(FieldError {
-                        key: "images".into(),
-                        message: "Upscaled image exceeds 16384px or 64 MP limit.".into(),
-                        approved_max: None,
-                    });
-                }
             }
         }
     }
@@ -2406,32 +2375,32 @@ fn validate(
     if image_count >= 1 {
         match desc.guidance {
             GuidanceMode::MultiSlot { .. } => {
-                let slot = values
-                    .get("guidance_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or(guidance_type_default(desc));
-                let strength = values
-                    .get("guidance_strength")
-                    .and_then(Value::as_str)
-                    .unwrap_or("MID");
-                let allowed = match slot {
-                    "style" => STYLE_STRENGTHS,
-                    "content" => CONTENT_STRENGTHS,
-                    _ => BASIC_STRENGTHS,
+                let slot = guidance_type_of(desc, values);
+                let strength = guidance_strength_of(values);
+                let (allowed, message) = match slot {
+                    "style" => (
+                        STYLE_STRENGTHS,
+                        format!(
+                            "Style guidance strength must be {}.",
+                            or_list(STYLE_STRENGTHS)
+                        ),
+                    ),
+                    "content" => (
+                        CONTENT_STRENGTHS,
+                        format!(
+                            "Content guidance strength must be {}.",
+                            or_list(CONTENT_STRENGTHS)
+                        ),
+                    ),
+                    other => (
+                        BASIC_STRENGTHS,
+                        format!(
+                            "Guidance strength for {other} must be {}.",
+                            or_list(BASIC_STRENGTHS)
+                        ),
+                    ),
                 };
                 if !allowed.contains(&strength) {
-                    let allowed_text = or_list(allowed);
-                    let message = match slot {
-                        "style" => {
-                            format!("Style guidance strength must be {allowed_text}.")
-                        }
-                        "content" => {
-                            format!("Content guidance strength must be {allowed_text}.")
-                        }
-                        other => {
-                            format!("Guidance strength for {other} must be {allowed_text}.")
-                        }
-                    };
                     errors.push(FieldError {
                         key: "guidance_strength".into(),
                         message,
@@ -2440,10 +2409,7 @@ fn validate(
                 }
             }
             GuidanceMode::KreaStyle => {
-                let strength = values
-                    .get("guidance_strength")
-                    .and_then(Value::as_str)
-                    .unwrap_or("MID");
+                let strength = guidance_strength_of(values);
                 if !STYLE_STRENGTHS.contains(&strength) {
                     errors.push(FieldError {
                         key: "guidance_strength".into(),
@@ -2462,13 +2428,7 @@ fn validate(
 }
 
 fn first_slot(scene: &Scene) -> Option<(u32, u32)> {
-    if let Some(source) = &scene.source_image {
-        return Some((source.width, source.height));
-    }
-    scene
-        .references
-        .first()
-        .map(|reference| (reference.width, reference.height))
+    scene.slots().first().map(|slot| (slot.width, slot.height))
 }
 
 fn or_list(values: &[&str]) -> String {
@@ -2536,16 +2496,11 @@ fn parse_poll(response: &HttpResponse) -> PollOutcome {
     let Ok(value) = serde_json::from_slice::<Value>(&response.body) else {
         return PollOutcome::Failed(ProviderError::Protocol("poll body was not json".into()));
     };
-    let Some(pk) = value.get("generations_by_pk") else {
+    let Some(pk) = value.get("generations_by_pk").filter(|pk| !pk.is_null()) else {
         return PollOutcome::Failed(ProviderError::Protocol(
             "poll response missing generations_by_pk".into(),
         ));
     };
-    if pk.is_null() {
-        return PollOutcome::Failed(ProviderError::Protocol(
-            "poll response missing generations_by_pk".into(),
-        ));
-    }
     let Some(status) = pk.get("status").and_then(Value::as_str) else {
         return PollOutcome::Failed(ProviderError::Protocol(
             "poll response had no status".into(),
