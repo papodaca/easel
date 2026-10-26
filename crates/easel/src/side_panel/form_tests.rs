@@ -2064,6 +2064,76 @@ fn a_text_only_model_omits_undersized_images(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn remove_bg_sends_both_of_its_slot_images(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("leonardo-remove-bg", cx);
+        attach_leonardo(app, cx, 1);
+    });
+    let validation = leonardo_validation(&mut cx, state.clone());
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert!(validation.read_with(&cx, |validation, cx| validation.send_notice(cx).is_none()));
+    state.read_with(&cx, |app, _| {
+        let max = app.spec().capabilities.image_slots.max();
+        assert!(max > 1, "{}", max);
+        assert_eq!(app.max_sent_images(), max);
+        assert_eq!(crate::jobs::build_request(app).unwrap().images.len(), 2);
+    });
+}
+
+#[gpui::test]
+fn krea2_sends_every_attached_image_without_a_guidance_slot(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("leonardo-krea-2", cx);
+        app.scene.prose = "a harbor".into();
+        attach_leonardo(app, cx, 2);
+    });
+    let validation = leonardo_validation(&mut cx, state.clone());
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert!(validation.read_with(&cx, |validation, cx| validation.send_notice(cx).is_none()));
+    state.read_with(&cx, |app, _| {
+        let max = app.spec().capabilities.image_slots.max();
+        assert!(max > 1, "{}", max);
+        assert_eq!(app.max_sent_images(), max);
+        assert_eq!(crate::jobs::build_request(app).unwrap().images.len(), 3);
+    });
+}
+
+#[gpui::test]
+fn an_undersized_image_blocks_generate_on_leonardo_image_models(cx: &mut TestAppContext) {
+    for id in ["leonardo-remove-bg", "leonardo-phoenix-v1.0"] {
+        let (state, mut cx) = open(cx);
+        state.update(&mut cx, |app, cx| {
+            app.set_model(id, cx);
+            app.scene.prose = "a harbor".into();
+            app.set_image(tiny_image(), cx);
+        });
+        let validation = leonardo_validation(&mut cx, state.clone());
+        let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+        assert!(
+            messages
+                .iter()
+                .any(|message| *message == "Input image must be at least 128×128."),
+            "{id}: {messages:?}"
+        );
+        assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+
+        state.update(&mut cx, |app, cx| app.set_image(leonardo_image(), cx));
+        assert!(validation.read_with(&cx, |validation, cx| {
+            !validation
+                .messages(cx)
+                .iter()
+                .any(|message| message.contains("128×128"))
+        }));
+        assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+        state.update(&mut cx, |app, _| {
+            assert!(crate::jobs::build_request(app).is_ok(), "{id}");
+        });
+    }
+}
+
+#[gpui::test]
 fn leonardo_width_and_height_render_number_inputs(cx: &mut TestAppContext) {
     let (state, form, mut cx) = mount(cx);
     for id in [

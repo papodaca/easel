@@ -25,6 +25,7 @@ const KREA_STYLE_MAX_IMAGES: usize = 10;
 const STYLE_STRENGTHS: &[&str] = &["LOW", "MID", "HIGH", "ULTRA", "MAX"];
 const CONTENT_STRENGTHS: &[&str] = &["LOW", "MID", "HIGH", "ULTRA"];
 const BASIC_STRENGTHS: &[&str] = &["LOW", "MID", "HIGH"];
+const MIN_INPUT_SIDE: u32 = 128;
 
 static SLOTS_PHOENIX: &[&str] = &["image_to_image", "content", "style", "character"];
 static SLOTS_SDXL: &[&str] = &[
@@ -692,6 +693,72 @@ static IDEOGRAM_V4_PAIRS: &[(i64, i64)] = &[
     (3328, 1248),
     (1280, 3072),
     (3072, 1280),
+];
+static IDEOGRAM_P_IMAGE_PAIRS: &[(i64, i64)] = &[
+    (1024, 1024),
+    (2048, 2048),
+    (1280, 720),
+    (2560, 1440),
+    (720, 1280),
+    (1440, 2560),
+    (1152, 864),
+    (2304, 1728),
+    (864, 1152),
+    (1728, 2304),
+    (1248, 832),
+    (2496, 1664),
+    (832, 1248),
+    (1664, 2496),
+    (1280, 800),
+    (2560, 1600),
+    (800, 1280),
+    (1600, 2560),
+    (1536, 512),
+    (3456, 1024),
+    (512, 1536),
+    (1024, 3456),
+    (896, 1120),
+    (1792, 2240),
+    (1440, 720),
+    (2880, 1440),
+    (1536, 640),
+    (3072, 1280),
+];
+static IDEOGRAM_45_PAIRS: &[(i64, i64)] = &[
+    (2048, 2048),
+    (1440, 2880),
+    (2880, 1440),
+    (1664, 2496),
+    (2496, 1664),
+    (1792, 2240),
+    (2240, 1792),
+    (1440, 2560),
+    (2560, 1440),
+    (1600, 2560),
+    (2560, 1600),
+    (1728, 2304),
+    (2304, 1728),
+    (1296, 3168),
+    (3168, 1296),
+    (1152, 2944),
+    (2944, 1152),
+    (1248, 3328),
+    (3328, 1248),
+    (1280, 3072),
+    (3072, 1280),
+    (1024, 1024),
+    (896, 1120),
+    (1120, 896),
+    (864, 1152),
+    (1152, 864),
+    (832, 1248),
+    (1248, 832),
+    (800, 1280),
+    (1280, 800),
+    (720, 1280),
+    (1280, 720),
+    (720, 1440),
+    (1440, 720),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1601,7 +1668,7 @@ static MODELS: [ModelDesc; 43] = [
         dims: DimensionRule::Discrete {
             w: P_IMAGE_DIMS,
             h: P_IMAGE_DIMS,
-            pairs: &[],
+            pairs: IDEOGRAM_P_IMAGE_PAIRS,
             def_w: 1024,
             def_h: 1024,
         },
@@ -1618,7 +1685,7 @@ static MODELS: [ModelDesc; 43] = [
         dims: DimensionRule::Discrete {
             w: IDEOGRAM_45_DIMS,
             h: IDEOGRAM_45_DIMS,
-            pairs: &[],
+            pairs: IDEOGRAM_45_PAIRS,
             def_w: 1024,
             def_h: 1024,
         },
@@ -2342,6 +2409,32 @@ fn validate(
             }
         }
     }
+    if !matches!(desc.dims, DimensionRule::FromInputImage { .. }) {
+        let capacity = match desc.guidance {
+            GuidanceMode::None => 0,
+            GuidanceMode::MultiSlot { max_images, .. } => {
+                let slot = guidance_type_of(desc, values);
+                if slot == "style" { max_images } else { 1 }
+            }
+            GuidanceMode::KreaStyle => KREA_STYLE_MAX_IMAGES,
+            GuidanceMode::ImageReference { max_images } => max_images,
+            GuidanceMode::RemoveBg => 2,
+        };
+        let slots = scene.slots();
+        for slot in slots.iter().take(capacity.min(image_count)) {
+            let (prep_w, prep_h) =
+                crate::image_prep::fit_pixels(slot.width, slot.height, 4_000_000);
+            if prep_w < MIN_INPUT_SIDE || prep_h < MIN_INPUT_SIDE {
+                errors.push(FieldError {
+                    key: "images".into(),
+                    message: format!(
+                        "Input image must be at least {MIN_INPUT_SIDE}×{MIN_INPUT_SIDE}."
+                    ),
+                    approved_max: None,
+                });
+            }
+        }
+    }
     if let DimensionRule::Discrete { w, h, pairs, .. } = desc.dims {
         let width = values.get("width").and_then(Value::as_i64);
         let height = values.get("height").and_then(Value::as_i64);
@@ -2837,6 +2930,33 @@ mod tests {
     }
 
     #[test]
+    fn text_and_int_extras_serialize_into_parameters() {
+        let model = provider("leonardo-phoenix-v1.0");
+        let mut params = values(&model);
+        params.insert("negative_prompt".into(), json!("no clouds"));
+        let req = request(&model, "ancient observatory", params, Vec::new());
+        assert_eq!(
+            parameters(&model, &req)["negative_prompt"],
+            json!("no clouds")
+        );
+
+        let model = provider("leonardo-remove-bg");
+        let mut params = values(&model);
+        params.insert("shadow_opacity".into(), json!(40));
+        params.insert("crop_margin".into(), json!("10%"));
+        let req = request(&model, "leftover prompt", params, vec![encoded(512, 512)]);
+        let params_out = parameters(&model, &req);
+        assert_eq!(params_out["shadow_opacity"], json!(40));
+        assert_eq!(params_out["crop_margin"], json!("10%"));
+
+        let model = provider("leonardo-phoenix-v1.0");
+        let mut params = values(&model);
+        params.insert("negative_prompt".into(), json!(""));
+        let req = request(&model, "ancient observatory", params, Vec::new());
+        assert!(parameters(&model, &req).get("negative_prompt").is_none());
+    }
+
+    #[test]
     fn phoenix_style_guidance_sends_base64_entries_with_strength() {
         let model = provider("leonardo-phoenix-v1.0");
         let mut params = values(&model);
@@ -3076,6 +3196,97 @@ mod tests {
     }
 
     #[test]
+    fn phoenix_rejects_undersized_images_that_will_be_sent() {
+        let model = provider("leonardo-phoenix-v1.0");
+        let small = Scene {
+            prose: "a fox".into(),
+            source_image: Some(ImageRef::new("source", 100, 100)),
+            ..Scene::empty()
+        };
+        let errors = model.validate_for_submit(&small, &values(&model), 1);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message == "Input image must be at least 128×128."),
+            "{errors:?}"
+        );
+        let ok = Scene {
+            prose: "a fox".into(),
+            source_image: Some(ImageRef::new("source", 128, 128)),
+            ..Scene::empty()
+        };
+        assert!(
+            model
+                .validate_for_submit(&ok, &values(&model), 1)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn remove_bg_rejects_undersized_images() {
+        let model = provider("leonardo-remove-bg");
+        let small = Scene {
+            source_image: Some(ImageRef::new("source", 100, 100)),
+            ..Scene::empty()
+        };
+        let errors = model.validate_for_submit(&small, &values(&model), 1);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message == "Input image must be at least 128×128."),
+            "{errors:?}"
+        );
+        let ok = Scene {
+            source_image: Some(ImageRef::new("source", 128, 128)),
+            ..Scene::empty()
+        };
+        assert!(
+            model
+                .validate_for_submit(&ok, &values(&model), 1)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn text_only_models_skip_the_min_side_check() {
+        let model = provider("leonardo-ideogram-v4.0");
+        let scene = Scene {
+            prose: "a fox".into(),
+            source_image: Some(ImageRef::new("source", 100, 100)),
+            ..Scene::empty()
+        };
+        assert!(
+            model
+                .validate_for_submit(&scene, &values(&model), 0)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn only_sent_style_slots_are_checked_for_min_side() {
+        let model = provider("leonardo-phoenix-v1.0");
+        let scene = Scene {
+            prose: "a fox".into(),
+            source_image: Some(ImageRef::new("source", 128, 128)),
+            references: vec![ImageRef::new("ref", 100, 100)],
+            ..Scene::empty()
+        };
+        let mut style = values(&model);
+        style.insert("guidance_type".into(), json!("style"));
+        let errors = model.validate_for_submit(&scene, &style, 2);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message == "Input image must be at least 128×128."),
+            "{errors:?}"
+        );
+
+        let mut content = values(&model);
+        content.insert("guidance_type".into(), json!("content"));
+        assert!(model.validate_for_submit(&scene, &content, 2).is_empty());
+    }
+
+    #[test]
     fn multiple_of_eight_is_enforced_by_the_schema() {
         let model = provider("leonardo-phoenix-v1.0");
         let mut params = values(&model);
@@ -3138,6 +3349,74 @@ mod tests {
                 .iter()
                 .any(|error| error.message.contains("1440×2880")),
             "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn p_image_ideogram_enforces_the_documented_pairs() {
+        let model = provider("leonardo-p-image-ideogram");
+        let mut params = values(&model);
+        params.insert("width".into(), json!(1024));
+        params.insert("height".into(), json!(1024));
+        assert!(
+            model
+                .validate_for_submit(&scene_with("a fox"), &params, 0)
+                .is_empty()
+        );
+        params.insert("width".into(), json!(1280));
+        params.insert("height".into(), json!(720));
+        assert!(
+            model
+                .validate_for_submit(&scene_with("a fox"), &params, 0)
+                .is_empty()
+        );
+        params.insert("width".into(), json!(800));
+        params.insert("height".into(), json!(1024));
+        let errors = model.validate_for_submit(&scene_with("a fox"), &params, 0);
+        assert!(
+            errors.iter().any(|error| error
+                .message
+                .contains("Width and height must form one of the supported pairs")),
+            "{errors:?}"
+        );
+        assert!(
+            model
+                .validate_for_submit(&scene_with("a fox"), &values(&model), 0)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ideogram_45_enforces_the_documented_pairs() {
+        let model = provider("leonardo-ideogram-4.5");
+        let mut params = values(&model);
+        params.insert("width".into(), json!(1024));
+        params.insert("height".into(), json!(1024));
+        assert!(
+            model
+                .validate_for_submit(&scene_with("a fox"), &params, 0)
+                .is_empty()
+        );
+        params.insert("width".into(), json!(1440));
+        params.insert("height".into(), json!(2880));
+        assert!(
+            model
+                .validate_for_submit(&scene_with("a fox"), &params, 0)
+                .is_empty()
+        );
+        params.insert("width".into(), json!(1024));
+        params.insert("height".into(), json!(2048));
+        let errors = model.validate_for_submit(&scene_with("a fox"), &params, 0);
+        assert!(
+            errors.iter().any(|error| error
+                .message
+                .contains("Width and height must form one of the supported pairs")),
+            "{errors:?}"
+        );
+        assert!(
+            model
+                .validate_for_submit(&scene_with("a fox"), &values(&model), 0)
+                .is_empty()
         );
     }
 
