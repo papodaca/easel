@@ -15,6 +15,8 @@ mod openai_tests;
 #[cfg(test)]
 mod qwen_tests;
 #[cfg(test)]
+mod stability_tests;
+#[cfg(test)]
 mod xai_tests;
 
 use std::path::PathBuf;
