@@ -687,3 +687,146 @@ fn switching_between_bfl_and_apiframe_disarms_boxes_and_keeps_the_state(cx: &mut
     assert_eq!(prose, "keep this prompt");
     assert!(canvas);
 }
+
+#[gpui::test]
+fn leonardo_is_hidden_without_a_key_and_lists_all_forty_three_models_with_one(
+    cx: &mut TestAppContext,
+) {
+    let _env = ProviderEnvGuard::clear();
+    let (_state, panel) = editor_with(cx, Arc::new(SharedKeys::default()));
+    let providers = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.provider_menu().clone()),
+    );
+    assert!(
+        !providers.iter().any(|name| name == "Leonardo.Ai"),
+        "{providers:?}"
+    );
+
+    let keys = Arc::new(SharedKeys::default());
+    keys.set_session(ProviderId::Leonardo, "leonardo-key");
+    let (_state, panel) = editor_with(cx, keys);
+    let providers = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.provider_menu().clone()),
+    );
+    assert!(
+        providers.contains(&"Leonardo.Ai".to_string()),
+        "{providers:?}"
+    );
+
+    panel.update(cx, |panel, cx| panel.choose_provider("Leonardo.Ai", cx));
+    let models = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.model_menu().clone()),
+    );
+    assert_eq!(
+        models,
+        [
+            "Phoenix 1.0",
+            "Phoenix 0.9",
+            "Lucid Origin",
+            "Lucid Realism",
+            "Cinematic Kino",
+            "Anime",
+            "Portrait Perfect",
+            "Stock Photography",
+            "Illustrative Albedo",
+            "Concept Art",
+            "Lifelike Vision",
+            "Graphic Design",
+            "Leonardo Lightning",
+            "FLUX Dev",
+            "FLUX Schnell",
+            "FLUX.1 Kontext",
+            "FLUX.1 Kontext Max",
+            "FLUX.2 Pro",
+            "FLUX 3 Image",
+            "Ideogram 3.0",
+            "Ideogram 4.0",
+            "P-Image-Ideogram",
+            "Ideogram 4.5",
+            "Nano Banana",
+            "Nano Banana 2",
+            "Nano Banana 2.1",
+            "Nano Banana 2 Lite",
+            "Nano Banana Pro",
+            "Seedream 4.0",
+            "Seedream 4.5",
+            "Seedream 5.0 Pro",
+            "Seedream 5.0 Flash",
+            "GPT Image-1.5",
+            "GPT Image 2",
+            "GPT Image 2.5 Flare",
+            "GPT Image 2.5 Sunburst",
+            "Recraft V4",
+            "Recraft V4 Pro",
+            "Krea 2 Turbo",
+            "Krea 2",
+            "Aurora Upscaler Creative",
+            "Aurora Upscaler Precise",
+            "Remove Background",
+        ]
+    );
+    assert_eq!(
+        selected(
+            cx,
+            panel.read_with(cx, |panel, _| panel.model_menu().clone())
+        ),
+        "Phoenix 1.0"
+    );
+}
+
+#[gpui::test]
+fn leonardo_switches_adopt_defaults_and_keep_edited_dimensions(cx: &mut TestAppContext) {
+    let state = app(cx);
+    state.update(cx, |app, cx| {
+        app.scene.prose = "keep this prompt".into();
+        app.set_image(crate::side_panel::form_tests::source_image(), cx);
+        app.scene.add_box(
+            Rect {
+                x: 10,
+                y: 10,
+                w: 100,
+                h: 80,
+            },
+            BoxKind::Layout,
+        );
+        app.set_model("leonardo-lucid-origin", cx);
+    });
+    let dims = state.read_with(cx, |app, _| {
+        (app.values["width"].clone(), app.values["height"].clone())
+    });
+    assert_eq!(dims, (json!(1200), json!(1200)));
+
+    state.update(cx, |app, cx| app.set_model("leonardo-phoenix-v1.0", cx));
+    let dims = state.read_with(cx, |app, _| {
+        (app.values["width"].clone(), app.values["height"].clone())
+    });
+    assert_eq!(dims, (json!(1024), json!(1024)));
+
+    state.update(cx, |app, cx| app.set_model("leonardo-ideogram-v4.0", cx));
+    let dims = state.read_with(cx, |app, _| {
+        (app.values["width"].clone(), app.values["height"].clone())
+    });
+    assert_eq!(dims, (json!(2048), json!(2048)));
+
+    state.update(cx, |app, cx| {
+        app.set_model("leonardo-phoenix-v1.0", cx);
+        app.values.insert("width".into(), json!(1536));
+        app.values.insert("height".into(), json!(1536));
+        app.set_model("leonardo-flux-dev", cx);
+    });
+    let (dims, prose, canvas, boxes) = state.read_with(cx, |app, _| {
+        (
+            (app.values["width"].clone(), app.values["height"].clone()),
+            app.scene.prose.clone(),
+            app.image.is_some() && app.scene.source_image.is_some(),
+            app.scene.boxes.len(),
+        )
+    });
+    assert_eq!(dims, (json!(1536), json!(1536)));
+    assert_eq!(prose, "keep this prompt");
+    assert!(canvas);
+    assert_eq!(boxes, 1);
+}

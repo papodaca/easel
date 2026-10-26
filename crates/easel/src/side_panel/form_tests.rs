@@ -1881,3 +1881,212 @@ fn apiframe_qwen_image_task_type_gates_generate(cx: &mut TestAppContext) {
     });
     assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
 }
+
+fn leonardo_validation(
+    cx: &mut VisualTestContext,
+    state: gpui::Entity<AppState>,
+) -> gpui::Entity<Validation> {
+    let keys: Arc<dyn crate::net::KeyResolver> =
+        Arc::new(MapKeys::default().insert(ProviderId::Leonardo, "leonardo-key"));
+    cx.new(|cx| Validation::new(state, keys, cx))
+}
+
+fn leonardo_image() -> Arc<crate::image_load::DecodedImage> {
+    decoded(image::RgbaImage::from_pixel(
+        128,
+        128,
+        image::Rgba([20, 40, 60, 255]),
+    ))
+}
+
+fn tiny_image() -> Arc<crate::image_load::DecodedImage> {
+    decoded(image::RgbaImage::from_pixel(
+        100,
+        100,
+        image::Rgba([20, 40, 60, 255]),
+    ))
+}
+
+fn attach_leonardo(app: &mut AppState, cx: &mut gpui::Context<AppState>, extras: usize) {
+    app.set_image(leonardo_image(), cx);
+    for _ in 0..extras {
+        app.scene
+            .add_reference(easel_core::scene::ImageRef::new("ref", 128, 128));
+        app.extras.push(leonardo_image());
+    }
+}
+
+#[gpui::test]
+fn a_missing_leonardo_key_disables_generate(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("leonardo-phoenix-v1.0", cx);
+        app.scene.prose = "ancient observatory".into();
+    });
+    let keys: Arc<dyn crate::net::KeyResolver> = Arc::new(MapKeys::default());
+    let validation = cx.new(|cx| Validation::new(state.clone(), keys, cx));
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "No Leonardo.Ai API key — open Settings"),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    let validation = leonardo_validation(&mut cx, state);
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert!(validation.read_with(&cx, |validation, cx| validation.send_notice(cx).is_none()));
+}
+
+#[gpui::test]
+fn promptless_leonardo_models_need_one_image_and_generate_with_a_128_canvas(
+    cx: &mut TestAppContext,
+) {
+    for id in [
+        "leonardo-aurora-upscaler-creative",
+        "leonardo-aurora-upscaler-precise",
+        "leonardo-remove-bg",
+    ] {
+        let (state, mut cx) = open(cx);
+        state.update(&mut cx, |app, cx| app.set_model(id, cx));
+        let validation = leonardo_validation(&mut cx, state.clone());
+        let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message == "Add at least one image."),
+            "{id}: {messages:?}"
+        );
+        assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+
+        state.update(&mut cx, |app, cx| app.set_image(leonardo_image(), cx));
+        assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+        state.update(&mut cx, |app, _| {
+            assert!(crate::jobs::build_request(app).is_ok(), "{id}");
+        });
+    }
+}
+
+#[gpui::test]
+fn phoenix_content_guidance_max_blocks_until_high(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("leonardo-phoenix-v1.0", cx);
+        app.scene.prose = "ancient observatory".into();
+        app.set_image(leonardo_image(), cx);
+        app.values.insert("guidance_type".into(), json!("content"));
+        app.values.insert("guidance_strength".into(), json!("MAX"));
+    });
+    let validation = leonardo_validation(&mut cx, state.clone());
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "Content guidance strength must be LOW, MID, HIGH, or ULTRA."),
+        "{messages:?}"
+    );
+    state.update(&mut cx, |app, _| {
+        app.values.insert("guidance_strength".into(), json!("HIGH"));
+    });
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn phoenix_clamps_by_guidance_slot_and_lucid_by_capacity(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("leonardo-phoenix-v1.0", cx);
+        app.scene.prose = "ancient observatory".into();
+        attach_leonardo(app, cx, 2);
+        app.values.insert("guidance_type".into(), json!("style"));
+    });
+    let validation = leonardo_validation(&mut cx, state.clone());
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert!(validation.read_with(&cx, |validation, cx| validation.send_notice(cx).is_none()));
+    let sent = state.update(&mut cx, |app, _| {
+        crate::jobs::build_request(app).unwrap().images.len()
+    });
+    assert_eq!(sent, 3);
+
+    state.update(&mut cx, |app, _| {
+        app.values
+            .insert("guidance_type".into(), json!("image_to_image"));
+    });
+    assert_eq!(
+        validation.read_with(&cx, |validation, cx| validation.send_notice(cx)),
+        Some("1 of 3 images will be sent".to_string())
+    );
+    let (sent, marks) = state.read_with(&cx, |app, _| {
+        (
+            crate::jobs::build_request(app).unwrap().images.len(),
+            app.reference_marks(),
+        )
+    });
+    assert_eq!(sent, 1);
+    assert!(!marks[1].1 && marks[1].0.contains("not sent"), "{marks:?}");
+    assert!(!marks[2].1 && marks[2].0.contains("not sent"), "{marks:?}");
+
+    state.update(&mut cx, |app, cx| {
+        app.set_model("leonardo-lucid-origin", cx)
+    });
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert_eq!(
+        validation.read_with(&cx, |validation, cx| validation.send_notice(cx)),
+        Some("1 of 3 images will be sent".to_string())
+    );
+}
+
+#[gpui::test]
+fn a_text_only_model_omits_undersized_images(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("leonardo-ideogram-v4.0", cx);
+        app.scene.prose = "a harbor".into();
+        app.set_image(tiny_image(), cx);
+        app.scene
+            .add_reference(easel_core::scene::ImageRef::new("ref", 128, 128));
+        app.extras.push(leonardo_image());
+        app.scene
+            .add_reference(easel_core::scene::ImageRef::new("ref", 128, 128));
+        app.extras.push(leonardo_image());
+    });
+    let validation = leonardo_validation(&mut cx, state.clone());
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert_eq!(
+        validation.read_with(&cx, |validation, cx| validation.send_notice(cx)),
+        Some("0 of 3 images will be sent".to_string())
+    );
+    let images = state.update(&mut cx, |app, _| {
+        crate::jobs::build_request(app).unwrap().images.len()
+    });
+    assert_eq!(images, 0);
+}
+
+#[gpui::test]
+fn leonardo_width_and_height_render_number_inputs(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    for id in [
+        "leonardo-kino-xl",
+        "leonardo-flux-dev",
+        "leonardo-gpt-image-1.5",
+    ] {
+        state.update(&mut cx, |app, cx| app.set_model(id, cx));
+        assert!(
+            form.read_with(&cx, |form, _| form.number("width").is_some()),
+            "{id}"
+        );
+        assert!(
+            form.read_with(&cx, |form, _| form.number("height").is_some()),
+            "{id}"
+        );
+        assert!(
+            form.read_with(&cx, |form, _| form.slider("width").is_none()),
+            "{id}"
+        );
+        assert!(
+            form.read_with(&cx, |form, _| form.slider("height").is_none()),
+            "{id}"
+        );
+    }
+}
