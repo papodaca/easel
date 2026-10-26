@@ -1,6 +1,6 @@
 # easel
 
-easel is a desktop tool for marking up an image with labeled boxes and sending that markup to hosted image models. The window is gpui from the Zed tag `v1.24.2`, commit `fb69067729cb16a7f6135e2c1600c26a28c59659`.
+easel is a desktop tool for marking up an image with labeled boxes and sending that markup to hosted image models. The window is gpui from the Zed tag `v1.25.3`, commit `8dd255c3eafb5231056fe4e6f601cedd011f1c93`.
 
 | Model | Boxes | Image inputs | Size | Auth |
 | --- | --- | --- | --- | --- |
