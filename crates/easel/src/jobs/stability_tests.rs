@@ -524,6 +524,48 @@ fn a_content_filtered_poll_fails_blocked_without_an_image(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn a_corrupt_poll_200_fails_as_no_image_without_a_result_file(cx: &mut TestAppContext) {
+    let id = hex_id();
+    let mut corrupt = webp();
+    corrupt.truncate(12);
+    let harness = open(
+        cx,
+        vec![
+            Ok(http(
+                200,
+                Some("application/json"),
+                format!(r#"{{"id":"{id}"}}"#),
+            )),
+            Ok(image_ok(200, "image/webp", &corrupt, "SUCCESS")),
+        ],
+    );
+    submit(
+        cx,
+        &harness,
+        request(
+            "stability-upscale-creative",
+            serde_json::json!({}),
+            vec![encoded("image/png", square_png(), 256, 256)],
+        ),
+    );
+    cx.executor().advance_clock(Duration::from_secs(10));
+    cx.run_until_parked();
+    let states = job_states(cx, &harness);
+    assert!(
+        matches!(
+            states[0],
+            JobState::Failed {
+                error: ProviderError::NoImage
+            }
+        ),
+        "{states:?}"
+    );
+    assert!(matches!(history_error(&harness), ProviderError::NoImage));
+    assert_no_image(&harness, &id);
+    assert_eq!(harness.transport.seen().len(), 2);
+}
+
+#[gpui::test]
 fn moderation_auth_and_missing_model_submits_write_failed_rows(cx: &mut TestAppContext) {
     for (status, body, expected) in [
         (

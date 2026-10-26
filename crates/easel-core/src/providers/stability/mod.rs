@@ -1298,6 +1298,7 @@ fn header_media(response: &HttpResponse) -> Option<&'static str> {
 fn status_error(response: &HttpResponse, poll: bool) -> ProviderError {
     match response.status {
         401 => ProviderError::Auth,
+        402 => ProviderError::OutOfCredits { hint: None },
         403 => ProviderError::Blocked,
         404 if poll => ProviderError::Protocol("generation not found or expired".into()),
         404 => ProviderError::ModelNotFound,
@@ -2440,6 +2441,12 @@ mod tests {
                 .unwrap_err(),
             ProviderError::RateLimited { retry_after: None }
         );
+        assert_eq!(
+            provider
+                .parse_submit(&response(402, None, b"no credits"))
+                .unwrap_err(),
+            ProviderError::OutOfCredits { hint: None }
+        );
         for status in [400, 413, 422] {
             let body = br#"{"id":"1","name":"bad_request","errors":["some-field: is required"]}"#;
             assert_eq!(
@@ -2589,6 +2596,10 @@ mod tests {
         assert_eq!(
             provider.parse_poll(&response(429, None, b"slow down")),
             PollOutcome::Failed(ProviderError::RateLimited { retry_after: None })
+        );
+        assert_eq!(
+            provider.parse_poll(&response(402, None, b"no credits")),
+            PollOutcome::Failed(ProviderError::OutOfCredits { hint: None })
         );
         assert_eq!(
             provider.parse_poll(&response(
