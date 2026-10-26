@@ -9,6 +9,8 @@ mod chutes_tests;
 #[cfg(test)]
 mod krea_tests;
 #[cfg(test)]
+mod leonardo_tests;
+#[cfg(test)]
 mod openai_tests;
 #[cfg(test)]
 mod qwen_tests;
