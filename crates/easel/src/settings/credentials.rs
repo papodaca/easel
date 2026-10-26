@@ -757,9 +757,13 @@ fn the_provider_menu_selects_which_key_form_is_active(cx: &mut TestAppContext) {
     let notes = cx.new(|_| Notifications::new());
     let transport = Arc::new(FakeTransport::scripted(Vec::new()));
     let panel = cx.new(move |cx| SettingsPanel::new(notes, transport, cx));
+    let first = easel_core::providers::ModelRegistry::providers()
+        .first()
+        .copied()
+        .expect("providers registered");
     assert_eq!(
         panel.read_with(cx, |panel, cx| panel.selected_provider(cx)),
-        ProviderId::Bfl
+        first
     );
     assert_eq!(
         panel.read_with(cx, |panel, cx| {

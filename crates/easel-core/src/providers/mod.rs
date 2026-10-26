@@ -56,9 +56,58 @@ impl ModelRegistry {
             .as_slice()
     }
 
+    /// Providers in alphabetical order, as shown in the pickers.
     #[must_use]
     pub fn providers() -> &'static [ProviderId] {
-        &[
+        static PROVIDERS: OnceLock<Vec<ProviderId>> = OnceLock::new();
+        PROVIDERS
+            .get_or_init(|| {
+                let mut providers = vec![
+                    ProviderId::Bfl,
+                    ProviderId::Krea,
+                    ProviderId::Google,
+                    ProviderId::OpenAi,
+                    ProviderId::Xai,
+                    ProviderId::Chutes,
+                    ProviderId::Qwen,
+                    ProviderId::Apiframe,
+                ];
+                providers.sort_by(|a, b| {
+                    a.display_name()
+                        .to_lowercase()
+                        .cmp(&b.display_name().to_lowercase())
+                });
+                providers
+            })
+            .as_slice()
+    }
+
+    #[must_use]
+    pub fn auth_scheme(provider: ProviderId) -> crate::model_spec::AuthScheme {
+        provider.auth_scheme()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ModelRegistry, ProviderId};
+
+    #[test]
+    fn providers_are_listed_alphabetically() {
+        let names: Vec<&str> = ModelRegistry::providers()
+            .iter()
+            .map(|provider| provider.display_name())
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort_by_key(|name| name.to_lowercase());
+        assert_eq!(names, sorted);
+    }
+
+    #[test]
+    fn every_provider_is_registered_once() {
+        let all = ModelRegistry::providers();
+        assert_eq!(all.len(), 8);
+        for expected in [
             ProviderId::Bfl,
             ProviderId::Krea,
             ProviderId::Google,
@@ -67,12 +116,9 @@ impl ModelRegistry {
             ProviderId::Chutes,
             ProviderId::Qwen,
             ProviderId::Apiframe,
-        ]
-    }
-
-    #[must_use]
-    pub fn auth_scheme(provider: ProviderId) -> crate::model_spec::AuthScheme {
-        provider.auth_scheme()
+        ] {
+            assert_eq!(all.iter().filter(|p| **p == expected).count(), 1);
+        }
     }
 }
 
