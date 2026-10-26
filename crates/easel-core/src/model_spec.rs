@@ -16,6 +16,7 @@ pub enum ProviderId {
     Qwen,
     Apiframe,
     Leonardo,
+    Stability,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +56,8 @@ const LEONARDO_HOSTS: &[HostRule] = &[
     HostRule::Suffix(".leonardo.ai"),
 ];
 
+const STABILITY_HOSTS: &[HostRule] = &[HostRule::Exact("api.stability.ai")];
+
 impl ProviderId {
     #[must_use]
     pub fn base_url(self) -> &'static str {
@@ -68,6 +71,7 @@ impl ProviderId {
             Self::Qwen => "https://maas.qwencloudapi.com",
             Self::Apiframe => "https://api.apiframe.ai",
             Self::Leonardo => "https://cloud.leonardo.ai",
+            Self::Stability => "https://api.stability.ai",
         }
     }
 
@@ -83,6 +87,7 @@ impl ProviderId {
             Self::Qwen => "DASHSCOPE_API_KEY",
             Self::Apiframe => "APIFRAME_API_KEY",
             Self::Leonardo => "LEONARDO_API_KEY",
+            Self::Stability => "STABILITY_API_KEY",
         }
     }
 
@@ -98,6 +103,7 @@ impl ProviderId {
             Self::Qwen => "Qwen",
             Self::Apiframe => "Apiframe",
             Self::Leonardo => "Leonardo.Ai",
+            Self::Stability => "Stability AI",
         }
     }
 
@@ -119,6 +125,7 @@ impl ProviderId {
                 header: "X-API-Key".into(),
             },
             Self::Leonardo => AuthScheme::Bearer,
+            Self::Stability => AuthScheme::Bearer,
         }
     }
 
@@ -134,6 +141,7 @@ impl ProviderId {
             Self::Qwen => QWEN_HOSTS,
             Self::Apiframe => APIFRAME_HOSTS,
             Self::Leonardo => LEONARDO_HOSTS,
+            Self::Stability => STABILITY_HOSTS,
         }
     }
 
@@ -506,6 +514,28 @@ mod tests {
         assert!(!ProviderId::Apiframe.allows_url("http://api.apiframe.ai"));
         assert!(!ProviderId::Apiframe.allows_url("https://apiframe.ai.evil.example/x"));
         assert!(ModelRegistry::providers().contains(&ProviderId::Apiframe));
+    }
+
+    #[test]
+    fn stability_identity_and_host_allowlist() {
+        use crate::providers::ModelRegistry;
+
+        assert_eq!(ProviderId::Stability.env_var(), "STABILITY_API_KEY");
+        assert_eq!(ProviderId::Stability.display_name(), "Stability AI");
+        assert_eq!(ProviderId::Stability.base_url(), "https://api.stability.ai");
+        assert!(matches!(
+            ProviderId::Stability.auth_scheme(),
+            AuthScheme::Bearer
+        ));
+        assert_eq!(
+            serde_json::to_value(ProviderId::Stability).unwrap(),
+            serde_json::json!("stability")
+        );
+        assert!(ProviderId::Stability.allows_url("https://api.stability.ai/v2beta/results/abc"));
+        assert!(!ProviderId::Stability.allows_url("http://api.stability.ai"));
+        assert!(!ProviderId::Stability.allows_url("https://evil.stability.ai/x"));
+        assert!(!ProviderId::Stability.allows_url("https://api.stability.ai.evil.example/x"));
+        assert!(ModelRegistry::providers().contains(&ProviderId::Stability));
     }
 
     #[test]

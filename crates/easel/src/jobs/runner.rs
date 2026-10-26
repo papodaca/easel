@@ -603,6 +603,57 @@ impl JobRunner {
         self.pump(cx);
     }
 
+    /// Finish a polled job whose poll response carried the image bytes, so no
+    /// second download request is made.
+    fn complete_polled_inline(
+        &mut self,
+        token: u64,
+        image: easel_core::providers::InlineImage,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dead(token) {
+            return;
+        }
+        if crate::image_load::decode_image(&image.bytes, "result").is_err() {
+            self.fail(token, ProviderError::NoImage, cx);
+            return;
+        }
+        let Some(id) = self.server_id(token) else {
+            self.fail(
+                token,
+                ProviderError::Protocol("no polled job id".into()),
+                cx,
+            );
+            return;
+        };
+        let file_name = match image.mime.as_str() {
+            "image/jpeg" => "result.jpg",
+            "image/webp" => "result.webp",
+            _ => "result.png",
+        };
+        let thumb = easel_core::image_prep::thumbnail(&image.bytes, 256).unwrap_or_default();
+        if let Err(error) = self.history.complete(
+            &id,
+            &image.bytes,
+            &image.mime,
+            &thumb,
+            &Completion::default(),
+        ) {
+            self.fail(token, ProviderError::Protocol(error.to_string()), cx);
+            return;
+        }
+        if let Some(slot) = self.slot_mut(token) {
+            slot.bytes = Some(image.bytes);
+            slot.status = "Done".into();
+            slot.state = JobState::Done {
+                result_path: format!("history/{}/{}", id.as_str(), file_name),
+                cost: None,
+            };
+        }
+        cx.notify();
+        self.pump(cx);
+    }
+
     fn finish_unpolled(&mut self, token: u64, error: ProviderError, cx: &mut Context<Self>) {
         if self.dead(token) {
             return;
@@ -799,6 +850,14 @@ impl JobRunner {
         }
         if let Ok(response) = &response {
             self.note_headers(token, response, cx);
+            if let Some(image) = self
+                .providers
+                .get(&token)
+                .and_then(|provider| provider.inline_image(response))
+            {
+                self.complete_polled_inline(token, image, cx);
+                return;
+            }
         }
         let outcome = match &response {
             Ok(response) => self
@@ -1284,6 +1343,7 @@ impl JobRunner {
                 ProviderId::Qwen => "qwen",
                 ProviderId::Apiframe => "apiframe",
                 ProviderId::Leonardo => "leonardo",
+                ProviderId::Stability => "stability",
             })
             .unwrap_or("unknown");
         format!("{label}:{content_hash}")

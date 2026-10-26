@@ -192,7 +192,11 @@ fn multipart_form(parts: &[Part]) -> Result<reqwest::multipart::Form, ()> {
         if let Some(filename) = &part.filename {
             encoded = encoded.file_name(filename.clone());
         }
-        encoded = encoded.mime_str(&part.content_type).map_err(|_| ())?;
+        // A blank content type lets reqwest pick the default so text parts
+        // never fail on an empty mime string.
+        if !part.content_type.is_empty() {
+            encoded = encoded.mime_str(&part.content_type).map_err(|_| ())?;
+        }
         form = form.part(part.name.clone(), encoded);
     }
     Ok(form)
@@ -1031,5 +1035,32 @@ mod tests {
         let seen = transport.seen();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].auth, Some(ProviderId::Bfl));
+    }
+
+    #[test]
+    fn multipart_form_accepts_blank_and_text_mime_types() {
+        use easel_core::http::Part;
+
+        let form = super::multipart_form(&[
+            Part {
+                name: "prompt".into(),
+                filename: None,
+                content_type: "text/plain".into(),
+                bytes: b"lighthouse".to_vec(),
+            },
+            Part {
+                name: "output_format".into(),
+                filename: None,
+                content_type: String::new(),
+                bytes: b"png".to_vec(),
+            },
+            Part {
+                name: "image".into(),
+                filename: Some("image.png".into()),
+                content_type: "image/png".into(),
+                bytes: b"\x89PNG\r\n\x1a\n".to_vec(),
+            },
+        ]);
+        assert!(form.is_ok(), "blank and text mime parts must build a form");
     }
 }

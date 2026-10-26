@@ -23,6 +23,27 @@ pub fn build_request(app: &AppState) -> Result<JobRequest, String> {
     } else {
         usize::MAX
     };
+    // Stability AI takes small inputs (Fast Upscale floors at 32x32), caps
+    // pixels per service, and needs PNG alpha preserved on single-image
+    // Erase and Inpaint so the service can derive the mask.
+    if app.spec().provider == ProviderId::Stability {
+        let model_id = app.spec().id.as_str();
+        options.min_side = 32;
+        options.max_pixels = if matches!(
+            model_id,
+            "stability-upscale-fast" | "stability-upscale-creative"
+        ) {
+            1_048_576
+        } else if model_id == "stability-remove-background" {
+            4_194_304
+        } else {
+            9_437_184
+        };
+        let sent = (usize::from(app.image.is_some()) + app.extras.len()).min(app.max_sent_images());
+        if matches!(model_id, "stability-erase" | "stability-inpaint") && sent == 1 {
+            options.prefer_jpeg = false;
+        }
+    }
     let mut sources: Vec<&crate::image_load::DecodedImage> = Vec::new();
     if let Some(image) = &app.image {
         sources.push(image);

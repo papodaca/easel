@@ -88,6 +88,7 @@ pub struct MapKeys {
     qwen: Option<String>,
     apiframe: Option<String>,
     leonardo: Option<String>,
+    stability: Option<String>,
 }
 
 #[cfg(test)]
@@ -103,6 +104,7 @@ impl MapKeys {
             ProviderId::Qwen => self.qwen = Some(key.into()),
             ProviderId::Apiframe => self.apiframe = Some(key.into()),
             ProviderId::Leonardo => self.leonardo = Some(key.into()),
+            ProviderId::Stability => self.stability = Some(key.into()),
         }
         self
     }
@@ -121,6 +123,7 @@ impl KeyResolver for MapKeys {
             ProviderId::Qwen => self.qwen.clone(),
             ProviderId::Apiframe => self.apiframe.clone(),
             ProviderId::Leonardo => self.leonardo.clone(),
+            ProviderId::Stability => self.stability.clone(),
         };
         key.map(Zeroizing::new)
     }

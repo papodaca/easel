@@ -224,6 +224,22 @@ mod tests {
     }
 
     #[test]
+    fn a_32_min_side_accepts_64_and_keeps_opaque_images_png() {
+        let options = PrepOptions {
+            min_side: 32,
+            prefer_jpeg: false,
+            ..PrepOptions::for_resolution("1k")
+        };
+        let accepted = prepare_for_upload(&rgb(64, 64, [1, 2, 3]), options).unwrap();
+        assert_eq!((accepted.width, accepted.height), (64, 64));
+        assert_eq!(accepted.media_type, "image/png");
+        assert!(accepted.bytes.starts_with(b"\x89PNG"));
+        assert!(
+            prepare_for_upload(&rgb(64, 64, [1, 2, 3]), PrepOptions::for_resolution("1k")).is_err()
+        );
+    }
+
+    #[test]
     fn an_image_under_the_cap_keeps_its_dimensions() {
         let encoded = prepare_for_upload(
             &rgb(1920, 1080, [9, 9, 9]),

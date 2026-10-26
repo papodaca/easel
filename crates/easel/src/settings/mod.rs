@@ -18,6 +18,12 @@ use crate::theme;
 use crate::ui::{Button, muted_text};
 use crate::widgets::{Select, TextInput, field_row};
 
+/// A syntactically valid generation id the Stability probe points at: it can
+/// never exist, so a working key reads 404 `generation_not_found` without
+/// touching credits.
+const DUMMY_GENERATION_ID: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
 /// Probe the provider uses to decide whether a key is accepted.
 /// Krea asks for a fresh job id; a valid key gets 404, an invalid key gets 401.
 pub fn key_probe(provider: ProviderId) -> HttpRequest {
@@ -31,6 +37,9 @@ pub fn key_probe(provider: ProviderId) -> HttpRequest {
         ProviderId::Qwen => easel_core::providers::qwen::GENERATION_URL.to_owned(),
         ProviderId::Apiframe => "https://api.apiframe.ai/v2/me".to_owned(),
         ProviderId::Leonardo => format!("{}/api/rest/v2/models", ProviderId::Leonardo.base_url()),
+        ProviderId::Stability => {
+            format!("https://api.stability.ai/v2beta/results/{DUMMY_GENERATION_ID}")
+        }
     };
     HttpRequest {
         method: Method::Get,
@@ -172,6 +181,7 @@ pub struct SessionKeys {
     qwen: Option<Zeroizing<String>>,
     apiframe: Option<Zeroizing<String>>,
     leonardo: Option<Zeroizing<String>>,
+    stability: Option<Zeroizing<String>>,
 }
 
 impl SessionKeys {
@@ -187,6 +197,7 @@ impl SessionKeys {
             ProviderId::Qwen => self.qwen = Some(key),
             ProviderId::Apiframe => self.apiframe = Some(key),
             ProviderId::Leonardo => self.leonardo = Some(key),
+            ProviderId::Stability => self.stability = Some(key),
         }
     }
 
@@ -201,6 +212,7 @@ impl SessionKeys {
             ProviderId::Qwen => self.qwen = None,
             ProviderId::Apiframe => self.apiframe = None,
             ProviderId::Leonardo => self.leonardo = None,
+            ProviderId::Stability => self.stability = None,
         }
     }
 
@@ -215,6 +227,7 @@ impl SessionKeys {
             ProviderId::Qwen => self.qwen.clone(),
             ProviderId::Apiframe => self.apiframe.clone(),
             ProviderId::Leonardo => self.leonardo.clone(),
+            ProviderId::Stability => self.stability.clone(),
         }
     }
 }
@@ -636,6 +649,7 @@ fn provider_slug(provider: ProviderId) -> &'static str {
         ProviderId::Qwen => "qwen",
         ProviderId::Apiframe => "apiframe",
         ProviderId::Leonardo => "leonardo",
+        ProviderId::Stability => "stability",
     }
 }
 
@@ -702,5 +716,68 @@ impl Render for SettingsPanel {
                 None,
                 div().text_sm().child(self.data_directory.clone()),
             ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SettingsPanel, key_probe};
+    use crate::net::FakeTransport;
+    use crate::notifications::Notifications;
+    use easel_core::http::{Body, HttpResponse, Method};
+    use easel_core::model_spec::ProviderId;
+    use gpui::{TestAppContext, prelude::*};
+    use std::sync::Arc;
+
+    const DUMMY_ID: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    #[test]
+    fn stability_probe_targets_the_results_endpoint() {
+        let request = key_probe(ProviderId::Stability);
+        assert_eq!(request.method, Method::Get);
+        assert_eq!(
+            request.url,
+            format!("https://api.stability.ai/v2beta/results/{DUMMY_ID}")
+        );
+        assert_eq!(request.auth, Some(ProviderId::Stability));
+        assert!(matches!(request.body, Body::Empty));
+    }
+
+    #[gpui::test]
+    fn a_401_probe_rejects_the_stability_key(cx: &mut TestAppContext) {
+        let notes = cx.new(|_| Notifications::new());
+        let transport = Arc::new(FakeTransport::scripted(vec![Ok(HttpResponse {
+            status: 401,
+            headers: Vec::new(),
+            body: b"{\"unauthorized\":true}".to_vec(),
+        })]));
+        let panel = cx.new(|cx| SettingsPanel::new(notes, transport, cx));
+        panel.update(cx, |panel, cx| {
+            panel.test_key(ProviderId::Stability, cx).detach();
+        });
+        cx.run_until_parked();
+        let note = panel.read_with(cx, |panel, _| {
+            panel.row_note(ProviderId::Stability).to_owned()
+        });
+        assert_eq!(note, "invalid key");
+    }
+
+    #[gpui::test]
+    fn a_404_probe_accepts_the_stability_key(cx: &mut TestAppContext) {
+        let notes = cx.new(|_| Notifications::new());
+        let transport = Arc::new(FakeTransport::scripted(vec![Ok(HttpResponse {
+            status: 404,
+            headers: Vec::new(),
+            body: b"{\"name\":\"generation_not_found\"}".to_vec(),
+        })]));
+        let panel = cx.new(|cx| SettingsPanel::new(notes, transport, cx));
+        panel.update(cx, |panel, cx| {
+            panel.test_key(ProviderId::Stability, cx).detach();
+        });
+        cx.run_until_parked();
+        let note = panel.read_with(cx, |panel, _| {
+            panel.row_note(ProviderId::Stability).to_owned()
+        });
+        assert_eq!(note, "key accepted");
     }
 }

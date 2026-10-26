@@ -111,6 +111,19 @@ impl ParamSchema {
         for field in &self.fields {
             let locked = self.locked_value(field, ctx);
             let value = locked.as_ref().or_else(|| values.get(&field.key));
+            let blank_required_text = field.required
+                && matches!(field.kind, FieldKind::Text { .. })
+                && value
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.trim().is_empty());
+            if blank_required_text {
+                errors.push(FieldError {
+                    key: field.key.clone(),
+                    message: format!("{} is required", field.label),
+                    approved_max: None,
+                });
+                continue;
+            }
             match value {
                 None | Some(Value::Null) if field.required => {
                     errors.push(FieldError {
@@ -447,6 +460,49 @@ mod tests {
         values.insert("mode".into(), json!("nope"));
         let select = schema.validate(&values, &context());
         assert_eq!(keys(&select), ["mode"]);
+    }
+
+    #[test]
+    fn a_blank_required_text_field_is_missing() {
+        use crate::error::FieldError;
+        use crate::schema::{FieldDef, FieldKind, ParamSchema, RuleContext};
+        use serde_json::json;
+        use std::collections::BTreeMap;
+
+        let schema = ParamSchema {
+            fields: vec![FieldDef {
+                key: "search_prompt".into(),
+                label: "Search prompt".into(),
+                help: None,
+                kind: FieldKind::Text { multiline: false },
+                required: true,
+                default: None,
+                locked_when: None,
+            }],
+            cross_rules: Vec::new(),
+        };
+        let ctx = RuleContext {
+            has_source_image: false,
+            image_count: 0,
+            box_count: 0,
+        };
+        for blank in ["", "   "] {
+            let mut values = BTreeMap::new();
+            values.insert("search_prompt".to_owned(), json!(blank));
+            let errors = schema.validate(&values, &ctx);
+            assert_eq!(
+                errors,
+                vec![FieldError {
+                    key: "search_prompt".into(),
+                    message: "Search prompt is required".into(),
+                    approved_max: None,
+                }],
+                "blank {blank:?} should read as missing"
+            );
+        }
+        let mut values = BTreeMap::new();
+        values.insert("search_prompt".to_owned(), json!("golden hour sky"));
+        assert!(schema.validate(&values, &ctx).is_empty());
     }
 
     #[test]
