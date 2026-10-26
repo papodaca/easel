@@ -32,5 +32,6 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
 
 [sources.allow-org]
-# gpui pulls proptest from git. Zed itself is the other git source.
-github = ["proptest-rs", "zed-industries"]
+# gpui pulls proptest and wgpu (rev-pinned by Zed) from git. Zed itself is
+# the other git source.
+github = ["gfx-rs", "proptest-rs", "zed-industries"]
