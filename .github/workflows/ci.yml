@@ -25,7 +25,7 @@ jobs:
             libx11-xcb-dev \
             libfontconfig1-dev \
             libvulkan-dev \
-            libssl-dev
+            libssl-dev ca-certificates
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
