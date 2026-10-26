@@ -71,6 +71,7 @@ impl ModelRegistry {
                     ProviderId::Chutes,
                     ProviderId::Qwen,
                     ProviderId::Apiframe,
+                    ProviderId::Leonardo,
                 ];
                 providers.sort_by(|a, b| {
                     a.display_name()
@@ -106,7 +107,7 @@ mod tests {
     #[test]
     fn every_provider_is_registered_once() {
         let all = ModelRegistry::providers();
-        assert_eq!(all.len(), 8);
+        assert_eq!(all.len(), 9);
         for expected in [
             ProviderId::Bfl,
             ProviderId::Krea,
@@ -116,6 +117,7 @@ mod tests {
             ProviderId::Chutes,
             ProviderId::Qwen,
             ProviderId::Apiframe,
+            ProviderId::Leonardo,
         ] {
             assert_eq!(all.iter().filter(|p| **p == expected).count(), 1);
         }

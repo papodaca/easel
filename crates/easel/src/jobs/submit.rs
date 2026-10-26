@@ -2,6 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use easel_core::image_prep::{PrepOptions, prepare_for_upload};
 use easel_core::job::JobRequest;
+use easel_core::model_spec::ProviderId;
 
 use crate::app_state::AppState;
 
@@ -13,16 +14,24 @@ pub fn build_request(app: &AppState) -> Result<JobRequest, String> {
         .and_then(|value| value.as_str())
         .unwrap_or("1k");
     let tier = if tier == "4K" { "4k" } else { tier };
-    let options = PrepOptions::for_resolution(tier);
-    let mut images = Vec::new();
+    let mut options = PrepOptions::for_resolution(tier);
+    // Leonardo accepts 128x128 inputs (Aurora upscalers) and omits excess
+    // images, so never fail preparation on a small or unsent image.
+    let limit = if app.spec().provider == ProviderId::Leonardo {
+        options.min_side = 128;
+        Some(app.max_sent_images())
+    } else {
+        None
+    };
+    let mut sources: Vec<&crate::image_load::DecodedImage> = Vec::new();
     if let Some(image) = &app.image {
+        sources.push(image);
+    }
+    sources.extend(app.extras.iter().map(std::convert::AsRef::as_ref));
+    let mut images = Vec::new();
+    for image in sources.into_iter().take(limit.unwrap_or(usize::MAX)) {
         images.push(
             prepare_for_upload(&image.rgba_for_export, options).map_err(|err| err.to_string())?,
-        );
-    }
-    for extra in &app.extras {
-        images.push(
-            prepare_for_upload(&extra.rgba_for_export, options).map_err(|err| err.to_string())?,
         );
     }
     Ok(JobRequest {

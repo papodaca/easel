@@ -1283,6 +1283,7 @@ impl JobRunner {
                 ProviderId::Chutes => "chutes",
                 ProviderId::Qwen => "qwen",
                 ProviderId::Apiframe => "apiframe",
+                ProviderId::Leonardo => "leonardo",
             })
             .unwrap_or("unknown");
         format!("{label}:{content_hash}")

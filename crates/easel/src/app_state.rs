@@ -122,8 +122,15 @@ impl AppState {
         if spec.id == self.model_id {
             return;
         }
-        let mut values = spec.schema.defaults();
+        let outgoing_defaults = self.spec().schema.defaults();
+        let incoming_defaults = spec.schema.defaults();
+        let mut values = incoming_defaults.clone();
         for (key, value) in &self.values {
+            // An untouched field adopts the incoming model's default; an edited
+            // value carries over only when the incoming schema accepts it.
+            if outgoing_defaults.get(key) == Some(value) && incoming_defaults.contains_key(key) {
+                continue;
+            }
             if spec.schema.accepts(key, value) {
                 values.insert(key.clone(), value.clone());
             }
@@ -135,6 +142,29 @@ impl AppState {
             self.tool = Tool::Select;
         }
         cx.notify();
+    }
+
+    /// How many loaded images this model would actually send.
+    /// Leonardo multi-guidance models with a one-image slot selected send only
+    /// the first prepared image; every other model sends up to its slot maximum.
+    pub fn max_sent_images(&self) -> usize {
+        let max = self.spec().capabilities.image_slots.max();
+        if self.spec().provider != easel_core::model_spec::ProviderId::Leonardo {
+            return max;
+        }
+        let single_image_slot = matches!(
+            self.values.get("guidance_type").and_then(Value::as_str),
+            Some(
+                "content"
+                    | "image_to_image"
+                    | "character"
+                    | "depth"
+                    | "edge"
+                    | "pose"
+                    | "text_image"
+            )
+        );
+        if single_image_slot { 1 } else { max }
     }
 
     pub fn reconcile_values(
@@ -181,7 +211,7 @@ impl AppState {
 
         let count = usize::from(self.scene.source_image.is_some()) + self.scene.references.len();
         let slots = &self.spec().capabilities.image_slots;
-        let max = slots.max();
+        let max = self.max_sent_images();
         (0..count)
             .map(|index| {
                 let label = match slots {
@@ -401,6 +431,31 @@ mod tests {
     use crate::notifications::Notifications;
 
     use super::AppState;
+
+    #[gpui::test]
+    fn switching_models_adopts_defaults_for_untouched_fields(cx: &mut TestAppContext) {
+        let app = cx.new(|_| AppState::new());
+        app.update(cx, |app, cx| {
+            app.set_model("chutes-flux-schnell", cx);
+            assert_eq!(app.values["num_inference_steps"], serde_json::json!(4));
+            app.set_model("chutes-qwen-image-2512", cx);
+            assert_eq!(app.values["num_inference_steps"], serde_json::json!(30));
+            app.values
+                .insert("num_inference_steps".into(), serde_json::json!(20));
+            app.set_model("chutes-flux-schnell", cx);
+            assert_eq!(app.values["num_inference_steps"], serde_json::json!(20));
+        });
+    }
+
+    #[gpui::test]
+    fn max_sent_images_defaults_to_the_slot_maximum(cx: &mut TestAppContext) {
+        let app = cx.new(|_| AppState::new());
+        app.read_with(cx, |app, _| {
+            let max = app.spec().capabilities.image_slots.max();
+            assert!(max > 1, "{}", max);
+            assert_eq!(app.max_sent_images(), max);
+        });
+    }
 
     #[gpui::test]
     fn a_sunset_header_toasts_once_per_session(cx: &mut TestAppContext) {

@@ -796,6 +796,7 @@ fn provider_name(model_id: &str) -> String {
             ProviderId::Chutes => "chutes",
             ProviderId::Qwen => "qwen",
             ProviderId::Apiframe => "apiframe",
+            ProviderId::Leonardo => "leonardo",
         })
         .unwrap_or("")
         .to_owned()

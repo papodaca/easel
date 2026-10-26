@@ -30,6 +30,7 @@ pub fn key_probe(provider: ProviderId) -> HttpRequest {
         ProviderId::Chutes => "https://api.chutes.ai/users/me/quotas".to_owned(),
         ProviderId::Qwen => easel_core::providers::qwen::GENERATION_URL.to_owned(),
         ProviderId::Apiframe => "https://api.apiframe.ai/v2/me".to_owned(),
+        ProviderId::Leonardo => "https://cloud.leonardo.ai/api/rest/v2/models".to_owned(),
     };
     HttpRequest {
         method: Method::Get,
@@ -170,6 +171,7 @@ pub struct SessionKeys {
     chutes: Option<Zeroizing<String>>,
     qwen: Option<Zeroizing<String>>,
     apiframe: Option<Zeroizing<String>>,
+    leonardo: Option<Zeroizing<String>>,
 }
 
 impl SessionKeys {
@@ -184,6 +186,7 @@ impl SessionKeys {
             ProviderId::Chutes => self.chutes = Some(key),
             ProviderId::Qwen => self.qwen = Some(key),
             ProviderId::Apiframe => self.apiframe = Some(key),
+            ProviderId::Leonardo => self.leonardo = Some(key),
         }
     }
 
@@ -197,6 +200,7 @@ impl SessionKeys {
             ProviderId::Chutes => self.chutes = None,
             ProviderId::Qwen => self.qwen = None,
             ProviderId::Apiframe => self.apiframe = None,
+            ProviderId::Leonardo => self.leonardo = None,
         }
     }
 
@@ -210,6 +214,7 @@ impl SessionKeys {
             ProviderId::Chutes => self.chutes.clone(),
             ProviderId::Qwen => self.qwen.clone(),
             ProviderId::Apiframe => self.apiframe.clone(),
+            ProviderId::Leonardo => self.leonardo.clone(),
         }
     }
 }
@@ -514,7 +519,10 @@ impl SettingsPanel {
                     if response.status == 401
                         || (matches!(
                             provider,
-                            ProviderId::Bfl | ProviderId::Krea | ProviderId::Apiframe
+                            ProviderId::Bfl
+                                | ProviderId::Krea
+                                | ProviderId::Apiframe
+                                | ProviderId::Leonardo
                         ) && response.status == 403) =>
                 {
                     ("invalid key", ToastLevel::Error)
@@ -627,6 +635,7 @@ fn provider_slug(provider: ProviderId) -> &'static str {
         ProviderId::Chutes => "chutes",
         ProviderId::Qwen => "qwen",
         ProviderId::Apiframe => "apiframe",
+        ProviderId::Leonardo => "leonardo",
     }
 }
 

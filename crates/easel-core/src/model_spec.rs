@@ -15,6 +15,7 @@ pub enum ProviderId {
     Chutes,
     Qwen,
     Apiframe,
+    Leonardo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +50,11 @@ const APIFRAME_HOSTS: &[HostRule] = &[
     HostRule::Suffix(".apiframe.ai"),
 ];
 
+const LEONARDO_HOSTS: &[HostRule] = &[
+    HostRule::Exact("cloud.leonardo.ai"),
+    HostRule::Suffix(".leonardo.ai"),
+];
+
 impl ProviderId {
     #[must_use]
     pub fn base_url(self) -> &'static str {
@@ -61,6 +67,7 @@ impl ProviderId {
             Self::Chutes => "https://api.chutes.ai",
             Self::Qwen => "https://maas.qwencloudapi.com",
             Self::Apiframe => "https://api.apiframe.ai",
+            Self::Leonardo => "https://cloud.leonardo.ai",
         }
     }
 
@@ -75,6 +82,7 @@ impl ProviderId {
             Self::Chutes => "CHUTES_API_KEY",
             Self::Qwen => "DASHSCOPE_API_KEY",
             Self::Apiframe => "APIFRAME_API_KEY",
+            Self::Leonardo => "LEONARDO_API_KEY",
         }
     }
 
@@ -89,6 +97,7 @@ impl ProviderId {
             Self::Chutes => "Chutes",
             Self::Qwen => "Qwen",
             Self::Apiframe => "Apiframe",
+            Self::Leonardo => "Leonardo.Ai",
         }
     }
 
@@ -109,6 +118,7 @@ impl ProviderId {
             Self::Apiframe => AuthScheme::HeaderKey {
                 header: "X-API-Key".into(),
             },
+            Self::Leonardo => AuthScheme::Bearer,
         }
     }
 
@@ -123,6 +133,7 @@ impl ProviderId {
             Self::Chutes => CHUTES_HOSTS,
             Self::Qwen => QWEN_HOSTS,
             Self::Apiframe => APIFRAME_HOSTS,
+            Self::Leonardo => LEONARDO_HOSTS,
         }
     }
 
@@ -495,6 +506,34 @@ mod tests {
         assert!(!ProviderId::Apiframe.allows_url("http://api.apiframe.ai"));
         assert!(!ProviderId::Apiframe.allows_url("https://apiframe.ai.evil.example/x"));
         assert!(ModelRegistry::providers().contains(&ProviderId::Apiframe));
+    }
+
+    #[test]
+    fn leonardo_identity_and_host_allowlist() {
+        use crate::providers::ModelRegistry;
+
+        assert_eq!(ProviderId::Leonardo.env_var(), "LEONARDO_API_KEY");
+        assert_eq!(ProviderId::Leonardo.display_name(), "Leonardo.Ai");
+        assert_eq!(ProviderId::Leonardo.base_url(), "https://cloud.leonardo.ai");
+        assert!(matches!(
+            ProviderId::Leonardo.auth_scheme(),
+            AuthScheme::Bearer
+        ));
+        assert_eq!(
+            serde_json::to_value(ProviderId::Leonardo).unwrap(),
+            serde_json::json!("leonardo")
+        );
+        assert!(
+            ProviderId::Leonardo
+                .allows_url("https://cloud.leonardo.ai/api/rest/v1/generations/abc")
+        );
+        assert!(ProviderId::Leonardo.allows_url("https://cdn.leonardo.ai/users/u/out.png"));
+        assert!(
+            !ProviderId::Leonardo.allows_url("http://cloud.leonardo.ai/api/rest/v2/generations")
+        );
+        assert!(!ProviderId::Leonardo.allows_url("https://evil-leonardo.ai/out.png"));
+        assert!(!ProviderId::Leonardo.allows_url("https://cloud.leonardo.ai.evil.example/x"));
+        assert!(ModelRegistry::providers().contains(&ProviderId::Leonardo));
     }
 
     #[test]

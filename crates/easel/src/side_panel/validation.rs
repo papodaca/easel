@@ -18,6 +18,7 @@ pub(crate) fn missing_key_line(provider: ProviderId) -> String {
         ProviderId::Chutes => "Chutes",
         ProviderId::Qwen => "Qwen",
         ProviderId::Apiframe => "Apiframe",
+        ProviderId::Leonardo => "Leonardo.Ai",
     };
     format!("No {name} API key — open Settings")
 }
@@ -40,7 +41,7 @@ impl Validation {
         let app = self.app_state.read(cx);
         let image_count =
             usize::from(app.scene.source_image.is_some()) + app.scene.references.len();
-        let sent = image_count.min(app.spec().capabilities.image_slots.max());
+        let sent = image_count.min(app.max_sent_images());
         let mut messages = app
             .field_errors(sent)
             .into_iter()
@@ -119,7 +120,7 @@ impl Validation {
         }
         let image_count =
             usize::from(app.scene.source_image.is_some()) + app.scene.references.len();
-        let sent = image_count.min(app.spec().capabilities.image_slots.max());
+        let sent = image_count.min(app.max_sent_images());
         (image_count > sent).then(|| format!("{sent} of {image_count} images will be sent"))
     }
 
@@ -172,6 +173,10 @@ mod tests {
         assert_eq!(
             super::missing_key_line(ProviderId::Apiframe),
             "No Apiframe API key — open Settings"
+        );
+        assert_eq!(
+            super::missing_key_line(ProviderId::Leonardo),
+            "No Leonardo.Ai API key — open Settings"
         );
     }
 }

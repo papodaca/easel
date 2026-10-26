@@ -12,6 +12,7 @@ use thiserror::Error;
 pub struct PrepOptions {
     pub max_pixels: u64,
     pub prefer_jpeg: bool,
+    pub min_side: u32,
 }
 
 impl PrepOptions {
@@ -20,6 +21,7 @@ impl PrepOptions {
         Self {
             max_pixels: if tier == "4k" { 16_000_000 } else { 4_000_000 },
             prefer_jpeg: true,
+            min_side: 256,
         }
     }
 }
@@ -34,8 +36,12 @@ pub struct ImageSummary {
 
 #[derive(Debug, Error)]
 pub enum PrepError {
-    #[error("image is {width}x{height}, below the 256 minimum")]
-    TooSmall { width: u32, height: u32 },
+    #[error("image is {width}x{height}, below the {min_side} minimum")]
+    TooSmall {
+        width: u32,
+        height: u32,
+        min_side: u32,
+    },
     #[error("{0}")]
     Encode(String),
 }
@@ -45,8 +51,12 @@ pub fn prepare_for_upload(
     options: PrepOptions,
 ) -> Result<EncodedImage, PrepError> {
     let (width, height) = image.dimensions();
-    if width < 256 || height < 256 {
-        return Err(PrepError::TooSmall { width, height });
+    if width < options.min_side || height < options.min_side {
+        return Err(PrepError::TooSmall {
+            width,
+            height,
+            min_side: options.min_side,
+        });
     }
     let (target_w, target_h) = fit_pixels(width, height, options.max_pixels);
     let resized = if (target_w, target_h) == (width, height) {
@@ -195,6 +205,22 @@ mod tests {
             prepare_for_upload(&rgb(200, 200, [1, 2, 3]), PrepOptions::for_resolution("1k"))
                 .unwrap_err();
         assert!(error.to_string().contains("256"));
+    }
+
+    #[test]
+    fn a_lowered_min_side_accepts_128_and_still_rejects_64() {
+        let options = PrepOptions {
+            min_side: 128,
+            ..PrepOptions::for_resolution("1k")
+        };
+        let accepted = prepare_for_upload(&rgb(128, 128, [1, 2, 3]), options).unwrap();
+        assert_eq!((accepted.width, accepted.height), (128, 128));
+        let rejected = prepare_for_upload(&rgb(64, 64, [1, 2, 3]), options).unwrap_err();
+        assert!(rejected.to_string().contains("128"), "{rejected}");
+        assert!(
+            prepare_for_upload(&rgb(128, 128, [1, 2, 3]), PrepOptions::for_resolution("1k"))
+                .is_err()
+        );
     }
 
     #[test]
