@@ -445,6 +445,12 @@ pub trait Provider {
         PollPolicy::default_bfl()
     }
 
+    /// The pixel cap upload preparation should apply for this model's input
+    /// images; `u64::MAX` leaves the resolution tier's cap in charge.
+    fn prep_pixel_cap(&self) -> u64 {
+        u64::MAX
+    }
+
     fn download_request(&self, url: &url::Url) -> HttpRequest {
         plain_download(url)
     }

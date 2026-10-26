@@ -626,8 +626,6 @@ fn build_control(
             FieldControl::Number { input, clear_blank }
         }
         FieldKind::Text { multiline } => {
-            // A blank field stores null so required text (search and select
-            // prompts) reads as missing instead of an empty string.
             let clear_blank = field.default.is_none();
             let input = if *multiline {
                 cx.new(TextInput::multiline)

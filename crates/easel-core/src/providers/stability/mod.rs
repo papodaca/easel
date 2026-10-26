@@ -21,8 +21,6 @@ use crate::providers::{ImageInput, InlineImage, JobId, PollOutcome, ReferenceSte
 use crate::scene::Scene;
 use crate::schema::{FieldDef, FieldKind, ParamSchema, RuleContext};
 
-const BASE: &str = "https://api.stability.ai";
-const RESULTS_URL: &str = "https://api.stability.ai/v2beta/results";
 const ACCEPT: &str = "image/*";
 const MAX_BODY_BYTES: u64 = 100 * 1024 * 1024;
 const RATIO_MIN: f64 = 1.0 / 2.5;
@@ -52,35 +50,25 @@ const STYLE_PRESETS: &[&str] = &[
 ];
 const LIGHT_DIRECTIONS: &[&str] = &["left", "right", "above", "below"];
 
-/// How the editor prose reaches the endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Prompt {
-    /// `prompt`, always sent; the prose must be non-empty.
     Required,
-    /// `prompt`, sent only when the prose is non-empty.
     Optional,
-    /// The service takes no prompt.
     Unused,
-    /// `background_prompt`, sent only when non-empty; required while fewer
-    /// than two images are loaded (no `background_reference` to stand in).
     Background,
 }
 
-/// Ultra and SD 3.5 switch between text-to-image and image-to-image on the
-/// loaded image count; SD 3.5 additionally names the switch with `mode` and
-/// `model` text parts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     None,
     Switch,
-    Sd35 { model: &'static str },
+    Sd35,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ratio {
     None,
     All,
-    /// Replace Background and Relight checks only the `subject_image` slot.
     FirstImage,
 }
 
@@ -149,7 +137,6 @@ impl Bounds {
 struct Descriptor {
     spec: ModelSpec,
     prompt: Prompt,
-    /// Binary part names in prepared slot order.
     parts: &'static [&'static str],
     mode: Mode,
     minimum_images: usize,
@@ -213,7 +200,7 @@ fn spec(id: &str, name: &str, path: &str, slots: ImageSlots, fields: Vec<FieldDe
         display_name: name.into(),
         provider: ProviderId::Stability,
         auth: AuthScheme::Bearer,
-        endpoint: format!("{BASE}{path}"),
+        endpoint: format!("{}{path}", ProviderId::Stability.base_url()),
         beta: false,
         capabilities: Capabilities {
             supports_boxes: false,
@@ -584,9 +571,7 @@ static SD35_LARGE: LazyLock<Descriptor> = LazyLock::new(|| {
         ImageSlots::Single,
         Prompt::Required,
         &["image"],
-        Mode::Sd35 {
-            model: "sd3.5-large",
-        },
+        Mode::Sd35,
         0,
         Some(SD35_BOUNDS),
         sd35_fields(4.0, 0.7),
@@ -601,9 +586,7 @@ static SD35_LARGE_TURBO: LazyLock<Descriptor> = LazyLock::new(|| {
         ImageSlots::Single,
         Prompt::Required,
         &["image"],
-        Mode::Sd35 {
-            model: "sd3.5-large-turbo",
-        },
+        Mode::Sd35,
         0,
         Some(SD35_BOUNDS),
         sd35_fields(1.0, 0.7),
@@ -618,9 +601,7 @@ static SD35_MEDIUM: LazyLock<Descriptor> = LazyLock::new(|| {
         ImageSlots::Single,
         Prompt::Required,
         &["image"],
-        Mode::Sd35 {
-            model: "sd3.5-medium",
-        },
+        Mode::Sd35,
         0,
         Some(SD35_BOUNDS),
         sd35_fields(4.0, 0.7),
@@ -635,9 +616,7 @@ static SD35_FLASH: LazyLock<Descriptor> = LazyLock::new(|| {
         ImageSlots::Single,
         Prompt::Required,
         &["image"],
-        Mode::Sd35 {
-            model: "sd3.5-flash",
-        },
+        Mode::Sd35,
         0,
         Some(SD35_BOUNDS),
         sd35_fields(1.0, 0.95),
@@ -910,6 +889,13 @@ macro_rules! stability_model {
             fn poll_policy(&self) -> PollPolicy {
                 poll_policy()
             }
+
+            fn prep_pixel_cap(&self) -> u64 {
+                $descriptor
+                    .bounds
+                    .and_then(|bounds| bounds.max_pixels)
+                    .unwrap_or(9_437_184)
+            }
         }
     };
 }
@@ -1009,7 +995,7 @@ fn build_submit(descriptor: &Descriptor, request: &JobRequest) -> HttpRequest {
         }
     }
 
-    if let Mode::Sd35 { model } = descriptor.mode {
+    if descriptor.mode == Mode::Sd35 {
         push_text(
             &mut parts,
             "mode",
@@ -1019,7 +1005,7 @@ fn build_submit(descriptor: &Descriptor, request: &JobRequest) -> HttpRequest {
                 "text-to-image"
             },
         );
-        push_text(&mut parts, "model", model);
+        push_text(&mut parts, "model", &descriptor.spec.id);
     }
 
     for (name, image) in descriptor.parts.iter().zip(request.images.iter()) {
@@ -1133,7 +1119,6 @@ fn binary_part(name: &str, image: &EncodedImage) -> Part {
     }
 }
 
-/// Multipart text parts carry numbers as their shortest stable strings.
 fn number_text(number: f64) -> String {
     if number.fract() == 0.0 && number.abs() < 1e15 {
         (number as i64).to_string()
@@ -1167,34 +1152,38 @@ fn poll_policy() -> PollPolicy {
     }
 }
 
-/// The unified classifier: image bytes on 200, `Blocked` on moderation, the
-/// failure table everywhere else.
 fn classify(response: &HttpResponse) -> Result<InlineImage, ProviderError> {
-    if response.status == 403 || is_blocked(response) {
+    let json = body_json(response);
+    if response.status == 403 || blocked(response, json.as_ref()) {
         return Err(ProviderError::Blocked);
     }
     if response.status != 200 {
         return Err(status_error(response, false));
     }
-    image_from_ok(response).ok_or(ProviderError::NoImage)
+    image_from_parts(response, json.as_ref()).ok_or(ProviderError::NoImage)
 }
 
 fn parse_submit_async(response: &HttpResponse) -> Result<Submitted, ProviderError> {
-    if response.status == 403 || is_blocked(response) {
+    let json = serde_json::from_slice::<Value>(&response.body).ok();
+    if response.status == 403 || blocked(response, json.as_ref()) {
         return Err(ProviderError::Blocked);
     }
     if response.status != 200 {
         return Err(status_error(response, false));
     }
-    let value = serde_json::from_slice::<Value>(&response.body)
-        .map_err(|_| ProviderError::Protocol("submit response was not json".into()))?;
+    let value =
+        json.ok_or_else(|| ProviderError::Protocol("submit response was not json".into()))?;
     let id = value
         .get("id")
         .and_then(Value::as_str)
         .ok_or_else(|| ProviderError::Protocol("submit response had no id".into()))?;
     let job_id = JobId::parse(id).map_err(ProviderError::Protocol)?;
-    let poll_url = url::Url::parse(&format!("{RESULTS_URL}/{}", job_id.as_str()))
-        .map_err(|_| ProviderError::Protocol("poll url was not valid".into()))?;
+    let poll_url = url::Url::parse(&format!(
+        "{}/v2beta/results/{}",
+        ProviderId::Stability.base_url(),
+        job_id.as_str()
+    ))
+    .map_err(|_| ProviderError::Protocol("poll url was not valid".into()))?;
     Ok(Submitted {
         job_id,
         poll_url,
@@ -1203,7 +1192,8 @@ fn parse_submit_async(response: &HttpResponse) -> Result<Submitted, ProviderErro
 }
 
 fn parse_poll(response: &HttpResponse) -> PollOutcome {
-    if response.status == 403 || is_blocked(response) {
+    let json = body_json(response);
+    if response.status == 403 || blocked(response, json.as_ref()) {
         return PollOutcome::Failed(ProviderError::Blocked);
     }
     match response.status {
@@ -1211,7 +1201,7 @@ fn parse_poll(response: &HttpResponse) -> PollOutcome {
             status: "in-progress".into(),
             progress: None,
         },
-        200 => match image_from_ok(response) {
+        200 => match image_from_parts(response, json.as_ref()) {
             Some(_) => PollOutcome::Failed(ProviderError::Protocol(
                 "poll returned the image inline".into(),
             )),
@@ -1221,37 +1211,34 @@ fn parse_poll(response: &HttpResponse) -> PollOutcome {
     }
 }
 
-fn is_blocked(response: &HttpResponse) -> bool {
-    if response.headers.iter().any(|header| {
-        header.name.eq_ignore_ascii_case("finish-reason")
-            && header.value.trim().eq_ignore_ascii_case("CONTENT_FILTERED")
-    }) {
-        return true;
-    }
-    let Some(&first) = response
+fn body_json(response: &HttpResponse) -> Option<Value> {
+    let first = response
         .body
         .iter()
-        .find(|byte| !byte.is_ascii_whitespace())
-    else {
-        return false;
-    };
-    if first != b'{' {
-        return false;
+        .find(|byte| !byte.is_ascii_whitespace())?;
+    if *first != b'{' {
+        return None;
     }
-    let Ok(value) = serde_json::from_slice::<Value>(&response.body) else {
-        return false;
-    };
-    value
-        .get("finish_reason")
-        .and_then(Value::as_str)
-        .is_some_and(|reason| reason.eq_ignore_ascii_case("CONTENT_FILTERED"))
-        || value
-            .get("name")
-            .and_then(Value::as_str)
-            .is_some_and(|name| name == "content_moderation")
+    serde_json::from_slice(&response.body).ok()
 }
 
-fn image_from_ok(response: &HttpResponse) -> Option<InlineImage> {
+fn blocked(response: &HttpResponse, json: Option<&Value>) -> bool {
+    response.headers.iter().any(|header| {
+        header.name.eq_ignore_ascii_case("finish-reason")
+            && header.value.trim().eq_ignore_ascii_case("CONTENT_FILTERED")
+    }) || json.is_some_and(|value| {
+        value
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| reason.eq_ignore_ascii_case("CONTENT_FILTERED"))
+            || value
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name == "content_moderation")
+    })
+}
+
+fn image_from_parts(response: &HttpResponse, json: Option<&Value>) -> Option<InlineImage> {
     if let Some(media) = header_media(response) {
         if response.body.is_empty() {
             return None;
@@ -1267,7 +1254,10 @@ fn image_from_ok(response: &HttpResponse) -> Option<InlineImage> {
             suggestion: String::new(),
         });
     }
-    let value = serde_json::from_slice::<Value>(&response.body).ok()?;
+    image_from_json(json?)
+}
+
+fn image_from_json(value: &Value) -> Option<InlineImage> {
     let encoded = value.get("image")?.as_str()?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded)
@@ -1284,7 +1274,6 @@ fn image_from_ok(response: &HttpResponse) -> Option<InlineImage> {
     })
 }
 
-/// The declared content type, normalized to png, jpeg, or webp.
 fn header_media(response: &HttpResponse) -> Option<&'static str> {
     let content_type = response
         .headers
@@ -1744,7 +1733,6 @@ mod tests {
             ["image", "mask", "grow_mask", "output_format"]
         );
         assert_eq!(binary_part(&two, "mask").bytes, vec![2; 16]);
-        // The same request with a third loaded image still sends only two parts.
         let three = submit(
             "stability-erase",
             defaults("stability-erase"),
@@ -1954,7 +1942,6 @@ mod tests {
         assert_eq!(text_value(&http, "left"), "0");
         assert!(parts_of(&http).iter().all(|part| part.name != "bottom"));
         assert!(parts_of(&http).iter().all(|part| part.name != "prompt"));
-        // Non-empty prose reaches the endpoint as `prompt`.
         let voiced = submit_with(
             "stability-outpaint",
             "a lighthouse",
@@ -2428,7 +2415,6 @@ mod tests {
                 "{kind}"
             );
         }
-        // A normal 200 image with another finish reason stays untouched.
         let success = header_response(200, "image/png", PNG_MAGIC, "finish-reason", "SUCCESS");
         assert!(provider.inline_image(&success).is_some());
     }

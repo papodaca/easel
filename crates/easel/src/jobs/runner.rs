@@ -568,11 +568,7 @@ impl JobRunner {
             return;
         };
         let id = mint_job_id();
-        let file_name = match image.mime.as_str() {
-            "image/jpeg" => "result.jpg",
-            "image/webp" => "result.webp",
-            _ => "result.png",
-        };
+        let file_name = result_file_name(&image.mime);
         let thumb = easel_core::image_prep::thumbnail(&image.bytes, 256).unwrap_or_default();
         if let Err(error) = self.history.complete_inline(
             &id,
@@ -603,8 +599,6 @@ impl JobRunner {
         self.pump(cx);
     }
 
-    /// Finish a polled job whose poll response carried the image bytes, so no
-    /// second download request is made.
     fn complete_polled_inline(
         &mut self,
         token: u64,
@@ -626,11 +620,7 @@ impl JobRunner {
             );
             return;
         };
-        let file_name = match image.mime.as_str() {
-            "image/jpeg" => "result.jpg",
-            "image/webp" => "result.webp",
-            _ => "result.png",
-        };
+        let file_name = result_file_name(&image.mime);
         let thumb = easel_core::image_prep::thumbnail(&image.bytes, 256).unwrap_or_default();
         if let Err(error) = self.history.complete(
             &id,
@@ -1347,6 +1337,14 @@ impl JobRunner {
             })
             .unwrap_or("unknown");
         format!("{label}:{content_hash}")
+    }
+}
+
+fn result_file_name(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "result.jpg",
+        "image/webp" => "result.webp",
+        _ => "result.png",
     }
 }
 
