@@ -20,6 +20,12 @@ const MAX_ACTIVE: usize = 4;
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
+/// Budget for the download phase: five sequential fetches, each bounded by the
+/// transport's worst-case 180s large-file timeout. The 600s poll deadline (KTD6)
+/// governs only the poll phase and must not cut off an in-flight download of a
+/// job the API already completed.
+const DOWNLOAD_DEADLINE: Duration = Duration::from_secs(5 * 180);
+
 struct GridDownload {
     grid_url: url::Url,
     quadrant_urls: [url::Url; 4],
@@ -845,7 +851,7 @@ impl JobRunner {
         else {
             return;
         };
-        self.arm_deadline(token, cx);
+        self.arm_deadline(token, DOWNLOAD_DEADLINE, cx);
         if let Some(quadrant_urls) = grid_urls {
             if let Some(slot) = self.slot_mut(token) {
                 slot.grid_download = Some(GridDownload {
@@ -885,29 +891,9 @@ impl JobRunner {
         .detach();
     }
 
-    fn arm_deadline(&mut self, token: u64, cx: &mut Context<Self>) {
-        let Some(elapsed) = self
-            .slots
-            .iter()
-            .find(|slot| slot.token == token)
-            .map(|slot| slot.elapsed)
-        else {
-            return;
-        };
-        let Some(deadline) = self
-            .providers
-            .get(&token)
-            .map(|provider| provider.poll_policy().deadline)
-        else {
-            return;
-        };
-        let remaining = deadline.saturating_sub(elapsed);
-        if remaining.is_zero() {
-            self.deadline(token, cx);
-            return;
-        }
+    fn arm_deadline(&mut self, token: u64, budget: Duration, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(remaining).await;
+            cx.background_executor().timer(budget).await;
             this.update(cx, |runner, cx| {
                 if matches!(
                     runner.slot_mut(token).map(|slot| slot.state.clone()),

@@ -6,7 +6,7 @@ use easel_core::history::HistoryStore;
 use easel_core::http::{Body, HttpResponse, Method};
 use easel_core::job::{EncodedImage, JobRequest, JobState};
 use easel_core::model_spec::ProviderId;
-use gpui::{TestAppContext, prelude::*};
+use gpui::{Task, TestAppContext, prelude::*};
 use serde_json::json;
 
 use crate::app_state::AppState;
@@ -73,7 +73,56 @@ fn open(
     script: Vec<Result<HttpResponse, TransportError>>,
     watch: bool,
 ) -> Harness {
-    let transport = Arc::new(FakeTransport::scripted(script));
+    open_with_stall(
+        cx,
+        name,
+        Arc::new(FakeTransport::scripted(script)),
+        None,
+        watch,
+    )
+}
+
+/// Wraps a scripted transport so the first CDN download resolves only after
+/// `stall` of simulated time, exercising the download-phase deadline.
+struct StallingDownloads {
+    inner: Arc<FakeTransport>,
+    stall: std::sync::Mutex<Option<Duration>>,
+}
+
+impl HttpTransport for StallingDownloads {
+    fn request(
+        &self,
+        request: easel_core::http::HttpRequest,
+        cx: &mut gpui::App,
+    ) -> Task<Result<HttpResponse, TransportError>> {
+        let download = request.url.contains("cdn2.apiframe.ai");
+        let stall = if download {
+            self.stall.lock().expect("stall").take()
+        } else {
+            None
+        };
+        let inner_task = self.inner.request(request, cx);
+        match stall {
+            Some(delay) => cx.spawn(async move |cx| {
+                cx.background_executor().timer(delay).await;
+                inner_task.await
+            }),
+            None => inner_task,
+        }
+    }
+}
+
+fn open_with_stall(
+    cx: &mut TestAppContext,
+    name: &str,
+    inner: Arc<FakeTransport>,
+    stall: Option<Duration>,
+    watch: bool,
+) -> Harness {
+    let transport: Arc<dyn HttpTransport> = Arc::new(StallingDownloads {
+        inner: Arc::clone(&inner),
+        stall: std::sync::Mutex::new(stall),
+    });
     let keys: Arc<dyn KeyResolver> =
         Arc::new(MapKeys::default().insert(ProviderId::Apiframe, "apiframe-test-key"));
     let root = std::env::temp_dir().join(format!(
@@ -107,7 +156,7 @@ fn open(
     });
     Harness {
         runner,
-        transport,
+        transport: inner,
         history,
         state: watch.then_some(state),
         root,
@@ -406,6 +455,45 @@ fn a_failed_quadrant_download_leaves_no_grid_entry(cx: &mut TestAppContext) {
             .history
             .grid_meta(&easel_core::providers::JobId::parse("mjgrid3").unwrap())
             .is_none()
+    );
+}
+
+#[gpui::test]
+fn a_slow_grid_download_outlives_the_poll_budget(cx: &mut TestAppContext) {
+    let harness = open_with_stall(
+        cx,
+        "mj-slow",
+        Arc::new(FakeTransport::scripted(vec![
+            Ok(http(202, r#"{"jobId":"mjgrid9","status":"QUEUED"}"#)),
+            Ok(http(200, r#"{"status":"QUEUED","progress":0}"#)),
+            Ok(http(200, mj_completed("mjgrid9"))),
+            Ok(http(200, grid_png(9))),
+            Ok(http(200, grid_png(1))),
+            Ok(http(200, grid_png(2))),
+            Ok(http(200, grid_png(3))),
+            Ok(http(200, grid_png(4))),
+        ])),
+        Some(Duration::from_secs(700)),
+        true,
+    );
+    harness.runner.update(cx, |runner, cx| {
+        runner.submit(request("apiframe-midjourney", Vec::new()), cx)
+    });
+    cx.run_until_parked();
+    wait_for_polls(cx, 1);
+
+    // The stall holds the first CDN fetch past the 600s poll budget; the
+    // download phase owns its own deadline and the completed job must survive.
+    cx.executor().advance_clock(Duration::from_secs(700));
+    cx.run_until_parked();
+    let states = harness.runner.read_with(cx, |runner, _| runner.states());
+    assert!(matches!(states[0], JobState::Done { .. }), "{states:?}");
+    assert!(harness.root.join("mjgrid9/result.png").is_file());
+    assert!(
+        harness
+            .history
+            .grid_meta(&easel_core::providers::JobId::parse("mjgrid9").unwrap())
+            .is_some()
     );
 }
 

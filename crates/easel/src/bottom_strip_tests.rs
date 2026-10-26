@@ -1179,6 +1179,70 @@ fn a_completed_midjourney_job_downloads_the_grid_and_opens_the_picker(cx: &mut T
     );
 }
 
+#[gpui::test]
+fn a_failed_pick_reports_the_error_and_keeps_the_picker_open(cx: &mut TestAppContext) {
+    let (_state, strip, _runner, history, mut cx) =
+        grid_runner_open(cx, "grid-pick-fail", Vec::new());
+    seed_grid(&history, "mjgrid7");
+    let notes =
+        cx.update(|_window, cx| cx.new(|_| crate::notifications::Notifications::new()));
+    strip.update(&mut cx, |strip, _| strip.set_notes(notes.clone()));
+    strip.update(&mut cx, |strip, cx| strip.refresh(cx));
+    open_modal(&mut cx, &strip);
+    assert!(strip.update(&mut cx, |strip, cx| strip.grid_dialog(cx).is_some()));
+    strip.update(&mut cx, |strip, cx| {
+        strip.toggle_grid_quadrant(0, cx);
+        strip.toggle_grid_quadrant(2, cx);
+    });
+    let entry = history
+        .result_path(&JobId::parse("mjgrid7").unwrap())
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    std::fs::remove_file(entry.join("quadrant_0.png")).unwrap();
+
+    strip.update(&mut cx, |strip, cx| strip.confirm_grid_pick(cx));
+    assert!(
+        strip.update(&mut cx, |strip, cx| strip.grid_dialog(cx).is_some()),
+        "a failed pick keeps the picker open"
+    );
+    assert_eq!(
+        strip.read_with(&cx, |strip, _| strip.grid_selection),
+        [true, false, true, false],
+        "the selection survives the failure"
+    );
+    assert!(
+        notes.read_with(&cx, |notes, _| notes.status().contains("quadrant file is missing")),
+        "the store error reaches the status bar"
+    );
+    let ids: Vec<String> = history
+        .list()
+        .unwrap()
+        .iter()
+        .map(|entry| entry.id.as_str().to_string())
+        .collect();
+    assert_eq!(ids, ["mjgrid7"], "{ids:?}");
+
+    strip.update(&mut cx, |strip, cx| strip.toggle_grid_quadrant(0, cx));
+    strip.update(&mut cx, |strip, cx| strip.confirm_grid_pick(cx));
+    let ids: Vec<String> = history
+        .list()
+        .unwrap()
+        .iter()
+        .map(|entry| entry.id.as_str().to_string())
+        .collect();
+    assert_eq!(ids, ["mjgrid7-q3", "mjgrid7"], "{ids:?}");
+    assert_eq!(
+        grid_meta_of(&history, "mjgrid7").picked,
+        [false, false, true, false]
+    );
+    assert!(
+        strip.update(&mut cx, |strip, cx| strip.grid_dialog(cx).is_none()),
+        "a successful retry closes the picker"
+    );
+}
+
 fn runner_submit(strip: &gpui::Entity<BottomStrip>, cx: &mut VisualTestContext) {
     let runner = strip
         .read_with(cx, |strip, _| strip.runner.clone())

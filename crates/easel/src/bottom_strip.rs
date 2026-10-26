@@ -728,10 +728,20 @@ impl BottomStrip {
             return;
         }
         let created_at = crate::jobs::utc_now();
-        let _ = self.history.pick_quadrants(&id, &selection, &created_at);
-        self.rebuild(cx);
-        self.close_modal(cx);
-        cx.notify();
+        match self.history.pick_quadrants(&id, &selection, &created_at) {
+            Ok(minted) => {
+                self.rebuild(cx);
+                if !minted.is_empty() {
+                    self.close_modal(cx);
+                }
+                cx.notify();
+            }
+            Err(error) => {
+                self.rebuild(cx);
+                self.report_status(&error.to_string(), cx);
+                cx.notify();
+            }
+        }
     }
 
     fn prompt_for(&self, prose: Option<String>, id: Option<&JobId>) -> String {
