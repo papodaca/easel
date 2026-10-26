@@ -6,6 +6,7 @@ pub mod krea;
 pub mod leonardo;
 pub mod openai;
 pub mod qwen;
+pub mod stability;
 pub mod xai;
 
 use std::sync::OnceLock;
@@ -46,6 +47,22 @@ impl ModelRegistry {
                     chutes::ZImageTurbo::model_spec(),
                     qwen::QwenImage30Pro::model_spec(),
                     qwen::QwenImage21Pro::model_spec(),
+                    stability::StableImageUltra::model_spec(),
+                    stability::StableImageCore::model_spec(),
+                    stability::Sd35Large::model_spec(),
+                    stability::Sd35LargeTurbo::model_spec(),
+                    stability::Sd35Medium::model_spec(),
+                    stability::Sd35Flash::model_spec(),
+                    stability::UpscaleFast::model_spec(),
+                    stability::UpscaleConservative::model_spec(),
+                    stability::UpscaleCreative::model_spec(),
+                    stability::Outpaint::model_spec(),
+                    stability::Erase::model_spec(),
+                    stability::Inpaint::model_spec(),
+                    stability::SearchAndReplace::model_spec(),
+                    stability::SearchAndRecolor::model_spec(),
+                    stability::RemoveBackground::model_spec(),
+                    stability::ReplaceBackgroundAndRelight::model_spec(),
                 ];
                 specs.extend(
                     apiframe::descriptors()
@@ -155,6 +172,24 @@ pub fn resolve_model(model_id: &str) -> Option<Box<dyn Provider>> {
         "chutes-z-image-turbo" => Some(Box::new(chutes::ZImageTurbo)),
         "qwen-image-3.0-pro" => Some(Box::new(qwen::QwenImage30Pro)),
         "qwen-image-2.1-pro" => Some(Box::new(qwen::QwenImage21Pro)),
+        "stability-ultra" => Some(Box::new(stability::StableImageUltra)),
+        "stability-core" => Some(Box::new(stability::StableImageCore)),
+        "sd3.5-large" => Some(Box::new(stability::Sd35Large)),
+        "sd3.5-large-turbo" => Some(Box::new(stability::Sd35LargeTurbo)),
+        "sd3.5-medium" => Some(Box::new(stability::Sd35Medium)),
+        "sd3.5-flash" => Some(Box::new(stability::Sd35Flash)),
+        "stability-upscale-fast" => Some(Box::new(stability::UpscaleFast)),
+        "stability-upscale-conservative" => Some(Box::new(stability::UpscaleConservative)),
+        "stability-upscale-creative" => Some(Box::new(stability::UpscaleCreative)),
+        "stability-outpaint" => Some(Box::new(stability::Outpaint)),
+        "stability-erase" => Some(Box::new(stability::Erase)),
+        "stability-inpaint" => Some(Box::new(stability::Inpaint)),
+        "stability-search-and-replace" => Some(Box::new(stability::SearchAndReplace)),
+        "stability-search-and-recolor" => Some(Box::new(stability::SearchAndRecolor)),
+        "stability-remove-background" => Some(Box::new(stability::RemoveBackground)),
+        "stability-replace-background-and-relight" => {
+            Some(Box::new(stability::ReplaceBackgroundAndRelight))
+        }
         other => match apiframe::resolve(other) {
             Some(provider) => Some(Box::new(provider)),
             None => {
