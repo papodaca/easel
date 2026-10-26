@@ -3,6 +3,7 @@ pub mod bfl;
 pub mod chutes;
 pub mod google;
 pub mod krea;
+pub mod leonardo;
 pub mod openai;
 pub mod qwen;
 pub mod xai;
@@ -51,6 +52,7 @@ impl ModelRegistry {
                         .iter()
                         .map(|descriptor| &descriptor.spec),
                 );
+                specs.extend(leonardo::specs());
                 specs
             })
             .as_slice()
@@ -153,7 +155,9 @@ pub fn resolve_model(model_id: &str) -> Option<Box<dyn Provider>> {
         "qwen-image-2.1-pro" => Some(Box::new(qwen::QwenImage21Pro)),
         other => match apiframe::resolve(other) {
             Some(provider) => Some(Box::new(provider)),
-            None => None,
+            None => {
+                leonardo::resolve(other).map(|provider| Box::new(provider) as Box<dyn Provider>)
+            }
         },
     }
 }

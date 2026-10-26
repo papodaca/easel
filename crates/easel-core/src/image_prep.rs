@@ -145,7 +145,7 @@ fn has_transparency(image: &DynamicImage) -> bool {
     }
 }
 
-fn fit_pixels(width: u32, height: u32, max_pixels: u64) -> (u32, u32) {
+pub(crate) fn fit_pixels(width: u32, height: u32, max_pixels: u64) -> (u32, u32) {
     let pixels = u64::from(width) * u64::from(height);
     if pixels <= max_pixels || width == 0 || height == 0 {
         return (width, height);
