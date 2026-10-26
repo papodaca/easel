@@ -830,3 +830,154 @@ fn leonardo_switches_adopt_defaults_and_keep_edited_dimensions(cx: &mut TestAppC
     assert!(canvas);
     assert_eq!(boxes, 1);
 }
+
+#[gpui::test]
+fn stability_is_hidden_without_a_key_and_lists_the_sixteen_models_with_one(
+    cx: &mut TestAppContext,
+) {
+    let _env = ProviderEnvGuard::clear();
+    let (_state, panel) = editor_with(cx, Arc::new(SharedKeys::default()));
+    let providers = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.provider_menu().clone()),
+    );
+    assert!(
+        !providers.iter().any(|name| name == "Stability AI"),
+        "{providers:?}"
+    );
+
+    let keys = Arc::new(SharedKeys::default());
+    keys.set_session(ProviderId::Stability, "stability-key");
+    let (_state, panel) = editor_with(cx, keys);
+    let providers = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.provider_menu().clone()),
+    );
+    assert!(
+        providers.contains(&"Stability AI".to_string()),
+        "{providers:?}"
+    );
+
+    panel.update(cx, |panel, cx| panel.choose_provider("Stability AI", cx));
+    let models = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.model_menu().clone()),
+    );
+    assert_eq!(
+        models,
+        [
+            "Stable Image Ultra",
+            "Stable Image Core",
+            "SD 3.5 Large",
+            "SD 3.5 Large Turbo",
+            "SD 3.5 Medium",
+            "SD 3.5 Flash",
+            "Fast Upscale",
+            "Conservative Upscale",
+            "Creative Upscale",
+            "Outpaint",
+            "Erase",
+            "Inpaint",
+            "Search and Replace",
+            "Search and Recolor",
+            "Remove Background",
+            "Replace Background and Relight",
+        ]
+    );
+    assert_eq!(
+        selected(
+            cx,
+            panel.read_with(cx, |panel, _| panel.model_menu().clone())
+        ),
+        "Stable Image Ultra"
+    );
+}
+
+#[gpui::test]
+fn stability_output_format_resets_to_png_and_carries_webp(cx: &mut TestAppContext) {
+    let state = app(cx);
+    state.update(cx, |app, cx| {
+        app.set_model("stability-ultra", cx);
+        app.values.insert("output_format".into(), json!("jpeg"));
+        app.set_model("stability-remove-background", cx);
+    });
+    assert_eq!(
+        state.read_with(cx, |app, _| app.values.get("output_format").cloned()),
+        Some(json!("png"))
+    );
+    state.update(cx, |app, cx| {
+        app.set_model("stability-ultra", cx);
+        app.values.insert("output_format".into(), json!("webp"));
+        app.set_model("stability-remove-background", cx);
+    });
+    assert_eq!(
+        state.read_with(cx, |app, _| app.values.get("output_format").cloned()),
+        Some(json!("webp"))
+    );
+}
+
+#[gpui::test]
+fn sd35_switches_adopt_untouched_defaults_and_keep_edited_values(cx: &mut TestAppContext) {
+    let state = app(cx);
+    state.update(cx, |app, cx| {
+        app.scene.prose = "keep this prompt".into();
+        app.set_image(crate::side_panel::form_tests::source_image(), cx);
+        app.scene.add_box(
+            Rect {
+                x: 10,
+                y: 10,
+                w: 100,
+                h: 80,
+            },
+            BoxKind::Layout,
+        );
+        app.set_aspect_ratio("1:1", cx);
+    });
+    assert!(state.read_with(cx, |app, _| app.box_tool_enabled()));
+    state.update(cx, |app, cx| app.set_model("sd3.5-large", cx));
+    let (cfg, strength, armed, prose, canvas, boxes) = state.read_with(cx, |app, _| {
+        (
+            app.values.get("cfg_scale").cloned(),
+            app.values.get("strength").cloned(),
+            app.box_tool_enabled(),
+            app.scene.prose.clone(),
+            app.image.is_some() && app.scene.source_image.is_some(),
+            app.scene.boxes.len(),
+        )
+    });
+    assert_eq!(cfg, Some(json!(4.0)));
+    assert_eq!(strength, Some(json!(0.7)));
+    assert!(!armed, "the Box tool is disarmed on Stability AI models");
+    assert_eq!(prose, "keep this prompt");
+    assert!(canvas);
+    assert_eq!(boxes, 1);
+
+    state.update(cx, |app, cx| app.set_model("sd3.5-large-turbo", cx));
+    assert_eq!(
+        state.read_with(cx, |app, _| app.values.get("cfg_scale").cloned()),
+        Some(json!(1.0))
+    );
+    assert_eq!(
+        state.read_with(cx, |app, _| app.values.get("strength").cloned()),
+        Some(json!(0.7))
+    );
+    state.update(cx, |app, cx| app.set_model("sd3.5-flash", cx));
+    assert_eq!(
+        state.read_with(cx, |app, _| app.values.get("cfg_scale").cloned()),
+        Some(json!(1.0))
+    );
+    assert_eq!(
+        state.read_with(cx, |app, _| app.values.get("strength").cloned()),
+        Some(json!(0.95))
+    );
+
+    state.update(cx, |app, cx| {
+        app.set_model("sd3.5-large", cx);
+        app.values.insert("cfg_scale".into(), json!(6.5));
+        app.set_model("sd3.5-large-turbo", cx);
+    });
+    assert_eq!(
+        state.read_with(cx, |app, _| app.values.get("cfg_scale").cloned()),
+        Some(json!(6.5))
+    );
+}

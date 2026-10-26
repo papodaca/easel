@@ -2160,3 +2160,226 @@ fn leonardo_width_and_height_render_number_inputs(cx: &mut TestAppContext) {
         );
     }
 }
+
+fn stability_validation(
+    cx: &mut VisualTestContext,
+    state: gpui::Entity<AppState>,
+) -> gpui::Entity<Validation> {
+    let keys: Arc<dyn crate::net::KeyResolver> =
+        Arc::new(MapKeys::default().insert(ProviderId::Stability, "stability-key"));
+    cx.new(|cx| Validation::new(state, keys, cx))
+}
+
+fn small_image() -> Arc<crate::image_load::DecodedImage> {
+    decoded(image::RgbaImage::from_pixel(
+        64,
+        64,
+        image::Rgba([20, 40, 60, 255]),
+    ))
+}
+
+fn stability_submit(app: &AppState) -> easel_core::http::HttpRequest {
+    let provider = easel_core::providers::resolve_model(&app.model_id).expect("provider");
+    let request = crate::jobs::build_request(app).expect("request");
+    provider.build_submit(&request, &[])
+}
+
+fn parts_of(http: &easel_core::http::HttpRequest) -> &[easel_core::http::Part] {
+    match &http.body {
+        easel_core::http::Body::Multipart { parts } => parts,
+        easel_core::http::Body::Json(_) => panic!("expected multipart, got json"),
+        easel_core::http::Body::Bytes(_, _) => panic!("expected multipart, got bytes"),
+        easel_core::http::Body::Empty => panic!("expected multipart, got empty"),
+    }
+}
+
+#[gpui::test]
+fn a_missing_stability_key_disables_generate(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("stability-ultra", cx);
+        app.scene.prose = "a harbor".into();
+    });
+    let keys: Arc<dyn crate::net::KeyResolver> = Arc::new(MapKeys::default());
+    let validation = cx.new(|cx| Validation::new(state.clone(), keys, cx));
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| *message == "No Stability AI API key — open Settings"),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    let validation = stability_validation(&mut cx, state);
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn promptless_stability_edits_run_on_a_64_pixel_image(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("stability-upscale-fast", cx);
+        app.scene.prose.clear();
+        app.set_image(small_image(), cx);
+    });
+    let validation = stability_validation(&mut cx, state.clone());
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    let http = state.read_with(&cx, |app, _| stability_submit(app));
+    assert_eq!(http.auth, Some(ProviderId::Stability));
+    let parts = parts_of(&http);
+    assert!(parts.iter().any(|part| part.name == "image"));
+    assert!(
+        parts
+            .iter()
+            .any(|part| part.name == "output_format" && part.bytes.as_slice() == b"png")
+    );
+    assert!(!parts.iter().any(|part| part.name == "prompt"));
+
+    state.update(&mut cx, |app, cx| {
+        app.set_model("stability-remove-background", cx)
+    });
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    let http = state.read_with(&cx, |app, _| stability_submit(app));
+    assert!(!parts_of(&http).iter().any(|part| part.name == "prompt"));
+
+    state.update(&mut cx, |app, cx| app.set_model("stability-erase", cx));
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    let http = state.read_with(&cx, |app, _| stability_submit(app));
+    let parts = parts_of(&http);
+    let image = parts
+        .iter()
+        .find(|part| part.name == "image")
+        .expect("image part");
+    assert_eq!(image.content_type, "image/png");
+    assert!(image.bytes.starts_with(b"\x89PNG"));
+    assert!(!parts.iter().any(|part| part.name == "mask"));
+    assert!(!parts.iter().any(|part| part.name == "prompt"));
+
+    state.update(&mut cx, |app, cx| app.set_model("stability-inpaint", cx));
+    let http = state.read_with(&cx, |app, _| stability_submit(app));
+    let parts = parts_of(&http);
+    let image = parts
+        .iter()
+        .find(|part| part.name == "image")
+        .expect("image part");
+    assert_eq!(image.content_type, "image/png");
+    assert!(image.bytes.starts_with(b"\x89PNG"));
+    assert!(!parts.iter().any(|part| part.name == "mask"));
+}
+
+#[gpui::test]
+fn relight_needs_a_second_image_when_the_prompt_is_empty(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("stability-replace-background-and-relight", cx);
+        app.scene.prose.clear();
+        app.set_image(small_image(), cx);
+    });
+    let validation = stability_validation(&mut cx, state.clone());
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages.iter().any(|message| message == "Prompt is empty"),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    state.update(&mut cx, |app, cx| {
+        app.scene
+            .add_reference(easel_core::scene::ImageRef::new("ref", 64, 64));
+        app.extras.push(small_image());
+        cx.notify();
+    });
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn outpaint_directions_and_search_prompt_gate_generate(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("stability-outpaint", cx);
+        app.set_image(source_image(), cx);
+    });
+    let validation = stability_validation(&mut cx, state.clone());
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| *message == "Set at least one outpaint direction above 0."),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    replace_number(&mut cx, &form, "left", "200");
+    assert_eq!(stored(&state, &cx, "left"), Some(json!(200)));
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)),
+        "{messages:?}"
+    );
+
+    state.update(&mut cx, |app, cx| {
+        app.scene.prose = "replace the car".into();
+        app.set_model("stability-search-and-replace", cx)
+    });
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| *message == "Search prompt is required"),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    replace_text(&mut cx, &form, "search_prompt", "the red car");
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    replace_text(&mut cx, &form, "search_prompt", "");
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| *message == "Search prompt is required"),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn over_cap_stability_switches_clamp_with_a_send_notice(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.scene.prose = "a harbor".into();
+        app.set_model("stability-inpaint", cx);
+    });
+    let validation = stability_validation(&mut cx, state.clone());
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "Add at least one image."),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+
+    state.update(&mut cx, |app, cx| {
+        app.set_model("stability-replace-background-and-relight", cx);
+        app.set_image(small_image(), cx);
+        for _ in 0..2 {
+            app.scene
+                .add_reference(easel_core::scene::ImageRef::new("ref", 64, 64));
+            app.extras.push(small_image());
+        }
+        cx.notify();
+    });
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+
+    state.update(&mut cx, |app, cx| app.set_model("stability-ultra", cx));
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert_eq!(
+        validation.read_with(&cx, |validation, cx| validation.send_notice(cx)),
+        Some("1 of 3 images will be sent".to_string())
+    );
+
+    state.update(&mut cx, |app, cx| app.set_model("stability-core", cx));
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+    assert_eq!(
+        validation.read_with(&cx, |validation, cx| validation.send_notice(cx)),
+        Some("0 of 3 images will be sent".to_string())
+    );
+}

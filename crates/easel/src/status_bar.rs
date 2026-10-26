@@ -480,4 +480,16 @@ mod tests {
         assert_eq!(bar.read_with(cx, |bar, _| bar.label()), None);
         assert!(transport.seen().is_empty(), "{:?}", transport.seen());
     }
+
+    #[gpui::test]
+    fn stability_does_not_ask_for_credits(cx: &mut TestAppContext) {
+        let transport = Arc::new(FakeTransport::scripted(vec![Ok(http(
+            r#"{"credits": 42}"#,
+        ))]));
+        let keys = Arc::new(MapKeys::default().insert(ProviderId::Stability, "test-key"));
+        let bar = open(cx, ProviderId::Stability, Arc::clone(&transport), keys);
+        cx.run_until_parked();
+        assert_eq!(bar.read_with(cx, |bar, _| bar.label()), None);
+        assert!(transport.seen().is_empty(), "{:?}", transport.seen());
+    }
 }
