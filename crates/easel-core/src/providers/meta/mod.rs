@@ -32,6 +32,8 @@ const OUTPUT_FORMATS: &[&str] = &["webp", "png", "jpeg"];
 
 const REASONING: &[&str] = &["high", "low"];
 
+pub const IMAGE_CAP: usize = 10;
+
 static SPEC: std::sync::LazyLock<ModelSpec> = std::sync::LazyLock::new(spec);
 
 impl MuseImage {
@@ -123,7 +125,7 @@ fn spec() -> ModelSpec {
         capabilities: Capabilities {
             supports_boxes: false,
             image_slots: ImageSlots::List {
-                max: 10,
+                max: IMAGE_CAP,
                 key: "images".into(),
             },
             size_control: SizeControl::AspectRatioAndResolution,
@@ -144,6 +146,15 @@ fn spec() -> ModelSpec {
             ],
             cross_rules: Vec::new(),
         },
+    }
+}
+
+#[must_use]
+pub fn refusal_messages(prepared: usize) -> Vec<String> {
+    if prepared > IMAGE_CAP {
+        vec![format!("At most {IMAGE_CAP} images.")]
+    } else {
+        Vec::new()
     }
 }
 

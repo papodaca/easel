@@ -197,6 +197,7 @@ fn the_header_lists_providers_and_the_body_lists_their_models(cx: &mut TestAppCo
     assert!(providers.contains(&"Krea".to_string()));
     assert!(!providers.iter().any(|name| name == "OpenAI"));
     assert!(!providers.iter().any(|name| name == "xAI"));
+    assert!(!providers.iter().any(|name| name == "Meta"));
     assert!(!providers.iter().any(|name| name == "FLUX 3"));
     assert_eq!(
         selected(
@@ -249,6 +250,26 @@ fn the_header_lists_providers_and_the_body_lists_their_models(cx: &mut TestAppCo
         ),
         "Nano Banana Pro"
     );
+}
+
+#[gpui::test]
+fn meta_lists_one_model_when_a_key_is_present(cx: &mut TestAppContext) {
+    let _env = ProviderEnvGuard::clear();
+    let keys = Arc::new(SharedKeys::default());
+    keys.set_session(ProviderId::Meta, "meta-key");
+    keys.set_session(ProviderId::Bfl, "bfl-key");
+    let (_state, panel) = editor_with(cx, keys);
+    let providers = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.provider_menu().clone()),
+    );
+    assert!(providers.contains(&"Meta".to_string()), "{providers:?}");
+    panel.update(cx, |panel, cx| panel.choose_provider("Meta", cx));
+    let models = labels(
+        cx,
+        panel.read_with(cx, |panel, _| panel.model_menu().clone()),
+    );
+    assert_eq!(models, ["Muse Image 1.0"]);
 }
 
 #[gpui::test]

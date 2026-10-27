@@ -86,6 +86,10 @@ impl Validation {
             let prepared = usize::from(app.image.is_some()) + app.extras.len();
             messages.extend(easel_core::providers::xai::refusal_messages(prepared));
         }
+        if provider == ProviderId::Meta {
+            let prepared = usize::from(app.image.is_some()) + app.extras.len();
+            messages.extend(easel_core::providers::meta::refusal_messages(prepared));
+        }
         if provider == ProviderId::Qwen {
             let prepared = usize::from(app.image.is_some()) + app.extras.len();
             if image_count > prepared {
@@ -112,6 +116,11 @@ impl Validation {
         }
         if app.spec().provider == ProviderId::Xai
             && prepared > easel_core::providers::xai::IMAGE_CAP
+        {
+            return None;
+        }
+        if app.spec().provider == ProviderId::Meta
+            && prepared > easel_core::providers::meta::IMAGE_CAP
         {
             return None;
         }

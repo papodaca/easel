@@ -1282,6 +1282,220 @@ fn switching_back_to_flux_keeps_the_prompt_canvas_and_request(cx: &mut TestAppCo
     assert_eq!(after, before);
 }
 
+fn meta_validation(
+    cx: &mut VisualTestContext,
+    state: gpui::Entity<AppState>,
+) -> gpui::Entity<Validation> {
+    let keys: Arc<dyn crate::net::KeyResolver> =
+        Arc::new(MapKeys::default().insert(ProviderId::Meta, "meta-key"));
+    cx.new(|cx| Validation::new(state, keys, cx))
+}
+
+fn check_value(form: &gpui::Entity<SchemaForm>, cx: &VisualTestContext, key: &str) -> bool {
+    form.read_with(cx, |form, cx| {
+        form.check(key)
+            .expect(key)
+            .read(cx)
+            .value()
+            .as_bool()
+            .unwrap()
+    })
+}
+
+#[gpui::test]
+fn meta_form_starts_at_auto_webp_high_and_three_switches(cx: &mut TestAppContext) {
+    let (state, form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("muse-image-1.0", cx);
+    });
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    let (sizes, size) = select_view(&form, &cx, "size");
+    let (formats, format) = select_view(&form, &cx, "output_format");
+    let (strengths, strength) = select_view(&form, &cx, "reasoning_strength");
+    assert_eq!(
+        sizes,
+        [
+            "auto",
+            "1024x1024",
+            "1536x1024",
+            "1024x1536",
+            "1792x1024",
+            "1024x1792",
+        ]
+    );
+    assert_eq!(formats, ["webp", "png", "jpeg"]);
+    assert_eq!(strengths, ["high", "low"]);
+    assert_eq!(size, "auto");
+    assert_eq!(format, "webp");
+    assert_eq!(strength, "high");
+    assert!(check_value(&form, &cx, "enable_image_search"));
+    assert!(check_value(&form, &cx, "enable_web_search"));
+    assert!(check_value(&form, &cx, "enable_shell"));
+    let labels = form.read_with(&cx, |form, _| {
+        form.presented()
+            .iter()
+            .map(|(label, _)| label.clone())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        labels,
+        [
+            "Size".to_string(),
+            "Output format".to_string(),
+            "Reasoning strength".to_string(),
+            "Image search".to_string(),
+            "Web search".to_string(),
+            "Code execution".to_string(),
+        ]
+    );
+}
+
+#[gpui::test]
+fn meta_ten_images_generate_and_eleven_refuse(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("muse-image-1.0", cx);
+        app.scene.prose = "a harbor".into();
+        attach_prepared(app, cx, 9);
+    });
+    let validation = meta_validation(&mut cx, state.clone());
+    assert!(validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+
+    state.update(&mut cx, |app, cx| {
+        app.scene
+            .add_reference(easel_core::scene::ImageRef::new("ref", 64, 64));
+        app.extras.push(source_image());
+        cx.notify();
+    });
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "At most 10 images."),
+        "{messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("will be sent"))
+    );
+    assert!(validation.read_with(&cx, |validation, cx| validation.send_notice(cx).is_none()));
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn meta_empty_prompt_disables_generate(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("muse-image-1.0", cx);
+        app.scene.prose.clear();
+    });
+    let validation = meta_validation(&mut cx, state);
+    let messages = validation.read_with(&cx, |validation, cx| validation.messages(cx));
+    assert!(
+        messages.iter().any(|message| message == "Prompt is empty"),
+        "{messages:?}"
+    );
+    assert!(!validation.read_with(&cx, |validation, cx| validation.generate_enabled(cx)));
+}
+
+#[gpui::test]
+fn switching_to_meta_keeps_listed_sizes_and_formats(cx: &mut TestAppContext) {
+    let (state, _form, mut cx) = mount(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("gpt-image-2.5-flare", cx);
+        app.values.insert("size".into(), json!("1536x1024"));
+        app.set_model("muse-image-1.0", cx);
+    });
+    assert_eq!(stored(&state, &cx, "size"), Some(json!("1536x1024")));
+
+    state.update(&mut cx, |app, cx| {
+        app.set_model("gpt-image-2.5-flare", cx);
+        app.values.insert("size".into(), json!("1024x1024"));
+        app.set_model("muse-image-1.0", cx);
+    });
+    assert_eq!(stored(&state, &cx, "size"), Some(json!("auto")));
+
+    state.update(&mut cx, |app, cx| {
+        app.set_model("apiframe-seedream-4", cx);
+        app.values.insert("size".into(), json!("4K"));
+        app.set_model("muse-image-1.0", cx);
+    });
+    assert_eq!(stored(&state, &cx, "size"), Some(json!("auto")));
+
+    state.update(&mut cx, |app, cx| {
+        app.set_model("leonardo-seedream-5.0-pro", cx);
+        app.values.insert("output_format".into(), json!("png"));
+        app.set_model("muse-image-1.0", cx);
+    });
+    assert_eq!(stored(&state, &cx, "output_format"), Some(json!("png")));
+
+    state.update(&mut cx, |app, cx| {
+        app.set_model("leonardo-seedream-5.0-pro", cx);
+        app.values.insert("output_format".into(), json!("jpeg"));
+        app.set_model("muse-image-1.0", cx);
+    });
+    assert_eq!(stored(&state, &cx, "output_format"), Some(json!("webp")));
+}
+
+#[gpui::test]
+fn switching_back_to_flux_from_meta_keeps_the_prompt_canvas_and_request(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    let image = decoded(image::RgbaImage::from_pixel(
+        256,
+        256,
+        image::Rgba([20, 40, 60, 255]),
+    ));
+    state.update(&mut cx, |app, cx| {
+        app.scene.prose = "keep this prompt".into();
+        app.set_image(image, cx);
+    });
+    let before = state.read_with(&cx, |app, _| flux_submit(app));
+    state.update(&mut cx, |app, cx| {
+        app.set_model("muse-image-1.0", cx);
+        app.set_model("flux-3-image", cx);
+    });
+    let (prose, canvas, after) = state.read_with(&cx, |app, _| {
+        (
+            app.scene.prose.clone(),
+            app.image.is_some() && app.scene.source_image.is_some(),
+            flux_submit(app),
+        )
+    });
+    assert_eq!(prose, "keep this prompt");
+    assert!(canvas);
+    assert_eq!(after, before);
+}
+
+#[gpui::test]
+fn meta_switches_reach_the_request_body(cx: &mut TestAppContext) {
+    let (state, mut cx) = open(cx);
+    state.update(&mut cx, |app, cx| {
+        app.set_model("muse-image-1.0", cx);
+        app.scene.prose = "a harbor".into();
+        app.values.insert("enable_web_search".into(), json!(false));
+        app.values.insert("enable_shell".into(), json!(false));
+    });
+    let http = state.read_with(&cx, |app, _| {
+        let provider = easel_core::providers::resolve_model(&app.model_id).expect("provider");
+        let request = crate::jobs::build_request(app).expect("request");
+        provider.build_submit(&request, &[])
+    });
+    let easel_core::http::Body::Json(json) = http.body else {
+        panic!("expected json");
+    };
+    assert_eq!(
+        json["tool_enablement"],
+        json!({
+            "enable_image_search": true,
+            "enable_web_search": false,
+            "enable_shell": false
+        })
+    );
+}
+
 #[gpui::test]
 fn a_loaded_picture_on_flux_schnell_generates_with_a_count_notice(cx: &mut TestAppContext) {
     let (state, mut cx) = open(cx);
