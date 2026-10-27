@@ -12,6 +12,7 @@ pub enum ProviderId {
     OpenAi,
     #[serde(rename = "xai")]
     Xai,
+    Meta,
     Chutes,
     Qwen,
     Apiframe,
@@ -34,6 +35,8 @@ const GOOGLE_HOSTS: &[HostRule] = &[HostRule::Exact("generativelanguage.googleap
 const OPENAI_HOSTS: &[HostRule] = &[HostRule::Exact("api.openai.com")];
 
 const XAI_HOSTS: &[HostRule] = &[HostRule::Exact("api.x.ai")];
+
+const META_HOSTS: &[HostRule] = &[HostRule::Exact("api.meta.ai")];
 
 const CHUTES_HOSTS: &[HostRule] = &[
     HostRule::Exact("api.chutes.ai"),
@@ -67,6 +70,7 @@ impl ProviderId {
             Self::Google => "https://generativelanguage.googleapis.com",
             Self::OpenAi => "https://api.openai.com",
             Self::Xai => "https://api.x.ai",
+            Self::Meta => "https://api.meta.ai",
             Self::Chutes => "https://api.chutes.ai",
             Self::Qwen => "https://maas.qwencloudapi.com",
             Self::Apiframe => "https://api.apiframe.ai",
@@ -83,6 +87,7 @@ impl ProviderId {
             Self::Google => "GEMINI_API_KEY",
             Self::OpenAi => "OPENAI_API_KEY",
             Self::Xai => "XAI_API_KEY",
+            Self::Meta => "MODEL_API_KEY",
             Self::Chutes => "CHUTES_API_KEY",
             Self::Qwen => "DASHSCOPE_API_KEY",
             Self::Apiframe => "APIFRAME_API_KEY",
@@ -99,6 +104,7 @@ impl ProviderId {
             Self::Google => "Google",
             Self::OpenAi => "OpenAI",
             Self::Xai => "xAI",
+            Self::Meta => "Meta",
             Self::Chutes => "Chutes",
             Self::Qwen => "Qwen",
             Self::Apiframe => "Apiframe",
@@ -119,6 +125,7 @@ impl ProviderId {
             },
             Self::OpenAi => AuthScheme::Bearer,
             Self::Xai => AuthScheme::Bearer,
+            Self::Meta => AuthScheme::Bearer,
             Self::Chutes => AuthScheme::Bearer,
             Self::Qwen => AuthScheme::Bearer,
             Self::Apiframe => AuthScheme::HeaderKey {
@@ -137,6 +144,7 @@ impl ProviderId {
             Self::Google => GOOGLE_HOSTS,
             Self::OpenAi => OPENAI_HOSTS,
             Self::Xai => XAI_HOSTS,
+            Self::Meta => META_HOSTS,
             Self::Chutes => CHUTES_HOSTS,
             Self::Qwen => QWEN_HOSTS,
             Self::Apiframe => APIFRAME_HOSTS,
@@ -432,6 +440,26 @@ mod tests {
             serde_json::json!("xai")
         );
         assert!(ModelRegistry::providers().contains(&ProviderId::Xai));
+    }
+
+    #[test]
+    fn meta_allows_only_api_meta_ai() {
+        use crate::providers::ModelRegistry;
+
+        assert_eq!(ProviderId::Meta.env_var(), "MODEL_API_KEY");
+        assert_eq!(ProviderId::Meta.display_name(), "Meta");
+        assert_eq!(ProviderId::Meta.base_url(), "https://api.meta.ai");
+        assert!(matches!(ProviderId::Meta.auth_scheme(), AuthScheme::Bearer));
+        assert!(ProviderId::Meta.allows_url("https://api.meta.ai"));
+        assert!(ProviderId::Meta.allows_url("https://api.meta.ai/v1/models"));
+        assert!(!ProviderId::Meta.allows_url("http://api.meta.ai"));
+        assert!(!ProviderId::Meta.allows_url("https://dev.meta.ai"));
+        assert!(!ProviderId::Meta.allows_url("https://api.meta.ai.evil.example/x"));
+        assert_eq!(
+            serde_json::to_value(ProviderId::Meta).unwrap(),
+            serde_json::json!("meta")
+        );
+        assert!(ModelRegistry::providers().contains(&ProviderId::Meta));
     }
 
     #[test]

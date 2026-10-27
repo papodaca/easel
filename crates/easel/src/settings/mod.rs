@@ -33,6 +33,7 @@ pub fn key_probe(provider: ProviderId) -> HttpRequest {
         ProviderId::Google => "https://generativelanguage.googleapis.com/v1beta/models".to_owned(),
         ProviderId::OpenAi => "https://api.openai.com/v1/models".to_owned(),
         ProviderId::Xai => "https://api.x.ai/v1/api-key".to_owned(),
+        ProviderId::Meta => "https://api.meta.ai/v1/models".to_owned(),
         ProviderId::Chutes => "https://api.chutes.ai/users/me/quotas".to_owned(),
         ProviderId::Qwen => easel_core::providers::qwen::GENERATION_URL.to_owned(),
         ProviderId::Apiframe => "https://api.apiframe.ai/v2/me".to_owned(),
@@ -177,6 +178,7 @@ pub struct SessionKeys {
     google: Option<Zeroizing<String>>,
     openai: Option<Zeroizing<String>>,
     xai: Option<Zeroizing<String>>,
+    meta: Option<Zeroizing<String>>,
     chutes: Option<Zeroizing<String>>,
     qwen: Option<Zeroizing<String>>,
     apiframe: Option<Zeroizing<String>>,
@@ -193,6 +195,7 @@ impl SessionKeys {
             ProviderId::Google => self.google = Some(key),
             ProviderId::OpenAi => self.openai = Some(key),
             ProviderId::Xai => self.xai = Some(key),
+            ProviderId::Meta => self.meta = Some(key),
             ProviderId::Chutes => self.chutes = Some(key),
             ProviderId::Qwen => self.qwen = Some(key),
             ProviderId::Apiframe => self.apiframe = Some(key),
@@ -208,6 +211,7 @@ impl SessionKeys {
             ProviderId::Google => self.google = None,
             ProviderId::OpenAi => self.openai = None,
             ProviderId::Xai => self.xai = None,
+            ProviderId::Meta => self.meta = None,
             ProviderId::Chutes => self.chutes = None,
             ProviderId::Qwen => self.qwen = None,
             ProviderId::Apiframe => self.apiframe = None,
@@ -223,6 +227,7 @@ impl SessionKeys {
             ProviderId::Google => self.google.clone(),
             ProviderId::OpenAi => self.openai.clone(),
             ProviderId::Xai => self.xai.clone(),
+            ProviderId::Meta => self.meta.clone(),
             ProviderId::Chutes => self.chutes.clone(),
             ProviderId::Qwen => self.qwen.clone(),
             ProviderId::Apiframe => self.apiframe.clone(),
@@ -276,15 +281,37 @@ pub fn resolve_key(
     store: &dyn CredentialStore,
     session: &SessionKeys,
 ) -> Option<(Zeroizing<String>, Source)> {
-    if let Some(value) = env.get(provider.env_var()) {
-        let value = value.trim();
-        if !value.is_empty() {
-            return Some((Zeroizing::new(value.to_owned()), Source::Env));
+    // `MODEL_API_KEY` is a generic name. A key saved for Meta must win over
+    // whatever another tool left in the environment.
+    if provider == ProviderId::Meta {
+        if let Ok(Some(key)) = store.read(provider)
+            && !key.is_empty()
+        {
+            return Some((key, Source::Store));
         }
+        if let Some(key) = session.get(provider) {
+            return Some((key, Source::Session));
+        }
+        return env_key(provider, env);
+    }
+    if let Some(resolved) = env_key(provider, env) {
+        return Some(resolved);
     }
     match store.read(provider) {
         Ok(Some(key)) if !key.is_empty() => Some((key, Source::Store)),
         Ok(_) | Err(_) => session.get(provider).map(|key| (key, Source::Session)),
+    }
+}
+
+fn env_key(
+    provider: ProviderId,
+    env: &HashMap<String, String>,
+) -> Option<(Zeroizing<String>, Source)> {
+    let value = env.get(provider.env_var())?.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some((Zeroizing::new(value.to_owned()), Source::Env))
     }
 }
 
@@ -645,6 +672,7 @@ fn provider_slug(provider: ProviderId) -> &'static str {
         ProviderId::Google => "google",
         ProviderId::OpenAi => "openai",
         ProviderId::Xai => "xai",
+        ProviderId::Meta => "meta",
         ProviderId::Chutes => "chutes",
         ProviderId::Qwen => "qwen",
         ProviderId::Apiframe => "apiframe",

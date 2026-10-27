@@ -793,6 +793,7 @@ fn provider_name(model_id: &str) -> String {
             ProviderId::Google => "google",
             ProviderId::OpenAi => "openai",
             ProviderId::Xai => "xai",
+            ProviderId::Meta => "meta",
             ProviderId::Chutes => "chutes",
             ProviderId::Qwen => "qwen",
             ProviderId::Apiframe => "apiframe",

@@ -429,6 +429,23 @@ mod tests {
     }
 
     #[gpui::test]
+    fn meta_does_not_ask_for_credits(cx: &mut TestAppContext) {
+        let transport = Arc::new(FakeTransport::scripted(vec![Ok(http(
+            r#"{"credits": 42}"#,
+        ))]));
+        let keys = Arc::new(MapKeys::default().insert(ProviderId::Meta, "test-key"));
+        let bar = open(cx, ProviderId::Meta, Arc::clone(&transport), keys);
+        cx.run_until_parked();
+        assert_eq!(bar.read_with(cx, |bar, _| bar.label()), None);
+        assert!(
+            transport
+                .seen()
+                .iter()
+                .all(|request| !request.url.contains("api.meta.ai"))
+        );
+    }
+
+    #[gpui::test]
     fn xai_does_not_ask_for_credits(cx: &mut TestAppContext) {
         let transport = Arc::new(FakeTransport::scripted(vec![Ok(http(
             r#"{"credits": 42}"#,

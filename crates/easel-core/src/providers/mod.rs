@@ -87,6 +87,7 @@ impl ModelRegistry {
                     ProviderId::Google,
                     ProviderId::OpenAi,
                     ProviderId::Xai,
+                    ProviderId::Meta,
                     ProviderId::Chutes,
                     ProviderId::Qwen,
                     ProviderId::Apiframe,
@@ -127,13 +128,14 @@ mod tests {
     #[test]
     fn every_provider_is_registered_once() {
         let all = ModelRegistry::providers();
-        assert_eq!(all.len(), 10);
+        assert_eq!(all.len(), 11);
         for expected in [
             ProviderId::Bfl,
             ProviderId::Krea,
             ProviderId::Google,
             ProviderId::OpenAi,
             ProviderId::Xai,
+            ProviderId::Meta,
             ProviderId::Chutes,
             ProviderId::Qwen,
             ProviderId::Apiframe,

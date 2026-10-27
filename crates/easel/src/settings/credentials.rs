@@ -76,6 +76,39 @@ fn openai_env_beats_the_store() {
 }
 
 #[test]
+fn meta_store_beats_the_environment() {
+    let store = MemoryStore::default();
+    store.write(ProviderId::Meta, "store-key").expect("write");
+    assert!(store.stores_under(ProviderId::Meta.base_url()));
+    assert_eq!(ProviderId::Meta.base_url(), "https://api.meta.ai");
+    let mut session = SessionKeys::default();
+    session.set(ProviderId::Meta, "session-key");
+    let env = std::collections::HashMap::from([(
+        ProviderId::Meta.env_var().to_owned(),
+        "env-key".to_owned(),
+    )]);
+    let resolved = resolve_key(ProviderId::Meta, &env, &store, &session).expect("store");
+    assert_eq!(resolved.0.as_str(), "store-key");
+    assert_eq!(resolved.1, Source::Store);
+
+    let empty = MemoryStore::default();
+    let no_session = SessionKeys::default();
+    let from_env = resolve_key(ProviderId::Meta, &env, &empty, &no_session).expect("env");
+    assert_eq!(from_env.0.as_str(), "env-key");
+    assert_eq!(from_env.1, Source::Env);
+
+    let from_session = resolve_key(
+        ProviderId::Meta,
+        &std::collections::HashMap::new(),
+        &empty,
+        &session,
+    )
+    .expect("session");
+    assert_eq!(from_session.0.as_str(), "session-key");
+    assert_eq!(from_session.1, Source::Session);
+}
+
+#[test]
 fn xai_env_beats_the_store_keyed_by_base_url() {
     let store = MemoryStore::default();
     store.write(ProviderId::Xai, "store-key").expect("write");
@@ -500,6 +533,55 @@ async fn openai_settings_probe_uses_get_models(cx: &mut TestAppContext) {
         );
         assert_eq!(
             panel.read_with(cx, |panel, _| panel.row_note(ProviderId::OpenAi).to_owned()),
+            note
+        );
+    }
+}
+
+#[gpui::test]
+async fn meta_settings_probe_uses_get_models(cx: &mut TestAppContext) {
+    use easel_core::http::{HttpResponse, Method};
+    use easel_core::model_spec::AuthScheme;
+    use gpui::prelude::*;
+
+    use crate::net::FakeTransport;
+    use crate::notifications::Notifications;
+    use crate::settings::{SettingsPanel, key_probe};
+
+    let probe = key_probe(ProviderId::Meta);
+    assert_eq!(probe.method, Method::Get);
+    assert_eq!(probe.url, "https://api.meta.ai/v1/models");
+    assert_eq!(probe.auth, Some(ProviderId::Meta));
+    assert!(matches!(ProviderId::Meta.auth_scheme(), AuthScheme::Bearer));
+
+    for (status, note) in [
+        (401, "invalid key"),
+        (200, "key accepted"),
+        (404, "key accepted"),
+    ] {
+        let transport = Arc::new(FakeTransport::scripted(vec![Ok(HttpResponse {
+            status,
+            headers: Vec::new(),
+            body: b"{}".to_vec(),
+        })]));
+        let notes = cx.new(|_| Notifications::new());
+        let panel = cx.new({
+            let notes = notes.clone();
+            let transport = Arc::clone(&transport);
+            move |cx| SettingsPanel::new(notes, transport, cx)
+        });
+        let titles = panel.read_with(cx, |panel, _| panel.provider_titles());
+        assert!(titles.iter().any(|title| title == "Meta"));
+        panel
+            .update(cx, |panel, cx| panel.test_key(ProviderId::Meta, cx))
+            .await;
+        let seen = transport.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].method, Method::Get);
+        assert_eq!(seen[0].url, probe.url);
+        assert_eq!(seen[0].auth, Some(ProviderId::Meta));
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.row_note(ProviderId::Meta).to_owned()),
             note
         );
     }
