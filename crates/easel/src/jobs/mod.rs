@@ -11,6 +11,8 @@ mod krea_tests;
 #[cfg(test)]
 mod leonardo_tests;
 #[cfg(test)]
+mod meta_tests;
+#[cfg(test)]
 mod openai_tests;
 #[cfg(test)]
 mod qwen_tests;

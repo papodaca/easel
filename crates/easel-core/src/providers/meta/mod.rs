@@ -6,7 +6,8 @@ use crate::error::{FieldError, ProviderError};
 use crate::http::{Body, HttpHeader, HttpRequest, HttpResponse, Method};
 use crate::job::{EncodedImage, JobRequest};
 use crate::model_spec::{AuthScheme, Capabilities, ImageSlots, ModelSpec, ProviderId, SizeControl};
-use crate::providers::{ImageInput, PollOutcome, Provider, ReferenceStep, Submitted};
+use crate::providers::bfl::protocol::extract_result_mime;
+use crate::providers::{ImageInput, InlineImage, PollOutcome, Provider, ReferenceStep, Submitted};
 use crate::scene::Scene;
 use crate::schema::{FieldDef, FieldKind, ParamSchema, RuleContext};
 
@@ -91,10 +92,17 @@ impl Provider for MuseImage {
         }
     }
 
-    fn parse_submit(&self, _response: &HttpResponse) -> Result<Submitted, ProviderError> {
-        Err(ProviderError::Protocol(
-            "muse returns the image on the submit response".into(),
-        ))
+    fn parse_submit(&self, response: &HttpResponse) -> Result<Submitted, ProviderError> {
+        match muse(response) {
+            Ok(_) => Err(ProviderError::Protocol(
+                "muse returns the image on the submit response".into(),
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn inline_image(&self, response: &HttpResponse) -> Option<InlineImage> {
+        muse(response).ok()
     }
 
     fn parse_poll(&self, _response: &HttpResponse) -> PollOutcome {
@@ -267,6 +275,68 @@ fn build_muse(spec: &ModelSpec, request: &JobRequest, images: &[ImageInput]) -> 
         max_body_bytes: 100 * 1024 * 1024,
         redact_query: false,
     }
+}
+
+fn muse(response: &HttpResponse) -> Result<InlineImage, ProviderError> {
+    if response.status == 401 {
+        return Err(ProviderError::Auth);
+    }
+    if response.status == 429 {
+        return Err(ProviderError::RateLimited { retry_after: None });
+    }
+    let value: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
+    if response.status == 400 && error_code(&value) == "content_policy_violation" {
+        return Err(ProviderError::Blocked);
+    }
+    if response.status != 200 {
+        return Err(ProviderError::Http {
+            status: response.status,
+            body: String::from_utf8_lossy(&response.body).into_owned(),
+        });
+    }
+    let Some(items) = value.get("data").and_then(Value::as_array) else {
+        return Err(ProviderError::Protocol("missing data".into()));
+    };
+    if items.is_empty() {
+        return Err(ProviderError::Blocked);
+    }
+    let item = &items[0];
+    match item.get("b64_json") {
+        Some(Value::String(encoded)) if !encoded.is_empty() => decode_image(&value, encoded),
+        _ => Err(ProviderError::NoImage),
+    }
+}
+
+fn error_code(value: &Value) -> &str {
+    value
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+}
+
+fn decode_image(root: &Value, encoded: &str) -> Result<InlineImage, ProviderError> {
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+        .map_err(|_| ProviderError::Protocol("invalid image".into()))?;
+    let mime = mime_type(root, &bytes);
+    Ok(InlineImage {
+        bytes,
+        mime,
+        interaction_id: String::new(),
+        suggestion: String::new(),
+    })
+}
+
+fn mime_type(root: &Value, bytes: &[u8]) -> String {
+    let hinted = match root.get("output_format").and_then(Value::as_str) {
+        Some("png") => Some("image/png"),
+        Some("jpeg") => Some("image/jpeg"),
+        Some("webp") => Some("image/webp"),
+        _ => None,
+    };
+    extract_result_mime(hinted, bytes)
+        .unwrap_or("image/webp")
+        .to_owned()
 }
 
 #[cfg(test)]
