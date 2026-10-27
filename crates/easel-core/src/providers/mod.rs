@@ -4,6 +4,7 @@ pub mod chutes;
 pub mod google;
 pub mod krea;
 pub mod leonardo;
+pub mod meta;
 pub mod openai;
 pub mod qwen;
 pub mod stability;
@@ -38,6 +39,7 @@ impl ModelRegistry {
                     openai::GptImage1Mini::model_spec(),
                     openai::GptImage1::model_spec(),
                     xai::GrokImagine::model_spec(),
+                    meta::MuseImage::model_spec(),
                     chutes::FluxSchnell::model_spec(),
                     chutes::DreamshaperXl::model_spec(),
                     chutes::ILustMixV80::model_spec(),
@@ -165,6 +167,7 @@ pub fn resolve_model(model_id: &str) -> Option<Box<dyn Provider>> {
         "gpt-image-1-mini" => Some(Box::new(openai::GptImage1Mini)),
         "gpt-image-1" => Some(Box::new(openai::GptImage1)),
         "grok-imagine-image-2.0" => Some(Box::new(xai::GrokImagine)),
+        "muse-image-1.0" => Some(Box::new(meta::MuseImage)),
         "chutes-flux-schnell" => Some(Box::new(chutes::FluxSchnell)),
         "chutes-dreamshaper-xl" => Some(Box::new(chutes::DreamshaperXl)),
         "chutes-ilustmix-v80" => Some(Box::new(chutes::ILustMixV80)),

@@ -1190,6 +1190,7 @@ mod tests {
     fn an_openai_model_stamps_provider_openai() {
         assert_eq!(provider_name("gpt-image-2.5-flare"), "openai");
         assert_eq!(provider_name("grok-imagine-image-2.0"), "xai");
+        assert_eq!(provider_name("muse-image-1.0"), "meta");
         assert_eq!(provider_name("not-a-model"), "");
     }
 
