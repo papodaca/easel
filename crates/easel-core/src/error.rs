@@ -21,6 +21,8 @@ pub enum ProviderError {
     ModelNotFound,
     #[error("no usable image")]
     NoImage,
+    #[error("conversation can no longer be continued")]
+    ConversationEnded,
     #[error("{}", credits_message(hint))]
     OutOfCredits {
         #[serde(default)]

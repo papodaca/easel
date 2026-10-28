@@ -216,9 +216,21 @@ fn build_google(
         .get("resolution")
         .and_then(Value::as_str)
         .unwrap_or("1K");
+    let conversation = request.conversation.as_ref().filter(|_| {
+        matches!(
+            spec.id.as_str(),
+            "gemini-nano-banana-2.1" | "gemini-3-pro-image"
+        )
+    });
     let mut body = Map::new();
     body.insert("model".into(), Value::String(request.model_id.clone()));
-    body.insert("store".into(), Value::Bool(false));
+    body.insert("store".into(), Value::Bool(conversation.is_some()));
+    if let Some(previous) = conversation.and_then(|turn| turn.parent_provider_id.as_deref()) {
+        body.insert(
+            "previous_interaction_id".into(),
+            Value::String(previous.to_owned()),
+        );
+    }
     body.insert("input".into(), Value::Array(input));
     body.insert(
         "response_format".into(),
@@ -283,6 +295,9 @@ fn google_failure(response: &crate::http::HttpResponse) -> Option<crate::error::
                 .and_then(|error| error.get("code").and_then(|code| code.as_str()))
         })
         .unwrap_or("");
+    if matches!(response.status, 400 | 404) && names_previous_interaction(&value) {
+        return Some(ProviderError::ConversationEnded);
+    }
     match (response.status, code) {
         (
             400,
@@ -296,6 +311,19 @@ fn google_failure(response: &crate::http::HttpResponse) -> Option<crate::error::
         (404, "model_not_found") => Some(ProviderError::ModelNotFound),
         _ => None,
     }
+}
+
+fn names_previous_interaction(value: &serde_json::Value) -> bool {
+    let error = value.get("error");
+    let message = error
+        .and_then(|error| error.get("message"))
+        .and_then(|message| message.as_str())
+        .unwrap_or("");
+    let param = error
+        .and_then(|error| error.get("param"))
+        .and_then(|param| param.as_str())
+        .unwrap_or("");
+    message.contains("previous_interaction_id") || param.contains("previous_interaction_id")
 }
 
 fn decode_inline(response: &crate::http::HttpResponse) -> Option<crate::providers::InlineImage> {
@@ -625,6 +653,7 @@ mod tests {
             panic!("expected json");
         };
         assert_eq!(body["store"], json!(false));
+        assert!(body.get("previous_interaction_id").is_none());
         assert!(body.get("delivery").is_none());
         assert!(body.get("background").is_none());
         assert!(body.get("image_search").is_none());
@@ -638,6 +667,101 @@ mod tests {
         assert_eq!(body["input"][1]["type"], json!("image"));
         assert_eq!(body["input"][1]["mime_type"], json!("image/png"));
         assert_eq!(body["input"][1]["data"], json!(request.images[0].base64()));
+    }
+
+    fn posted(model: &str, request: crate::job::JobRequest) -> serde_json::Value {
+        use crate::providers::ImageInput;
+        let images: Vec<_> = request
+            .images
+            .iter()
+            .map(|image| ImageInput::RawBase64(image.base64()))
+            .collect();
+        let provider = crate::providers::resolve_model(model).unwrap();
+        let http = provider.build_submit(&request, &images);
+        let crate::http::Body::Json(body) = http.body else {
+            panic!("expected json");
+        };
+        body
+    }
+
+    #[test]
+    fn a_first_conversation_turn_stores_and_omits_the_previous_id() {
+        use crate::job::Conversation;
+        let mut request = google_request("gemini-nano-banana-2.1");
+        request.conversation = Some(Conversation {
+            parent_job_id: None,
+            parent_provider_id: None,
+        });
+        let body = posted("gemini-nano-banana-2.1", request);
+        assert_eq!(body["store"], json!(true));
+        assert!(body.get("previous_interaction_id").is_none());
+    }
+
+    #[test]
+    fn a_continued_turn_sends_the_previous_interaction_id() {
+        use crate::job::Conversation;
+        let mut request = google_request("gemini-nano-banana-2.1");
+        request.compiled_prompt = "warmer light".into();
+        request.conversation = Some(Conversation {
+            parent_job_id: Some("job-1".into()),
+            parent_provider_id: Some("interaction-1".into()),
+        });
+        let body = posted("gemini-nano-banana-2.1", request);
+        assert_eq!(body["store"], json!(true));
+        assert_eq!(body["previous_interaction_id"], json!("interaction-1"));
+        assert_eq!(body["input"].as_array().unwrap().len(), 1);
+        assert_eq!(body["input"][0]["text"], json!("warmer light"));
+
+        let mut pro = google_request("gemini-3-pro-image");
+        pro.conversation = Some(Conversation {
+            parent_job_id: Some("job-1".into()),
+            parent_provider_id: Some("interaction-pro".into()),
+        });
+        let pro_body = posted("gemini-3-pro-image", pro);
+        assert_eq!(pro_body["store"], json!(true));
+        assert_eq!(
+            pro_body["previous_interaction_id"],
+            json!("interaction-pro")
+        );
+    }
+
+    #[test]
+    fn lite_ignores_a_conversation_part() {
+        use crate::job::Conversation;
+        use crate::providers::Provider;
+        let mut request = google_request("gemini-3.1-flash-lite-image");
+        request.conversation = Some(Conversation {
+            parent_job_id: Some("job-1".into()),
+            parent_provider_id: Some("interaction-1".into()),
+        });
+        let body = posted("gemini-3.1-flash-lite-image", request);
+        assert_eq!(body["store"], json!(false));
+        assert!(body.get("previous_interaction_id").is_none());
+        assert!(!NanoBanana2Lite.supports_conversation());
+    }
+
+    #[test]
+    fn a_gone_previous_interaction_is_not_a_model_miss() {
+        use crate::http::HttpResponse;
+        use crate::providers::Provider;
+        let gone = HttpResponse {
+            status: 404,
+            headers: Vec::new(),
+            body: br#"{"error":{"status":"not_found","message":"previous_interaction_id expired","param":"previous_interaction_id"}}"#.to_vec(),
+        };
+        assert_eq!(
+            NanoBanana21.parse_submit(&gone).unwrap_err(),
+            crate::error::ProviderError::ConversationEnded
+        );
+        let missing_model = HttpResponse {
+            status: 404,
+            headers: Vec::new(),
+            body: br#"{"error":{"status":"model_not_found","message":"no such model"}}"#.to_vec(),
+        };
+        assert_eq!(
+            NanoBanana21.parse_submit(&missing_model).unwrap_err(),
+            crate::error::ProviderError::ModelNotFound
+        );
     }
 
     #[test]
