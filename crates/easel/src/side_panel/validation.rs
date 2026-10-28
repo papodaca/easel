@@ -62,24 +62,24 @@ impl Validation {
         }
         if provider == ProviderId::OpenAi {
             let prepared = usize::from(app.image.is_some()) + app.extras.len();
-            let (prompt, urls) = match crate::jobs::build_request(app) {
+            let (prompt, url_lens) = match crate::jobs::build_request(app) {
                 Ok(request) => {
-                    let urls = request
+                    let url_lens = request
                         .images
                         .iter()
                         .map(|image| {
-                            easel_core::providers::openai::data_url(
+                            easel_core::providers::openai::data_url_len(
                                 &image.media_type,
-                                &image.base64(),
+                                image.bytes.len(),
                             )
                         })
                         .collect();
-                    (request.compiled_prompt, urls)
+                    (request.compiled_prompt, url_lens)
                 }
                 Err(_) => (app.compiled().text, Vec::new()),
             };
             messages.extend(easel_core::providers::openai::refusal_messages(
-                &prompt, &urls, prepared,
+                &prompt, &url_lens, prepared,
             ));
         }
         if provider == ProviderId::Xai {

@@ -1,10 +1,12 @@
 use std::io::Cursor;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use easel_core::geometry::Size;
+use easel_core::image_prep::{PrepError, PrepOptions, prepare_for_upload};
+use easel_core::job::EncodedImage;
 use gpui::{App, Context, Entity, RenderImage};
 use image::{DynamicImage, ImageDecoder, ImageReader, Limits};
 
@@ -22,6 +24,40 @@ pub struct DecodedImage {
     /// Kept so a later step can re-encode without reading the file again.
     #[allow(dead_code)]
     pub rgba_for_export: Arc<DynamicImage>,
+    /// Upload encodings already produced for this image, one per option set.
+    /// Resizing and encoding a large image takes hundreds of milliseconds and
+    /// the validation panel asks for it on every frame, so it must not repeat.
+    prepared: Mutex<Vec<(PrepOptions, EncodedImage)>>,
+}
+
+impl DecodedImage {
+    pub fn new(size: Size, render: Arc<RenderImage>, rgba_for_export: Arc<DynamicImage>) -> Self {
+        Self {
+            size,
+            render,
+            rgba_for_export,
+            prepared: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The upload encoding for `options`, computed once and reused after.
+    pub fn prepare_for_upload(&self, options: PrepOptions) -> Result<EncodedImage, PrepError> {
+        if let Some((_, encoded)) = self
+            .prepared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(cached, _)| *cached == options)
+        {
+            return Ok(encoded.clone());
+        }
+        let encoded = prepare_for_upload(&self.rgba_for_export, options)?;
+        self.prepared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((options, encoded.clone()));
+        Ok(encoded)
+    }
 }
 
 #[derive(Debug)]
@@ -115,11 +151,7 @@ pub fn decode_image(bytes: &[u8], label: &str) -> Result<DecodedImage, ImageErro
     let rgba_for_export = Arc::new(DynamicImage::ImageRgba8(rgba.clone()));
     rgba_to_bgra(&mut rgba);
     let render = Arc::new(RenderImage::new([image::Frame::new(rgba)]));
-    Ok(DecodedImage {
-        size,
-        render,
-        rgba_for_export,
-    })
+    Ok(DecodedImage::new(size, render, rgba_for_export))
 }
 
 fn rgba_to_bgra(pixels: &mut [u8]) {

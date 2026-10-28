@@ -920,11 +920,11 @@ fn decoded(buffer: image::RgbaImage) -> Arc<crate::image_load::DecodedImage> {
     for pixel in rgba.pixels_mut() {
         pixel.0.swap(0, 2);
     }
-    Arc::new(crate::image_load::DecodedImage {
+    Arc::new(crate::image_load::DecodedImage::new(
         size,
-        render: Arc::new(gpui::RenderImage::new([image::Frame::new(rgba)])),
+        Arc::new(gpui::RenderImage::new([image::Frame::new(rgba)])),
         rgba_for_export,
-    })
+    ))
 }
 
 #[gpui::test]

@@ -27,6 +27,14 @@ The window copies Zed's shape: a drawn title bar, 1 px borders between panes, th
 - Visual checks: run `WAYLAND_DISPLAY='' cargo run -p easel` and capture the window with `magick import -window <id>` (find the id with `xwininfo -root -tree | rg easel`). Do not inject clicks or keys with `xdotool`; pointer coordinates do not line up on this desktop and a stray click lands on the close button. Ask the user to drive the app and report instead.
 - Widget tests read element bounds from the entity (`track_bounds`, `click_point`), so restyling a widget's size is safe as long as those helpers stay accurate.
 
+## Rendering
+
+- `render` runs for every view on every frame, on the main thread, and nothing in the window responds until it returns. Keep it to reading fields and building elements. No file reads, image decode, resize, encode, hashing, base64, or JSON serialization of request bodies in `render` or in anything `render` calls (`messages`, `generate_enabled`, `dialog`, `rebuild`).
+- Expensive derived data is computed once when its inputs change (an `observe` callback, a background task, or a memo keyed on the inputs like `DecodedImage::prepare_for_upload`) and stored on the entity for `render` to read.
+- When a check only needs a size, compute the size (`google::posted_json_len`, `openai::data_url_len`); do not build the payload to measure it.
+- Test with a real photo (5000 px+), not a fixture. A per-frame cost of 1 ms on a 64 px test image is 500 ms on a camera image.
+- To find a main-thread hog without `perf`: launch the app under `gdb -batch` from your own shell (ptrace is restricted to child processes here), send it `SIGUSR1` once a second with `handle SIGUSR1 stop print nopass`, and `bt` thread 1 on each stop. Stacks not in `epoll_wait` are the problem.
+
 ## Conventions carried over from the plans
 
 - Linux only, `ctrl-` bindings, no `cmd-`.

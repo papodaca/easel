@@ -424,20 +424,31 @@ fn suggestion_text(value: &serde_json::Value) -> String {
 
 pub const BODY_CAP: usize = 20 * 1024 * 1024;
 
+/// The byte length of the JSON body `build_google` would post.
+///
+/// The validation panel asks for this on every frame, so the images are not
+/// base64-encoded here. Base64 text needs no JSON escaping, so the length is
+/// the body with empty `data` strings plus each image's padded base64 length.
 #[must_use]
 pub fn posted_json_len(spec: &ModelSpec, request: &crate::job::JobRequest) -> usize {
     let inputs: Vec<crate::providers::ImageInput> = request
         .images
         .iter()
-        .map(|image| crate::providers::ImageInput::RawBase64(image.base64()))
+        .map(|_| crate::providers::ImageInput::RawBase64(String::new()))
         .collect();
     let http = build_google(spec, request, &inputs);
-    match http.body {
-        crate::http::Body::Json(value) => serde_json::to_vec(&value)
-            .map(|bytes| bytes.len())
-            .unwrap_or(usize::MAX),
-        _ => 0,
-    }
+    let skeleton = match http.body {
+        crate::http::Body::Json(value) => match serde_json::to_vec(&value) {
+            Ok(bytes) => bytes.len(),
+            Err(_) => return usize::MAX,
+        },
+        _ => return 0,
+    };
+    request
+        .images
+        .iter()
+        .map(|image| image.bytes.len().div_ceil(3) * 4)
+        .fold(skeleton, usize::saturating_add)
 }
 
 macro_rules! impl_google {
@@ -955,5 +966,46 @@ mod tests {
         assert_eq!(len, super::BODY_CAP);
         request.compiled_prompt.push('b');
         assert_eq!(super::posted_json_len(spec, &request), super::BODY_CAP + 1);
+    }
+
+    #[test]
+    fn posted_json_len_matches_the_encoded_body_for_every_padding_case() {
+        use crate::job::EncodedImage;
+        use crate::providers::ImageInput;
+        let spec = NanoBanana21::model_spec();
+        for (first, second) in [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (1000, 1001)] {
+            let mut request = google_request("gemini-nano-banana-2.1");
+            request.images = vec![
+                EncodedImage {
+                    media_type: "image/png".into(),
+                    bytes: vec![0xFF; first],
+                    width: 8,
+                    height: 8,
+                    content_hash: "a".into(),
+                },
+                EncodedImage {
+                    media_type: "image/jpeg".into(),
+                    bytes: vec![0x01; second],
+                    width: 8,
+                    height: 8,
+                    content_hash: "b".into(),
+                },
+            ];
+            let inputs: Vec<ImageInput> = request
+                .images
+                .iter()
+                .map(|image| ImageInput::RawBase64(image.base64()))
+                .collect();
+            let crate::http::Body::Json(body) = super::build_google(spec, &request, &inputs).body
+            else {
+                panic!("json");
+            };
+            let encoded = serde_json::to_vec(&body).unwrap().len();
+            assert_eq!(
+                super::posted_json_len(spec, &request),
+                encoded,
+                "sizes {first} and {second}"
+            );
+        }
     }
 }

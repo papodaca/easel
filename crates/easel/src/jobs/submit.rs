@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use easel_core::image_prep::{PrepOptions, prepare_for_upload};
+use easel_core::image_prep::PrepOptions;
 use easel_core::job::JobRequest;
 use easel_core::model_spec::ProviderId;
 
@@ -51,7 +51,9 @@ pub fn build_request(app: &AppState) -> Result<JobRequest, String> {
     let mut images = Vec::new();
     for image in sources.into_iter().take(limit) {
         images.push(
-            prepare_for_upload(&image.rgba_for_export, options).map_err(|err| err.to_string())?,
+            image
+                .prepare_for_upload(options)
+                .map_err(|err| err.to_string())?,
         );
     }
     Ok(JobRequest {

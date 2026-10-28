@@ -231,8 +231,16 @@ pub fn data_url(media_type: &str, encoded: &str) -> String {
     format!("data:{media_type};base64,{encoded}")
 }
 
+/// The character count of `data_url(media_type, base64(bytes))` for an image
+/// of `byte_len` bytes, without encoding anything. Base64 and media types are
+/// ASCII, so characters and bytes agree.
 #[must_use]
-pub fn refusal_messages(prompt: &str, data_urls: &[String], prepared: usize) -> Vec<String> {
+pub fn data_url_len(media_type: &str, byte_len: usize) -> usize {
+    data_url(media_type, "").len() + byte_len.div_ceil(3) * 4
+}
+
+#[must_use]
+pub fn refusal_messages(prompt: &str, data_url_lens: &[usize], prepared: usize) -> Vec<String> {
     let mut messages = Vec::new();
     if prompt.chars().count() > PROMPT_CAP {
         messages.push(format!("The prompt is over {PROMPT_CAP} characters."));
@@ -240,10 +248,7 @@ pub fn refusal_messages(prompt: &str, data_urls: &[String], prepared: usize) -> 
     if prepared > IMAGE_CAP {
         messages.push(format!("At most {IMAGE_CAP} images."));
     }
-    if data_urls
-        .iter()
-        .any(|url| url.chars().count() > DATA_URL_CAP)
-    {
+    if data_url_lens.iter().any(|len| *len > DATA_URL_CAP) {
         messages.push(format!(
             "An image data URL is over {DATA_URL_CAP} characters."
         ));
@@ -746,13 +751,27 @@ mod tests {
         let messages = super::refusal_messages(&prompt, &[], 0);
         assert!(messages.iter().any(|message| message.contains("32000")));
 
-        let url = "x".repeat(super::DATA_URL_CAP + 1);
-        let messages = super::refusal_messages("ok", std::slice::from_ref(&url), 1);
+        let messages = super::refusal_messages("ok", &[super::DATA_URL_CAP + 1], 1);
         assert!(messages.iter().any(|message| message.contains("20971520")));
 
         let messages = super::refusal_messages("ok", &[], 17);
         assert_eq!(messages.len(), 1);
         assert!(messages[0].contains("16"));
         assert!(!messages[0].contains("will be sent"));
+    }
+
+    #[test]
+    fn data_url_len_matches_the_built_url_for_every_padding_case() {
+        use base64::Engine;
+        for len in [0, 1, 2, 3, 4, 5, 1000, 1001] {
+            let bytes = vec![0xAB; len];
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let url = super::data_url("image/png", &encoded);
+            assert_eq!(
+                super::data_url_len("image/png", len),
+                url.chars().count(),
+                "{len} bytes"
+            );
+        }
     }
 }

@@ -680,12 +680,7 @@ impl BottomStrip {
                 let editor = loaded
                     .as_ref()
                     .is_some_and(|loaded| !loaded.box_snapshot.is_empty())
-                    || self
-                        .history
-                        .load_editor(&turn.id)
-                        .ok()
-                        .flatten()
-                        .is_some();
+                    || self.history.load_editor(&turn.id).ok().flatten().is_some();
                 let file = self.history.result_path(&turn.id).is_some();
                 let preview = self.result_preview(&turn.id);
                 (
