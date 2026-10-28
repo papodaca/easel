@@ -19,6 +19,8 @@ const GENERATIONS: &str = "https://api.meta.ai/v1/images/generations";
 
 const EDITS: &str = "https://api.meta.ai/v1/images/edits";
 
+const RESPONSES: &str = "https://api.meta.ai/v1/responses";
+
 const SIZES: &[&str] = &[
     "auto",
     "1024x1024",
@@ -240,6 +242,9 @@ fn image_url(request: &JobRequest, images: &[ImageInput], index: usize) -> Value
 }
 
 fn build_muse(spec: &ModelSpec, request: &JobRequest, images: &[ImageInput]) -> HttpRequest {
+    if request.conversation.is_some() {
+        return build_responses(spec, request, images);
+    }
     let count = images.len().min(spec.capabilities.image_slots.max());
     let mut body = Map::new();
     body.insert("model".into(), Value::String(request.model_id.clone()));
@@ -292,6 +297,67 @@ fn build_muse(spec: &ModelSpec, request: &JobRequest, images: &[ImageInput]) -> 
     }
 }
 
+fn build_responses(spec: &ModelSpec, request: &JobRequest, images: &[ImageInput]) -> HttpRequest {
+    let count = images.len().min(spec.capabilities.image_slots.max());
+    let mut content = vec![json!({
+        "type": "input_text",
+        "text": request.compiled_prompt,
+    })];
+    for index in 0..count {
+        content.push(json!({
+            "type": "input_image",
+            "image_url": image_url(request, images, index)["image_url"],
+        }));
+    }
+    let mut tool = Map::new();
+    tool.insert("type".into(), Value::String("image_generation".into()));
+    for key in ["enable_image_search", "enable_web_search", "enable_shell"] {
+        tool.insert(
+            key.into(),
+            Value::Bool(field_bool(spec, &request.params, key)),
+        );
+    }
+    if let Some(strength) = field_string(spec, &request.params, "reasoning_strength") {
+        tool.insert("reasoning_strength".into(), Value::String(strength));
+    }
+    if let Some(format) = field_string(spec, &request.params, "output_format") {
+        tool.insert("output_format".into(), Value::String(format));
+    }
+    if let Some(size) = field_string(spec, &request.params, "size")
+        && size != "auto"
+    {
+        tool.insert("size".into(), Value::String(size));
+    }
+    let mut body = Map::new();
+    body.insert("model".into(), Value::String(request.model_id.clone()));
+    body.insert("store".into(), Value::Bool(true));
+    body.insert(
+        "input".into(),
+        json!([{ "role": "user", "content": content }]),
+    );
+    if let Some(previous) = request
+        .conversation
+        .as_ref()
+        .and_then(|turn| turn.parent_provider_id.clone())
+    {
+        body.insert("previous_response_id".into(), Value::String(previous));
+    }
+    body.insert("tools".into(), Value::Array(vec![Value::Object(tool)]));
+    HttpRequest {
+        method: Method::Post,
+        url: RESPONSES.into(),
+        headers: vec![HttpHeader {
+            name: "Content-Type".into(),
+            value: "application/json".into(),
+            sensitive: false,
+        }],
+        auth: Some(ProviderId::Meta),
+        body: Body::Json(Value::Object(body)),
+        max_body_bytes: 100 * 1024 * 1024,
+        redact_query: false,
+    }
+}
+
 fn muse(response: &HttpResponse) -> Result<InlineImage, ProviderError> {
     if response.status == 401 {
         return Err(ProviderError::Auth);
@@ -300,6 +366,9 @@ fn muse(response: &HttpResponse) -> Result<InlineImage, ProviderError> {
         return Err(ProviderError::RateLimited { retry_after: None });
     }
     let value: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
+    if matches!(response.status, 400 | 404) && names_previous_response(&value) {
+        return Err(ProviderError::ConversationEnded);
+    }
     if response.status == 400 && error_code(&value) == "content_policy_violation" {
         return Err(ProviderError::Blocked);
     }
@@ -308,6 +377,9 @@ fn muse(response: &HttpResponse) -> Result<InlineImage, ProviderError> {
             status: response.status,
             body: String::from_utf8_lossy(&response.body).into_owned(),
         });
+    }
+    if value.get("output").is_some() {
+        return decode_responses(&value);
     }
     let Some(items) = value.get("data").and_then(Value::as_array) else {
         return Err(ProviderError::Protocol("missing data".into()));
@@ -320,6 +392,62 @@ fn muse(response: &HttpResponse) -> Result<InlineImage, ProviderError> {
         Some(Value::String(encoded)) if !encoded.is_empty() => decode_image(&value, encoded),
         _ => Err(ProviderError::NoImage),
     }
+}
+
+fn names_previous_response(value: &Value) -> bool {
+    let error = value.get("error");
+    let message = error
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let param = error
+        .and_then(|error| error.get("param"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    message.contains("previous_response_id") || param.contains("previous_response_id")
+}
+
+fn decode_responses(value: &Value) -> Result<InlineImage, ProviderError> {
+    let items = value
+        .get("output")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ProviderError::NoImage)?;
+    let call = items.iter().find(|item| {
+        item.get("type").and_then(Value::as_str) == Some("image_generation_call")
+    });
+    let Some(encoded) = call
+        .and_then(|item| item.get("result"))
+        .and_then(Value::as_str)
+        .filter(|encoded| !encoded.is_empty())
+    else {
+        return Err(ProviderError::NoImage);
+    };
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+        .map_err(|_| ProviderError::Protocol("invalid image".into()))?;
+    let mime = mime_type(value, &bytes);
+    let interaction_id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    Ok(InlineImage {
+        bytes,
+        mime,
+        interaction_id,
+        suggestion: reasoning_summary(items),
+    })
+}
+
+fn reasoning_summary(items: &[Value]) -> String {
+    items
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+        .filter_map(|item| item.get("summary").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn error_code(value: &Value) -> &str {
@@ -583,6 +711,111 @@ mod tests {
         assert_eq!(url, "https://api.meta.ai/v1/images/edits");
         assert_eq!(edited["output_format"], "png");
         assert_eq!(edited["reasoning_strength"], "low");
+    }
+
+    fn conversation_post(request: JobRequest) -> (String, Value) {
+        let provider = crate::providers::resolve_model("muse-image-1.0").unwrap();
+        let images = inputs(&request.images);
+        let http = provider.build_submit(&request, &images);
+        let Body::Json(json) = http.body else {
+            panic!("expected json");
+        };
+        (http.url, json)
+    }
+
+    #[test]
+    fn a_first_conversation_turn_posts_responses() {
+        use crate::job::Conversation;
+        let mut request = request("a harbor", defaults(), Vec::new());
+        request.conversation = Some(Conversation {
+            parent_job_id: None,
+            parent_provider_id: None,
+        });
+        let (url, json) = conversation_post(request);
+        assert_eq!(url, "https://api.meta.ai/v1/responses");
+        assert_eq!(json["store"], json!(true));
+        assert!(json.get("previous_response_id").is_none());
+        assert_eq!(json["input"][0]["role"], json!("user"));
+        assert_eq!(json["input"][0]["content"][0]["type"], json!("input_text"));
+        assert_eq!(json["input"][0]["content"][0]["text"], json!("a harbor"));
+        assert!(json.get("tool_enablement").is_none());
+        assert!(json.get("response_format").is_none());
+        assert!(json.get("n").is_none());
+        let tool = &json["tools"][0];
+        assert_eq!(tool["type"], json!("image_generation"));
+        assert_eq!(tool["reasoning_strength"], json!("high"));
+        assert_eq!(tool["output_format"], json!("webp"));
+        assert!(tool.get("size").is_none());
+        assert_eq!(json["tools"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn references_and_a_continued_turn_shape_the_responses_body() {
+        use crate::job::Conversation;
+        let canvas = encoded(b"canvas");
+        let extra = encoded(b"extra");
+        let mut first = request("combine", defaults(), vec![canvas.clone(), extra.clone()]);
+        first.conversation = Some(Conversation {
+            parent_job_id: None,
+            parent_provider_id: None,
+        });
+        let (_, json) = conversation_post(first);
+        let content = json["input"][0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[1]["type"], json!("input_image"));
+        assert_eq!(content[1]["image_url"], json!(data_uri(&canvas)));
+        assert_eq!(content[2]["image_url"], json!(data_uri(&extra)));
+
+        let mut continued = request("warmer", defaults(), Vec::new());
+        continued.conversation = Some(Conversation {
+            parent_job_id: Some("turn-1".into()),
+            parent_provider_id: Some("resp_1".into()),
+        });
+        continued.params.insert("size".into(), json!("1536x1024"));
+        let (_, json) = conversation_post(continued);
+        assert_eq!(json["previous_response_id"], json!("resp_1"));
+        assert_eq!(json["input"][0]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(json["tools"][0]["size"], json!("1536x1024"));
+    }
+
+    #[test]
+    fn a_responses_body_decodes_the_image_call_and_the_summary() {
+        use crate::http::HttpResponse;
+        use crate::providers::Provider;
+        let png = b"\x89PNG\r\n\x1a\nrest";
+        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, png);
+        let body = format!(
+            r#"{{"id":"resp_abc","output":[{{"type":"message","content":[]}},{{"type":"image_generation_call","result":"{encoded}"}},{{"type":"reasoning","summary":[{{"text":"looked up the harbor"}},{{"text":"kept the boats"}}]}}]}}"#
+        );
+        let response = HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: body.into_bytes(),
+        };
+        let image = super::MuseImage.inline_image(&response).unwrap();
+        assert_eq!(image.bytes, png);
+        assert_eq!(image.interaction_id, "resp_abc");
+        assert_eq!(image.suggestion, "looked up the harbor\nkept the boats");
+        assert_eq!(image.mime, "image/png");
+
+        let missing = HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"{"id":"resp_none","output":[{"type":"reasoning","summary":[]}]}"#.to_vec(),
+        };
+        assert_eq!(
+            super::MuseImage.parse_submit(&missing).unwrap_err(),
+            crate::error::ProviderError::NoImage
+        );
+        let gone = HttpResponse {
+            status: 400,
+            headers: Vec::new(),
+            body: br#"{"error":{"code":"invalid_request","message":"unknown previous_response_id","param":"previous_response_id"}}"#.to_vec(),
+        };
+        assert_eq!(
+            super::MuseImage.parse_submit(&gone).unwrap_err(),
+            crate::error::ProviderError::ConversationEnded
+        );
     }
 
     #[test]
