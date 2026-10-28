@@ -24,6 +24,11 @@ The window copies Zed's shape: a drawn title bar, 1 px borders between panes, th
 ## Verification
 
 - Before claiming UI work is done: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo nextest run -p easel`.
+- Before saying any work is done, run the render-budget guards and quote their result in the summary. They must pass, not be skipped or filtered out:
+  - `cargo clippy --workspace --all-targets -- -D warnings` (the `disallowed_methods` entries in `clippy.toml` are part of this; a new `#[allow(clippy::disallowed_methods)]` is not a fix).
+  - `cargo nextest run -p easel drawing_frames_with_a_photo_loaded_encodes_it_once`.
+  - `cargo nextest run -p easel-core posted_json_len_matches_the_encoded_body_for_every_padding_case data_url_len_matches_the_built_url_for_every_padding_case`.
+  If any of them fails, the work is not done, whatever the change was for.
 - Visual checks: run `WAYLAND_DISPLAY='' cargo run -p easel` and capture the window with `magick import -window <id>` (find the id with `xwininfo -root -tree | rg easel`). Do not inject clicks or keys with `xdotool`; pointer coordinates do not line up on this desktop and a stray click lands on the close button. Ask the user to drive the app and report instead.
 - Widget tests read element bounds from the entity (`track_bounds`, `click_point`), so restyling a widget's size is safe as long as those helpers stay accurate.
 
