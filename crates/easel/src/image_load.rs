@@ -17,6 +17,11 @@ const MAX_SIDE: u32 = 16_384;
 const MAX_PIXELS: u64 = 64_000_000;
 const MAX_ALLOC: u64 = 1024 * 1024 * 1024;
 
+/// How many times an image was actually resized and encoded for upload.
+/// The frame-budget test reads this to prove `render` never triggers it.
+#[cfg(test)]
+pub static PREPARE_MISSES: AtomicUsize = AtomicUsize::new(0);
+
 #[derive(Debug)]
 pub struct DecodedImage {
     pub size: Size,
@@ -51,6 +56,11 @@ impl DecodedImage {
         {
             return Ok(encoded.clone());
         }
+        #[cfg(test)]
+        PREPARE_MISSES.fetch_add(1, Ordering::SeqCst);
+        // The one place the raw encoder may run; everything else goes
+        // through this memo.
+        #[allow(clippy::disallowed_methods)]
         let encoded = prepare_for_upload(&self.rgba_for_export, options)?;
         self.prepared
             .lock()

@@ -33,6 +33,7 @@ The window copies Zed's shape: a drawn title bar, 1 px borders between panes, th
 - Expensive derived data is computed once when its inputs change (an `observe` callback, a background task, or a memo keyed on the inputs like `DecodedImage::prepare_for_upload`) and stored on the entity for `render` to read.
 - When a check only needs a size, compute the size (`google::posted_json_len`, `openai::data_url_len`); do not build the payload to measure it.
 - Test with a real photo (5000 px+), not a fixture. A per-frame cost of 1 ms on a 64 px test image is 500 ms on a camera image.
+- CI enforces this two ways: `clippy.toml` disallows the raw `prepare_for_upload` and `DynamicImage::resize` outside `image_prep` (an `#[allow]` at a new call site is a review flag), and `form_tests::drawing_frames_with_a_photo_loaded_encodes_it_once` draws ten frames with a 3000 px image and fails if `image_load::PREPARE_MISSES` moves more than once. Extend that test when a new provider's validation reads the prepared request.
 - To find a main-thread hog without `perf`: launch the app under `gdb -batch` from your own shell (ptrace is restricted to child processes here), send it `SIGUSR1` once a second with `handle SIGUSR1 stop print nopass`, and `bt` thread 1 on each stop. Stacks not in `epoll_wait` are the problem.
 
 ## Conventions carried over from the plans

@@ -901,6 +901,82 @@ fn the_editor_does_not_list_the_images(cx: &mut TestAppContext) {
     assert!(!panel.read_with(&cx, |panel, _| panel.shows_reference_section()));
 }
 
+struct PanelShown {
+    panel: gpui::Entity<crate::side_panel::SidePanel>,
+}
+
+impl gpui::Render for PanelShown {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        gpui::div().size_full().child(self.panel.clone())
+    }
+}
+
+/// Guards the Rendering rule in AGENTS.md: drawing frames must not resize or
+/// encode images. A regression here is a frozen window on a real photo.
+#[gpui::test]
+fn drawing_frames_with_a_photo_loaded_encodes_it_once(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering;
+
+    use crate::image_load::PREPARE_MISSES;
+
+    let keys = Arc::new(crate::settings::SharedKeys::default());
+    keys.set_session(ProviderId::Google, "google-key");
+    keys.set_session(ProviderId::OpenAi, "openai-key");
+    keys.set_session(ProviderId::Qwen, "qwen-key");
+    let window = cx.update(|cx| {
+        crate::widgets::bind_keys(cx);
+        cx.open_window(gpui::WindowOptions::default(), |_window, cx| {
+            let state = cx.new(|_| AppState::new());
+            let panel =
+                cx.new(move |cx| crate::side_panel::SidePanel::new(state, keys, None, None, cx));
+            cx.new(|_| PanelShown { panel })
+        })
+        .unwrap()
+    });
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    let shown = window.root(&mut cx).unwrap();
+    let state = shown.read_with(&cx, |shown, cx| shown.panel.read(cx).app_state.clone());
+
+    // Big enough that the 4 MP cap forces a real resize, like a camera photo.
+    let mut buffer = image::RgbaImage::new(3000, 2000);
+    let mut noise = 0x9e37_79b9u32;
+    for pixel in buffer.pixels_mut() {
+        noise = noise.wrapping_mul(1664525).wrapping_add(1013904223);
+        *pixel = image::Rgba([noise as u8, (noise >> 8) as u8, (noise >> 16) as u8, 255]);
+    }
+    let image = decoded(buffer);
+
+    // Every provider whose validation inspects the prepared request.
+    for model in [
+        "gemini-nano-banana-2.1",
+        "gpt-image-2",
+        "qwen-image-2.1-pro",
+    ] {
+        let baseline = PREPARE_MISSES.load(Ordering::SeqCst);
+        state.update(&mut cx, |app, cx| {
+            app.set_model(model, cx);
+            app.scene.prose = "a harbor at dusk".into();
+            app.set_image(Arc::clone(&image), cx);
+        });
+        for _ in 0..10 {
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            cx.run_until_parked();
+        }
+        let misses = PREPARE_MISSES.load(Ordering::SeqCst) - baseline;
+        assert!(
+            misses <= 1,
+            "{model}: ten frames resized and encoded the image {misses} times; \
+             render must read a memo, see the Rendering section of AGENTS.md"
+        );
+    }
+}
+
 fn openai_validation(
     cx: &mut VisualTestContext,
     state: gpui::Entity<AppState>,

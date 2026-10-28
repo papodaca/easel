@@ -1,4 +1,6 @@
 disallowed-methods = [
     { path = "serde_json::from_reader", reason = "Parsing from a reader is slower than reading into a buffer first. Use serde_json::from_slice." },
     { path = "smol::Timer::after", reason = "smol::Timer introduces non-determinism in tests. Use gpui::BackgroundExecutor::timer." },
+    { path = "easel_core::image_prep::prepare_for_upload", reason = "Resizes and encodes on the calling thread, hundreds of ms on a photo. Go through DecodedImage::prepare_for_upload, which memoizes per image and option set." },
+    { path = "image::DynamicImage::resize", reason = "Hundreds of ms on a photo. Only easel_core::image_prep may resize, and never from render." },
 ]

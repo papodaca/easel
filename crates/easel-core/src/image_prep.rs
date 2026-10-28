@@ -59,6 +59,9 @@ pub fn prepare_for_upload(
         });
     }
     let (target_w, target_h) = fit_pixels(width, height, options.max_pixels);
+    // This is the one resize in the workspace; callers reach it through
+    // `DecodedImage::prepare_for_upload`, which memoizes the result.
+    #[allow(clippy::disallowed_methods)]
     let resized = if (target_w, target_h) == (width, height) {
         image.clone()
     } else {
@@ -166,6 +169,8 @@ pub(crate) fn fit_pixels(width: u32, height: u32, max_pixels: u64) -> (u32, u32)
 }
 
 #[cfg(test)]
+// These are the unit tests of the raw encoder itself.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::{PrepOptions, encode_png, prepare_for_upload, thumbnail};
     use base64::Engine;
