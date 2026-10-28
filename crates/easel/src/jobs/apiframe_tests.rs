@@ -56,6 +56,7 @@ fn request(model: &str, images: Vec<EncodedImage>) -> JobRequest {
         images,
         box_snapshot: Vec::new(),
         created_at: "2026-10-25T10:00:00Z".into(),
+        conversation: None,
     }
 }
 

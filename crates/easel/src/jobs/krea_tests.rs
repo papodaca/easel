@@ -55,6 +55,7 @@ fn request_with_image() -> JobRequest {
         images: vec![image()],
         box_snapshot: Vec::new(),
         created_at: "2026-10-16T00:00:00Z".into(),
+        conversation: None,
     }
 }
 

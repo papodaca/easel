@@ -128,6 +128,18 @@ mod tests {
     }
 
     #[test]
+    fn conversation_support_is_limited_to_muse_and_two_nano_banana_models() {
+        for spec in ModelRegistry::specs() {
+            let provider = super::resolve_model(&spec.id).unwrap();
+            let expected = matches!(
+                spec.id.as_str(),
+                "muse-image-1.0" | "gemini-nano-banana-2.1" | "gemini-3-pro-image"
+            );
+            assert_eq!(provider.supports_conversation(), expected, "{}", spec.id);
+        }
+    }
+
+    #[test]
     fn every_provider_is_registered_once() {
         let all = ModelRegistry::providers();
         assert_eq!(all.len(), 11);
@@ -382,6 +394,11 @@ pub enum ReferenceStep {
 
 pub trait Provider {
     fn spec(&self) -> &ModelSpec;
+
+    /// Conversation mode can chain a later turn to this model's stored turn.
+    fn supports_conversation(&self) -> bool {
+        false
+    }
 
     fn compile_prompt(&self, scene: &Scene, _frame: Size) -> CompiledPrompt {
         let found = crate::prose::tags(&scene.prose);

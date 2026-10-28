@@ -797,6 +797,7 @@ mod provider_tests {
             images: Vec::new(),
             box_snapshot: Vec::new(),
             created_at: "2026-10-15T00:00:00Z".into(),
+            conversation: None,
         }
     }
 

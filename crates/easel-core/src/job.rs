@@ -123,6 +123,15 @@ pub struct EncodedImage {
     pub content_hash: String,
 }
 
+/// A turn the provider was asked to keep. Absent means a one-shot generate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Conversation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_provider_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobRequest {
     pub model_id: String,
@@ -131,6 +140,8 @@ pub struct JobRequest {
     pub images: Vec<EncodedImage>,
     pub box_snapshot: Vec<BoxElement>,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<Conversation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -202,6 +213,7 @@ mod tests {
                 from_image: None,
             }],
             created_at: "2026-10-15T00:00:00Z".into(),
+            conversation: None,
         }
     }
 

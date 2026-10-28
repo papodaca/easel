@@ -365,6 +365,7 @@ mod tests {
             images,
             box_snapshot: Vec::new(),
             created_at: "2026-10-18T00:00:00Z".into(),
+            conversation: None,
         }
     }
 

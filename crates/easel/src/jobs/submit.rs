@@ -52,6 +52,7 @@ pub fn build_request(app: &AppState) -> Result<JobRequest, String> {
         images,
         box_snapshot: app.scene.boxes.clone(),
         created_at: utc_now(),
+        conversation: None,
     })
 }
 

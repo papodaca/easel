@@ -63,6 +63,7 @@ pub struct LoadedRequest {
     pub params: serde_json::Map<String, serde_json::Value>,
     pub images: Vec<ImageSummary>,
     pub box_snapshot: Vec<BoxElement>,
+    pub conversation: Option<crate::job::Conversation>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,6 +73,18 @@ pub struct EntrySummary {
     pub cost: Option<f64>,
     pub created_at: String,
     pub bytes: u64,
+    pub parent: Option<JobId>,
+}
+
+/// One turn of a conversation path, oldest first when returned from a chain walk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationTurn {
+    pub id: JobId,
+    pub model_id: String,
+    pub prompt: String,
+    pub summary: String,
+    pub state: JobState,
+    pub continuable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +97,8 @@ struct StoredRequest {
     created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     editor: Option<EditorSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conversation: Option<crate::job::Conversation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +133,8 @@ struct IndexRow {
     state: JobState,
     bytes: u64,
     cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<String>,
 }
 
 pub struct HistoryStore {
@@ -182,6 +199,7 @@ impl HistoryStore {
             state,
             bytes: dir_bytes(&dir)?,
             cost: meta.cost,
+            parent: index_parent(request),
         })?;
         Ok(Entry {
             id: id.clone(),
@@ -236,6 +254,7 @@ impl HistoryStore {
             state: meta.state,
             bytes: dir_bytes(&dir)?,
             cost: meta.cost,
+            parent: None,
         })?;
         Ok(())
     }
@@ -286,6 +305,7 @@ impl HistoryStore {
             state,
             bytes: dir_bytes(&dir)?,
             cost: None,
+            parent: index_parent(request),
         })?;
         Ok(())
     }
@@ -324,6 +344,7 @@ impl HistoryStore {
             state,
             bytes: dir_bytes(&dir)?,
             cost: None,
+            parent: index_parent(request),
         })?;
         Ok(())
     }
@@ -369,6 +390,7 @@ impl HistoryStore {
             state: meta.state.clone(),
             bytes: dir_bytes(&dir)?,
             cost: meta.cost,
+            parent: None,
         })?;
         Ok(())
     }
@@ -447,6 +469,7 @@ impl HistoryStore {
                     state,
                     bytes: dir_bytes(&dir)?,
                     cost: None,
+                    parent: None,
                 },
                 grid_id.as_str(),
             )?;
@@ -479,6 +502,7 @@ impl HistoryStore {
             state: meta.state,
             bytes: dir_bytes(&self.entry_dir(id)?)?,
             cost: meta.cost,
+            parent: None,
         })?;
         Ok(())
     }
@@ -499,6 +523,7 @@ impl HistoryStore {
             state: stored,
             bytes: dir_bytes(&self.entry_dir(id)?)?,
             cost,
+            parent: None,
         })?;
         Ok(())
     }
@@ -573,6 +598,7 @@ impl HistoryStore {
             params,
             images: stored.images,
             box_snapshot: stored.box_snapshot,
+            conversation: stored.conversation,
         })
     }
 
@@ -585,12 +611,14 @@ impl HistoryStore {
                 eprintln!("warning: skipping history id {}", row.id);
                 continue;
             };
+            let parent = row.parent.as_deref().and_then(|raw| JobId::parse(raw).ok());
             listed.push(EntrySummary {
                 id,
                 state: row.state,
                 cost: row.cost,
                 created_at: row.created_at,
                 bytes: row.bytes,
+                parent,
             });
         }
         Ok(listed)
@@ -618,28 +646,136 @@ impl HistoryStore {
     pub fn evict_to(&self, max_entries: usize, max_bytes: u64) -> Result<(), StoreError> {
         loop {
             let rows = self.read_index()?;
-            let completed: Vec<_> = rows
-                .iter()
-                .filter(|row| JobId::parse(&row.id).is_ok() && !row.state.is_in_flight())
-                .cloned()
-                .collect();
-            let total: u64 = rows
+            let valid: Vec<_> = rows
                 .iter()
                 .filter(|row| JobId::parse(&row.id).is_ok())
-                .map(|row| row.bytes)
-                .sum();
-            if completed.len() <= max_entries && total <= max_bytes {
+                .cloned()
+                .collect();
+            let parents: std::collections::HashSet<&str> = valid
+                .iter()
+                .filter_map(|row| row.parent.as_deref())
+                .collect();
+            let visible: Vec<_> = valid
+                .iter()
+                .filter(|row| !parents.contains(row.id.as_str()) && !row.state.is_in_flight())
+                .cloned()
+                .collect();
+            let total: u64 = valid.iter().map(|row| row.bytes).sum();
+            if visible.len() <= max_entries && total <= max_bytes {
                 return Ok(());
             }
-            let Some(oldest) = completed
+            let Some(oldest) = visible
                 .iter()
                 .min_by(|left, right| left.created_at.cmp(&right.created_at))
             else {
                 return Ok(());
             };
             let id = JobId::parse(&oldest.id).map_err(StoreError::Protocol)?;
-            self.remove(&id)?;
+            self.remove_unshared(&id)?;
         }
+    }
+
+    /// Turns from the first in the path through `id`, oldest first.
+    /// A missing parent, a cycle, or 100 turns stops the walk.
+    pub fn conversation_chain(&self, id: &JobId) -> Result<Vec<ConversationTurn>, StoreError> {
+        let mut newest_first = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut current = Some(id.clone());
+        while let Some(id) = current {
+            if !seen.insert(id.as_str().to_string()) || newest_first.len() >= 100 {
+                break;
+            }
+            let Ok(meta) = self.read_meta(&id) else {
+                break;
+            };
+            let Ok(stored) = self.read_stored(&id) else {
+                break;
+            };
+            let continuable = stored.conversation.is_some()
+                && matches!(meta.state, JobState::Done { .. })
+                && !meta.interaction_id.is_empty();
+            let parent = stored
+                .conversation
+                .as_ref()
+                .and_then(|conversation| conversation.parent_job_id.clone())
+                .and_then(|raw| JobId::parse(&raw).ok());
+            newest_first.push(ConversationTurn {
+                id: id.clone(),
+                model_id: meta.model_id,
+                prompt: stored.compiled_prompt,
+                summary: meta.suggestion,
+                state: meta.state,
+                continuable,
+            });
+            current = parent;
+        }
+        newest_first.reverse();
+        Ok(newest_first)
+    }
+
+    /// Remove `id` and the turns behind it that no other row still uses.
+    pub fn remove_unshared(&self, id: &JobId) -> Result<(), StoreError> {
+        let protected = self.protected_ids(id)?;
+        let mut current = Some(id.clone());
+        let mut seen = std::collections::HashSet::new();
+        while let Some(id) = current {
+            if protected.contains(id.as_str()) || !seen.insert(id.as_str().to_string()) {
+                break;
+            }
+            if seen.len() > 100 {
+                break;
+            }
+            let parent = self
+                .read_stored(&id)
+                .ok()
+                .and_then(|stored| stored.conversation)
+                .and_then(|conversation| conversation.parent_job_id)
+                .and_then(|raw| JobId::parse(&raw).ok());
+            self.remove(&id)?;
+            current = parent;
+        }
+        Ok(())
+    }
+
+    fn protected_ids(
+        &self,
+        except: &JobId,
+    ) -> Result<std::collections::HashSet<String>, StoreError> {
+        let rows = self.read_index()?;
+        let parents: std::collections::HashSet<String> =
+            rows.iter().filter_map(|row| row.parent.clone()).collect();
+        let mut protected = std::collections::HashSet::new();
+        for row in rows {
+            if row.id == except.as_str() || parents.contains(&row.id) {
+                continue;
+            }
+            let Ok(mut current) = JobId::parse(&row.id) else {
+                continue;
+            };
+            let mut seen = std::collections::HashSet::new();
+            loop {
+                if !seen.insert(current.as_str().to_string()) || seen.len() > 100 {
+                    break;
+                }
+                protected.insert(current.as_str().to_string());
+                let Some(parent) = self
+                    .read_stored(&current)
+                    .ok()
+                    .and_then(|stored| stored.conversation)
+                    .and_then(|conversation| conversation.parent_job_id)
+                    .and_then(|raw| JobId::parse(&raw).ok())
+                else {
+                    break;
+                };
+                current = parent;
+            }
+        }
+        Ok(protected)
+    }
+
+    fn read_stored(&self, id: &JobId) -> Result<StoredRequest, StoreError> {
+        let bytes = fs::read(self.entry_dir(id)?.join("request.json")).map_err(io_err)?;
+        serde_json::from_slice(&bytes).map_err(|err| StoreError::Protocol(err.to_string()))
     }
 
     fn entry_dir(&self, id: &JobId) -> Result<PathBuf, StoreError> {
@@ -670,6 +806,7 @@ impl HistoryStore {
             box_snapshot: request.box_snapshot.clone(),
             created_at: request.created_at.clone(),
             editor: editor.cloned(),
+            conversation: request.conversation.clone(),
         };
         write_private(
             &dir.join("request.json"),
@@ -702,9 +839,12 @@ impl HistoryStore {
         Ok(file.entries)
     }
 
-    fn upsert_row(&self, row: IndexRow) -> Result<(), StoreError> {
+    fn upsert_row(&self, mut row: IndexRow) -> Result<(), StoreError> {
         let mut rows = self.read_index()?;
         if let Some(existing) = rows.iter_mut().find(|existing| existing.id == row.id) {
+            if row.parent.is_none() {
+                row.parent = existing.parent.clone();
+            }
             *existing = row;
         } else {
             rows.insert(0, row);
@@ -744,6 +884,13 @@ impl HistoryStore {
         .map_err(io_err)?;
         Ok(())
     }
+}
+
+fn index_parent(request: &JobRequest) -> Option<String> {
+    request
+        .conversation
+        .as_ref()
+        .and_then(|conversation| conversation.parent_job_id.clone())
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
@@ -866,6 +1013,7 @@ mod tests {
                 from_image: None,
             }],
             created_at: "2026-10-15T00:00:00Z".into(),
+            conversation: None,
         }
     }
 
@@ -1510,5 +1658,225 @@ mod tests {
             .map(|entry| entry.id.as_str().to_string())
             .collect();
         assert_eq!(ids, ["gridremove-q2", "gridremove-q4"]);
+    }
+
+    fn conversation(
+        parent_job: Option<&str>,
+        parent_provider: Option<&str>,
+    ) -> crate::job::Conversation {
+        crate::job::Conversation {
+            parent_job_id: parent_job.map(str::to_owned),
+            parent_provider_id: parent_provider.map(str::to_owned),
+        }
+    }
+
+    fn seed_done(
+        store: &HistoryStore,
+        id: &str,
+        prompt: &str,
+        parent: Option<&str>,
+        interaction: &str,
+        summary: &str,
+    ) {
+        let mut request = request_with_images();
+        request.compiled_prompt = prompt.into();
+        request.created_at = id.into();
+        request.conversation = Some(conversation(parent, parent.map(|_| "resp-parent")));
+        store
+            .complete_inline(
+                &JobId::parse(id).unwrap(),
+                &request,
+                interaction,
+                summary,
+                &png_bytes(8),
+                "image/png",
+                b"t",
+                None,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn an_old_request_without_a_conversation_part_loads_as_one_shot() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        let id = JobId::parse("oldreq").unwrap();
+        store
+            .begin(&id, &request_with_images(), &submitted("oldreq"), None)
+            .unwrap();
+        let path = root.join("oldreq/request.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("conversation");
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let loaded = store.load_request(&id).unwrap();
+        assert!(loaded.conversation.is_none());
+    }
+
+    #[test]
+    fn a_conversation_part_round_trips_with_its_parent() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        seed_done(
+            &store,
+            "turn2",
+            "make it blue",
+            Some("turn1"),
+            "resp-2",
+            "searched",
+        );
+        let loaded = store.load_request(&JobId::parse("turn2").unwrap()).unwrap();
+        let part = loaded.conversation.expect("conversation");
+        assert_eq!(part.parent_job_id.as_deref(), Some("turn1"));
+        assert_eq!(part.parent_provider_id.as_deref(), Some("resp-parent"));
+        assert_eq!(
+            store.list().unwrap()[0].parent.as_ref().unwrap().as_str(),
+            "turn1"
+        );
+    }
+
+    #[test]
+    fn an_old_index_without_parent_lists_no_parent() {
+        let root = scratch();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("history.json"),
+            br#"{"entries":[{"id":"solo","created_at":"2026-10-15T00:00:00Z","state":"queued","bytes":0,"cost":null}]}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("solo")).unwrap();
+        let store = HistoryStore::open(&root).unwrap();
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].parent.is_none());
+    }
+
+    #[test]
+    fn a_chain_walk_returns_oldest_first_and_stops_on_a_missing_parent_or_cycle() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        seed_done(&store, "t1", "first", None, "resp-1", "one");
+        seed_done(&store, "t2", "second", Some("t1"), "resp-2", "");
+        seed_done(&store, "t3", "third", Some("t2"), "resp-3", "three");
+        let chain = store
+            .conversation_chain(&JobId::parse("t3").unwrap())
+            .unwrap();
+        let prompts: Vec<_> = chain.iter().map(|turn| turn.prompt.as_str()).collect();
+        assert_eq!(prompts, ["first", "second", "third"]);
+        assert!(chain[0].continuable);
+        assert!(chain[2].continuable);
+        assert_eq!(chain[2].summary, "three");
+
+        seed_done(&store, "branch", "side", Some("t1"), "resp-b", "");
+        let branch = store
+            .conversation_chain(&JobId::parse("branch").unwrap())
+            .unwrap();
+        assert_eq!(
+            branch
+                .iter()
+                .map(|turn| turn.id.as_str())
+                .collect::<Vec<_>>(),
+            ["t1", "branch"]
+        );
+
+        seed_done(&store, "orphan", "lost", Some("missing"), "resp-o", "");
+        let partial = store
+            .conversation_chain(&JobId::parse("orphan").unwrap())
+            .unwrap();
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0].prompt, "lost");
+
+        let mut looped = request_with_images();
+        looped.compiled_prompt = "loop".into();
+        looped.conversation = Some(conversation(Some("loopb"), Some("p")));
+        store
+            .complete_inline(
+                &JobId::parse("loopa").unwrap(),
+                &looped,
+                "resp-a",
+                "",
+                &png_bytes(4),
+                "image/png",
+                b"t",
+                None,
+            )
+            .unwrap();
+        looped.conversation = Some(conversation(Some("loopa"), Some("p")));
+        store
+            .complete_inline(
+                &JobId::parse("loopb").unwrap(),
+                &looped,
+                "resp-b",
+                "",
+                &png_bytes(4),
+                "image/png",
+                b"t",
+                None,
+            )
+            .unwrap();
+        let cycled = store
+            .conversation_chain(&JobId::parse("loopa").unwrap())
+            .unwrap();
+        assert_eq!(cycled.len(), 2);
+    }
+
+    #[test]
+    fn a_failed_turn_and_an_empty_provider_id_are_not_continuable() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        let mut request = request_with_images();
+        request.conversation = Some(conversation(None, None));
+        store
+            .fail_unpolled(
+                &JobId::parse("bad").unwrap(),
+                &request,
+                &crate::error::ProviderError::Blocked,
+                None,
+            )
+            .unwrap();
+        seed_done(&store, "blank", "no id", None, "", "");
+        let failed = store
+            .conversation_chain(&JobId::parse("bad").unwrap())
+            .unwrap();
+        assert!(!failed[0].continuable);
+        let blank = store
+            .conversation_chain(&JobId::parse("blank").unwrap())
+            .unwrap();
+        assert!(!blank[0].continuable);
+    }
+
+    #[test]
+    fn removing_a_branch_keeps_shared_turns_and_eviction_drops_a_whole_item() {
+        let root = scratch();
+        let store = HistoryStore::open(&root).unwrap();
+        seed_done(&store, "t1", "first", None, "resp-1", "");
+        seed_done(&store, "t2", "second", Some("t1"), "resp-2", "");
+        seed_done(&store, "t3", "third", Some("t2"), "resp-3", "");
+        seed_done(&store, "t4", "branch", Some("t1"), "resp-4", "");
+        store.remove_unshared(&JobId::parse("t4").unwrap()).unwrap();
+        let ids: Vec<_> = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.id.as_str().to_string())
+            .collect();
+        assert!(ids.contains(&"t1".to_string()));
+        assert!(ids.contains(&"t3".to_string()));
+        assert!(!ids.contains(&"t4".to_string()));
+        store.remove_unshared(&JobId::parse("t3").unwrap()).unwrap();
+        assert!(store.list().unwrap().is_empty());
+
+        seed_done(&store, "a1", "old", None, "ra", "");
+        seed_done(&store, "a2", "old2", Some("a1"), "rb", "");
+        seed_done(&store, "b1", "new", None, "rc", "");
+        store.evict_to(1, u64::MAX).unwrap();
+        let left: Vec<_> = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.id.as_str().to_string())
+            .collect();
+        assert!(left.contains(&"b1".to_string()), "{left:?}");
+        assert!(!left.iter().any(|id| id.starts_with('a')), "{left:?}");
     }
 }

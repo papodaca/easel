@@ -48,6 +48,10 @@ impl Provider for MuseImage {
         &SPEC
     }
 
+    fn supports_conversation(&self) -> bool {
+        true
+    }
+
     fn validate_for_submit(
         &self,
         scene: &Scene,
@@ -384,6 +388,7 @@ mod tests {
             images,
             box_snapshot: Vec::new(),
             created_at: "2026-10-27T00:00:00Z".into(),
+            conversation: None,
         }
     }
 

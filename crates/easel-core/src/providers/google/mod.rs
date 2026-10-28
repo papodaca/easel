@@ -419,6 +419,13 @@ macro_rules! impl_google {
                 &$spec
             }
 
+            fn supports_conversation(&self) -> bool {
+                matches!(
+                    self.spec().id.as_str(),
+                    "gemini-nano-banana-2.1" | "gemini-3-pro-image"
+                )
+            }
+
             fn validate_for_submit(
                 &self,
                 scene: &crate::scene::Scene,
@@ -599,6 +606,7 @@ mod tests {
             images: vec![image],
             box_snapshot: Vec::new(),
             created_at: "2026-10-17T00:00:00Z".into(),
+            conversation: None,
         };
         let http = NanoBanana21.build_submit(
             &request,
@@ -663,6 +671,7 @@ mod tests {
                     images: Vec::new(),
                     box_snapshot: Vec::new(),
                     created_at: "2026-10-17T00:00:00Z".into(),
+                    conversation: None,
                 },
                 &Submitted {
                     job_id: id.clone(),
@@ -695,6 +704,7 @@ mod tests {
             images: Vec::new(),
             box_snapshot: Vec::new(),
             created_at: "2026-10-17T00:00:00Z".into(),
+            conversation: None,
         }
     }
 
