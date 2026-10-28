@@ -169,6 +169,8 @@ pub fn restore(state: Entity<AppState>, path: PathBuf, cx: &mut App) {
                     app.model_id = file.model_id.clone();
                     app.remember_model();
                 }
+                app.conversation_mode = false;
+                app.continuing = None;
                 app.scene = file.scene;
                 app.values = app.reconcile_values(file.values);
                 let mut refs = Vec::new();

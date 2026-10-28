@@ -29,7 +29,7 @@ use crate::net::KeyResolver;
 use crate::settings::{Resolver, SettingsPanel, SharedKeys};
 use crate::theme;
 use crate::ui::{Button, pane_header};
-use crate::widgets::Select;
+use crate::widgets::{Checkbox, Select};
 
 fn apply_provider(state: &gpui::Entity<AppState>, name: &str, cx: &mut gpui::App) {
     let Some(provider) = easel_core::providers::ModelRegistry::providers()
@@ -68,6 +68,7 @@ pub struct SidePanel {
     keys: std::sync::Arc<SharedKeys>,
     provider: gpui::Entity<Select>,
     model: gpui::Entity<Select>,
+    conversation: gpui::Entity<Checkbox>,
     runner: Option<gpui::Entity<crate::jobs::JobRunner>>,
     scroll: ScrollHandle,
     thumb: Bounds<Pixels>,
@@ -90,6 +91,21 @@ impl SidePanel {
         let inspector = cx.new(|cx| Inspector::new(app_state.clone(), cx));
         let prompt = cx.new(|cx| PromptEditor::new(app_state.clone(), cx));
         let form = cx.new(|cx| SchemaForm::new(app_state.clone(), cx));
+        let conversation = cx.new({
+            let state = app_state.clone();
+            move |cx| {
+                let mut check = Checkbox::new(cx);
+                check.set_label("Conversation mode", cx);
+                check.on_change(
+                    Box::new(move |value, _window, cx| {
+                        let on = value.as_bool().unwrap_or(false);
+                        state.update(cx, |app, cx| app.set_conversation_mode(on, cx));
+                    }),
+                    cx,
+                );
+                check
+            }
+        });
         let resolver = std::sync::Arc::new(Resolver(std::sync::Arc::clone(&keys)));
         let validation = cx.new(|cx| Validation::new(app_state.clone(), resolver, cx));
         let provider = cx.new(|cx| {
@@ -129,6 +145,7 @@ impl SidePanel {
             keys,
             provider,
             model,
+            conversation,
             runner,
             scroll: ScrollHandle::new(),
             thumb: Bounds::default(),
@@ -288,6 +305,20 @@ impl Render for SidePanel {
                     .child(self.inspector.clone())
                     .child(self.prompt.clone())
                     .child(self.form.clone())
+                    .when(self.app_state.read(cx).supports_conversation(), |body| {
+                        let help = self.app_state.read(cx).conversation_help();
+                        let on = self.app_state.read(cx).conversation_mode;
+                        let check = self.conversation.clone();
+                        if check.read(cx).value().as_bool() != Some(on) {
+                            check.update(cx, |check, cx| {
+                                check.set_value(&serde_json::json!(on), cx);
+                            });
+                        }
+                        if check.read(cx).help() != Some(help.as_str()) {
+                            check.update(cx, |check, cx| check.set_help(Some(help), cx));
+                        }
+                        body.child(check)
+                    })
                     .child(self.validation.clone())
                     .child({
                         let enabled = self.validation.read(cx).generate_enabled(cx);

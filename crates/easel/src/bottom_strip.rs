@@ -47,6 +47,19 @@ pub struct HistoryDialog {
     pub actions: Vec<String>,
     pub confirming: bool,
     pub spinning: bool,
+    pub log: Vec<LogTurn>,
+    pub wide: bool,
+    pub discard_line: String,
+}
+
+#[derive(Clone)]
+pub struct LogTurn {
+    pub prompt: String,
+    pub model: String,
+    pub summary: String,
+    pub thumb: Option<Arc<RenderImage>>,
+    pub status: String,
+    pub marked: bool,
 }
 
 pub struct GridDialog {
@@ -94,6 +107,9 @@ pub struct BottomStrip {
     reveal: Arc<dyn Fn(&std::path::Path) -> Result<(), String> + Send + Sync>,
     grid_selection: [bool; 4],
     grid_open_for: Option<HistoryItem>,
+    chain: Vec<easel_core::history::ConversationTurn>,
+    chain_for: Option<JobId>,
+    shown: usize,
 }
 
 impl BottomStrip {
@@ -129,6 +145,9 @@ impl BottomStrip {
             reveal: Arc::new(open_result_folder),
             grid_selection: [false; 4],
             grid_open_for: None,
+            chain: Vec::new(),
+            chain_for: None,
+            shown: 0,
         }
     }
 
@@ -225,6 +244,7 @@ impl BottomStrip {
             "Reveal" => self.reveal_selected(cx),
             "Compare" => self.compare_selected(cx),
             "Restore" => self.restore_selected(cx),
+            "Continue" => self.continue_shown(cx),
             "Discard" => {
                 self.pending_discard = true;
                 cx.notify();
@@ -250,6 +270,21 @@ impl BottomStrip {
             .iter()
             .map(|summary| summary.id.as_str().to_string())
             .collect();
+        let mut covered = std::collections::HashSet::new();
+        for summary in &listed {
+            if matches!(summary.state, JobState::Done { .. })
+                && let Some(parent) = &summary.parent
+            {
+                covered.insert(parent.as_str().to_string());
+            }
+        }
+        for job in &live {
+            if job.state.is_in_flight()
+                && let Some(parent) = &job.parent
+            {
+                covered.insert(parent.clone());
+            }
+        }
         let mut seen = std::collections::HashSet::new();
         let mut rows = Vec::new();
         let mut finished_live = Vec::new();
@@ -274,7 +309,7 @@ impl BottomStrip {
         }
         let mut finished = Vec::new();
         for summary in listed {
-            if seen.contains(summary.id.as_str()) {
+            if seen.contains(summary.id.as_str()) || covered.contains(summary.id.as_str()) {
                 continue;
             }
             let created_at = summary.created_at.clone();
@@ -508,7 +543,16 @@ impl BottomStrip {
             return;
         };
         if let Some(id) = row.id.clone() {
-            let _ = self.history.remove(&id);
+            let linked = self
+                .history
+                .load_request(&id)
+                .ok()
+                .is_some_and(|loaded| loaded.conversation.is_some());
+            if linked {
+                let _ = self.history.remove_unshared(&id);
+            } else {
+                let _ = self.history.remove(&id);
+            }
         }
         if let Some(token) = row.token
             && let Some(runner) = &self.runner
@@ -613,9 +657,62 @@ impl BottomStrip {
         let has_file = id
             .as_ref()
             .is_some_and(|id| self.history.result_path(id).is_some());
-        let preview = id.as_ref().and_then(|id| self.result_preview(id));
+        self.load_chain(id.as_ref());
+        let shown = self.shown.min(self.chain.len().saturating_sub(1));
+        let (line, detail, cost, model, prompt, state, has_editor, has_file, preview, continuable) =
+            if self.chain.is_empty() {
+                (
+                    line,
+                    detail,
+                    cost,
+                    model,
+                    prompt,
+                    state,
+                    has_editor,
+                    has_file,
+                    id.as_ref().and_then(|id| self.result_preview(id)),
+                    false,
+                )
+            } else {
+                let turn = self.chain[shown].clone();
+                let loaded = self.history.load_request(&turn.id).ok();
+                let (turn_line, turn_detail) = copy_for(&turn.state, "");
+                let editor = loaded
+                    .as_ref()
+                    .is_some_and(|loaded| !loaded.box_snapshot.is_empty())
+                    || self
+                        .history
+                        .load_editor(&turn.id)
+                        .ok()
+                        .flatten()
+                        .is_some();
+                let file = self.history.result_path(&turn.id).is_some();
+                let preview = self.result_preview(&turn.id);
+                (
+                    turn_line,
+                    turn_detail,
+                    None,
+                    turn.model_id,
+                    turn.prompt,
+                    turn.state,
+                    editor,
+                    file,
+                    preview,
+                    turn.continuable,
+                )
+            };
         let show_detail = detail.len() > line.len();
-        let actions = self.row_actions(&state, has_editor, has_file, false);
+        let mut actions = self.row_actions(&state, has_editor, has_file, false);
+        if continuable {
+            actions.insert(0, "Continue".into());
+        }
+        let log = self.log_rows(shown);
+        let discard_line = id
+            .as_ref()
+            .and_then(|id| self.history.unshared_ids(id).ok())
+            .filter(|ids| ids.len() > 1)
+            .map(|ids| format!("Delete {} turns?", ids.len()))
+            .unwrap_or_else(|| "Discard this result?".into());
         Some(HistoryDialog {
             image: preview.as_ref().map(|preview| Arc::clone(&preview.image)),
             pixel_size: preview.map(|preview| (preview.width, preview.height)),
@@ -627,7 +724,61 @@ impl BottomStrip {
             actions,
             confirming: self.pending_discard,
             spinning: state.is_in_flight(),
+            log,
+            wide: !self.chain.is_empty(),
+            discard_line,
         })
+    }
+
+    fn load_chain(&mut self, id: Option<&JobId>) {
+        let Some(id) = id else {
+            self.chain.clear();
+            self.chain_for = None;
+            return;
+        };
+        if self.chain_for.as_ref() == Some(id) {
+            return;
+        }
+        let linked = self
+            .history
+            .load_request(id)
+            .ok()
+            .is_some_and(|loaded| loaded.conversation.is_some());
+        self.chain = if linked {
+            self.history.conversation_chain(id).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        self.shown = self.chain.len().saturating_sub(1);
+        self.chain_for = Some(id.clone());
+    }
+
+    fn log_rows(&mut self, shown: usize) -> Vec<LogTurn> {
+        let chain = self.chain.clone();
+        chain
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| {
+                let thumb = self.thumb_for(&turn.id);
+                let (status, _) = copy_for(&turn.state, "");
+                let missing = thumb.is_none();
+                LogTurn {
+                    prompt: turn.prompt.clone(),
+                    model: turn.model_id.clone(),
+                    summary: easel_core::text::sanitize_for_display(&turn.summary, 400),
+                    thumb,
+                    status: if missing { status } else { String::new() },
+                    marked: index == shown,
+                }
+            })
+            .collect()
+    }
+
+    pub fn show_turn(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.chain.len() {
+            self.shown = index;
+            cx.notify();
+        }
     }
 
     pub fn grid_dialog(&mut self, cx: &mut Context<Self>) -> Option<GridDialog> {
@@ -827,6 +978,37 @@ impl BottomStrip {
             },
         );
         Some(preview)
+    }
+
+    fn continue_shown(&mut self, cx: &mut Context<Self>) {
+        let Some(turn) = self.chain.get(self.shown).cloned() else {
+            return;
+        };
+        if !turn.continuable {
+            return;
+        }
+        let Some(bytes) = self.history.result_bytes(&turn.id).ok() else {
+            return;
+        };
+        self.app_state.update(cx, |app, cx| {
+            app.set_model(&turn.model_id, cx);
+            app.set_conversation_mode(true, cx);
+            if crate::jobs::promote(app, &bytes, cx).is_err() {
+                return;
+            }
+            let Some(image) = app.image.clone() else {
+                return;
+            };
+            app.continuing = Some(crate::app_state::ContinueFrom {
+                job_id: turn.id,
+                model_id: turn.model_id,
+                provider_id: turn.interaction_id,
+                image,
+                prompt: turn.prompt,
+            });
+            cx.notify();
+        });
+        self.close_modal(cx);
     }
 
     fn open_row(&mut self, index: usize, cx: &mut Context<Self>) {

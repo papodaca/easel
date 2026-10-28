@@ -44,6 +44,16 @@ impl Checkbox {
         self.help.as_deref()
     }
 
+    pub fn set_label(&mut self, label: impl Into<String>, cx: &mut Context<Self>) {
+        self.label = Some(label.into());
+        cx.notify();
+    }
+
+    pub fn set_help(&mut self, help: Option<String>, cx: &mut Context<Self>) {
+        self.help = help;
+        cx.notify();
+    }
+
     pub fn set_value(&mut self, value: &Value, cx: &mut Context<Self>) {
         if let Some(checked) = value.as_bool() {
             self.checked = checked;

@@ -273,6 +273,7 @@ mod tests {
             id: None,
             state,
             created_at: String::new(),
+            parent: None,
             cost: None,
             status: status.into(),
             bytes: None,

@@ -223,6 +223,9 @@ impl Root {
         let confirming = dialog.confirming;
         let spinning = dialog.spinning && image.is_none();
         let prompt = dialog.prompt;
+        let wide = dialog.wide;
+        let log = dialog.log.clone();
+        let discard_line = dialog.discard_line;
         cover_below_title_bar("history-scrim")
             .debug_selector(|| "history-scrim".into())
             .flex()
@@ -241,7 +244,7 @@ impl Root {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .flex()
                     .flex_col()
-                    .w(px(480.))
+                    .w(px(if wide { 680. } else { 480. }))
                     .max_h(px(640.))
                     .bg(rgb(theme::PANEL))
                     .border_1()
@@ -293,7 +296,7 @@ impl Root {
                                     div()
                                         .text_xs()
                                         .text_color(rgb(theme::TEXT_MUTED))
-                                        .child("Discard this result?"),
+                                        .child(discard_line.clone()),
                                 )
                             })
                             .child(div().flex().flex_row().flex_wrap().gap(px(6.)).children(
@@ -312,7 +315,109 @@ impl Root {
                                         )
                                 }),
                             )),
-                    ),
+                    )
+                    .when(wide, |dialog| {
+                        let strip = self.bottom_strip.clone();
+                        dialog.child(
+                            div()
+                                .absolute()
+                                .right_0()
+                                .top(px(32.))
+                                .bottom_0()
+                                .w(px(200.))
+                                .bg(rgb(theme::PANEL))
+                                .border_l_1()
+                                .border_color(rgb(theme::BORDER))
+                                .flex()
+                                .flex_col()
+                                .child(pane_header("Conversation"))
+                                .child(
+                                    div()
+                                        .id("conversation-log")
+                                        .flex_1()
+                                        .min_h(px(0.))
+                                        .overflow_y_scroll()
+                                        .children(log.into_iter().enumerate().map(
+                                            |(index, turn)| {
+                                                let strip = strip.clone();
+                                                let has_thumb = turn.thumb.is_some();
+                                                let status = turn.status.clone();
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .gap(px(6.))
+                                                    .p(px(6.))
+                                                    .w_full()
+                                                    .when(turn.marked, |row| {
+                                                        row.bg(rgb(theme::SURFACE))
+                                                    })
+                                                    .when(!turn.marked, |row| {
+                                                        row.on_mouse_down(
+                                                            MouseButton::Left,
+                                                            move |_, _, cx| {
+                                                                strip.update(cx, |strip, cx| {
+                                                                    strip.show_turn(index, cx);
+                                                                });
+                                                            },
+                                                        )
+                                                    })
+                                                    .child(
+                                                        div()
+                                                            .flex_none()
+                                                            .size(px(40.))
+                                                            .children(turn.thumb.map(|image| {
+                                                                img(image).size(px(40.))
+                                                            }))
+                                                            .when(!has_thumb, |box_| {
+                                                                box_.child(
+                                                                    div()
+                                                                        .text_xs()
+                                                                        .text_color(rgb(
+                                                                            theme::TEXT_MUTED,
+                                                                        ))
+                                                                        .child(status),
+                                                                )
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .min_w(px(0.))
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .line_clamp(2)
+                                                                    .child(turn.prompt),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xs()
+                                                                    .text_color(rgb(
+                                                                        theme::TEXT_MUTED,
+                                                                    ))
+                                                                    .child(turn.model),
+                                                            )
+                                                            .when(
+                                                                !turn.summary.is_empty(),
+                                                                |column| {
+                                                                    column.child(
+                                                                        div()
+                                                                            .text_xs()
+                                                                            .text_color(rgb(
+                                                                                theme::TEXT_MUTED,
+                                                                            ))
+                                                                            .line_clamp(3)
+                                                                            .child(turn.summary),
+                                                                    )
+                                                                },
+                                                            ),
+                                                    )
+                                            },
+                                        )),
+                                ),
+                        )
+                    }),
             )
     }
 

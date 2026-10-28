@@ -24,6 +24,17 @@ pub struct HistoryItem {
     pub id: Option<JobId>,
 }
 
+/// The finished turn the next Generate should refine.
+#[derive(Clone)]
+pub struct ContinueFrom {
+    pub job_id: JobId,
+    #[allow(dead_code)]
+    pub model_id: String,
+    pub provider_id: String,
+    pub image: Arc<DecodedImage>,
+    pub prompt: String,
+}
+
 pub struct AppState {
     pub settings_open: bool,
     pub history_item: Option<HistoryItem>,
@@ -47,6 +58,8 @@ pub struct AppState {
     retired_renders: Vec<Arc<RenderImage>>,
     krea_sunset_noted: bool,
     pub model_id: String,
+    pub conversation_mode: bool,
+    pub continuing: Option<ContinueFrom>,
     last_by_provider: HashMap<easel_core::model_spec::ProviderId, String>,
 }
 
@@ -74,6 +87,8 @@ impl AppState {
             retired_renders: Vec::new(),
             krea_sunset_noted: false,
             model_id: easel_core::providers::bfl::flux3::Flux3.spec().id.clone(),
+            conversation_mode: false,
+            continuing: None,
             last_by_provider: HashMap::new(),
         };
         app.remember_model();
@@ -134,6 +149,7 @@ impl AppState {
             }
         }
         self.model_id = spec.id.clone();
+        self.continuing = None;
         self.remember_model();
         self.values = values;
         if !spec.capabilities.supports_boxes && self.tool == Tool::Box {
@@ -267,7 +283,38 @@ impl AppState {
         self.scene.frame().is_some() && self.spec().capabilities.supports_boxes
     }
 
+    pub fn set_conversation_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.conversation_mode = on;
+        if !on {
+            self.continuing = None;
+        }
+        cx.notify();
+    }
+
+    pub fn supports_conversation(&self) -> bool {
+        easel_core::providers::resolve_model(&self.model_id)
+            .is_some_and(|provider| provider.supports_conversation())
+    }
+
+    pub fn conversation_help(&self) -> String {
+        if let Some(continued) = &self.continuing {
+            let prompt: String = continued.prompt.chars().take(40).collect();
+            return format!("Continues from: {prompt}");
+        }
+        format!(
+            "{} keeps this turn's prompt and images so it can be continued. Easel can't delete them.",
+            self.spec().provider.display_name()
+        )
+    }
+
     pub fn set_image(&mut self, image: Arc<DecodedImage>, cx: &mut Context<Self>) {
+        if self
+            .continuing
+            .as_ref()
+            .is_some_and(|continued| !Arc::ptr_eq(&continued.image, &image))
+        {
+            self.continuing = None;
+        }
         self.source_ref = None;
         self.scene
             .set_source(ImageRef::new("source", image.size.w, image.size.h));

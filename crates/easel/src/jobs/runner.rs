@@ -54,6 +54,7 @@ pub struct LiveJob {
     pub id: Option<easel_core::providers::JobId>,
     pub state: JobState,
     pub created_at: String,
+    pub parent: Option<String>,
     pub cost: Option<f64>,
     pub status: String,
     pub bytes: Option<Vec<u8>>,
@@ -227,6 +228,11 @@ impl JobRunner {
                     .or_else(|| slot.local_id.clone()),
                 state: slot.state.clone(),
                 created_at: slot.request.created_at.clone(),
+                parent: slot
+                    .request
+                    .conversation
+                    .as_ref()
+                    .and_then(|turn| turn.parent_job_id.clone()),
                 cost: slot.cost,
                 status: slot.status.clone(),
                 bytes: slot.bytes.clone(),
@@ -541,6 +547,7 @@ impl JobRunner {
                         | ProviderError::Auth
                         | ProviderError::ModelNotFound
                         | ProviderError::NoImage
+                        | ProviderError::ConversationEnded
                 ) && !beta
                 {
                     self.finish_unpolled(token, error, cx);
@@ -585,6 +592,8 @@ impl JobRunner {
             self.fail(token, ProviderError::Protocol(error.to_string()), cx);
             return;
         }
+        let kept_id = id.clone();
+        let picture = image.bytes.clone();
         if let Some(slot) = self.slot_mut(token) {
             slot.local_id = Some(id);
             slot.bytes = Some(image.bytes);
@@ -597,8 +606,70 @@ impl JobRunner {
             );
             slot.status = "Done".into();
         }
+        self.advance_conversation(&kept_id, &request, &image.interaction_id, &picture, cx);
         cx.notify();
         self.pump(cx);
+    }
+
+    fn advance_conversation(
+        &mut self,
+        id: &easel_core::providers::JobId,
+        request: &JobRequest,
+        interaction_id: &str,
+        bytes: &[u8],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(conversation) = request.conversation.clone() else {
+            return;
+        };
+        if interaction_id.is_empty() {
+            return;
+        }
+        let Some(app) = self.app_watch.clone() else {
+            return;
+        };
+        let model_id = request.model_id.clone();
+        let prompt = request.compiled_prompt.clone();
+        let parent = conversation.parent_job_id;
+        let job_id = id.clone();
+        let provider_id = interaction_id.to_owned();
+        let bytes = bytes.to_vec();
+        app.update(cx, |app, cx| {
+            if !app.conversation_mode || app.model_id != model_id {
+                return;
+            }
+            let current = app
+                .continuing
+                .as_ref()
+                .map(|continued| continued.job_id.as_str().to_owned());
+            if parent != current {
+                return;
+            }
+            if crate::jobs::promote(app, &bytes, cx).is_err() {
+                return;
+            }
+            let Some(image) = app.image.clone() else {
+                return;
+            };
+            app.continuing = Some(crate::app_state::ContinueFrom {
+                job_id,
+                model_id,
+                provider_id,
+                image,
+                prompt,
+            });
+            cx.notify();
+        });
+    }
+
+    fn clear_continuation(&self, cx: &mut Context<Self>) {
+        let Some(app) = self.app_watch.clone() else {
+            return;
+        };
+        app.update(cx, |app, cx| {
+            app.continuing = None;
+            cx.notify();
+        });
     }
 
     fn complete_polled_inline(
@@ -664,6 +735,9 @@ impl JobRunner {
             && let Some(slot) = self.slot_mut(token)
         {
             slot.local_id = Some(id);
+        }
+        if matches!(error, ProviderError::ConversationEnded) {
+            self.clear_continuation(cx);
         }
         self.fail(token, error, cx);
     }

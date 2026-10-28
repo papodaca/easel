@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use easel_core::image_prep::{PrepOptions, prepare_for_upload};
@@ -34,8 +35,16 @@ pub fn build_request(app: &AppState) -> Result<JobRequest, String> {
             options.prefer_jpeg = false;
         }
     }
+    let continued = app.continuing.as_ref().and_then(|continued| {
+        app.image
+            .as_ref()
+            .is_some_and(|image| Arc::ptr_eq(image, &continued.image))
+            .then_some(continued)
+    });
     let mut sources: Vec<&crate::image_load::DecodedImage> = Vec::new();
-    if let Some(image) = &app.image {
+    if continued.is_none()
+        && let Some(image) = &app.image
+    {
         sources.push(image);
     }
     sources.extend(app.extras.iter().map(std::convert::AsRef::as_ref));
@@ -52,7 +61,12 @@ pub fn build_request(app: &AppState) -> Result<JobRequest, String> {
         images,
         box_snapshot: app.scene.boxes.clone(),
         created_at: utc_now(),
-        conversation: None,
+        conversation: (app.conversation_mode && app.supports_conversation()).then(|| {
+            easel_core::job::Conversation {
+                parent_job_id: continued.map(|turn| turn.job_id.as_str().to_owned()),
+                parent_provider_id: continued.map(|turn| turn.provider_id.clone()),
+            }
+        }),
     })
 }
 

@@ -411,10 +411,10 @@ fn decode_responses(value: &Value) -> Result<InlineImage, ProviderError> {
     let items = value
         .get("output")
         .and_then(Value::as_array)
-        .ok_or_else(|| ProviderError::NoImage)?;
-    let call = items.iter().find(|item| {
-        item.get("type").and_then(Value::as_str) == Some("image_generation_call")
-    });
+        .ok_or(ProviderError::NoImage)?;
+    let call = items
+        .iter()
+        .find(|item| item.get("type").and_then(Value::as_str) == Some("image_generation_call"));
     let Some(encoded) = call
         .and_then(|item| item.get("result"))
         .and_then(Value::as_str)

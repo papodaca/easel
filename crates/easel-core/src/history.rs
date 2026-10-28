@@ -85,6 +85,7 @@ pub struct ConversationTurn {
     pub summary: String,
     pub state: JobState,
     pub continuable: bool,
+    pub interaction_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -706,6 +707,7 @@ impl HistoryStore {
                 summary: meta.suggestion,
                 state: meta.state,
                 continuable,
+                interaction_id: meta.interaction_id,
             });
             current = parent;
         }
@@ -714,15 +716,16 @@ impl HistoryStore {
     }
 
     /// Remove `id` and the turns behind it that no other row still uses.
-    pub fn remove_unshared(&self, id: &JobId) -> Result<(), StoreError> {
+    pub fn unshared_ids(&self, id: &JobId) -> Result<Vec<JobId>, StoreError> {
         let protected = self.protected_ids(id)?;
+        let mut ids = Vec::new();
         let mut current = Some(id.clone());
         let mut seen = std::collections::HashSet::new();
         while let Some(id) = current {
-            if protected.contains(id.as_str()) || !seen.insert(id.as_str().to_string()) {
-                break;
-            }
-            if seen.len() > 100 {
+            if protected.contains(id.as_str())
+                || !seen.insert(id.as_str().to_string())
+                || seen.len() > 100
+            {
                 break;
             }
             let parent = self
@@ -731,8 +734,15 @@ impl HistoryStore {
                 .and_then(|stored| stored.conversation)
                 .and_then(|conversation| conversation.parent_job_id)
                 .and_then(|raw| JobId::parse(&raw).ok());
-            self.remove(&id)?;
+            ids.push(id);
             current = parent;
+        }
+        Ok(ids)
+    }
+
+    pub fn remove_unshared(&self, id: &JobId) -> Result<(), StoreError> {
+        for id in self.unshared_ids(id)? {
+            self.remove(&id)?;
         }
         Ok(())
     }
