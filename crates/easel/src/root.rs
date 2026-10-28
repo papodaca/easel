@@ -18,7 +18,7 @@ use crate::side_panel::SidePanel;
 use crate::status_bar::StatusBar;
 use crate::theme;
 use crate::toolbar::Toolbar;
-use crate::ui::{Button, pane_header};
+use crate::ui::{Button, pane_header, spinner};
 
 pub struct Root {
     focus_handle: FocusHandle,
@@ -221,6 +221,7 @@ impl Root {
         }
         let actions = dialog.actions.clone();
         let confirming = dialog.confirming;
+        let spinning = dialog.spinning && image.is_none();
         let prompt = dialog.prompt;
         cover_below_title_bar("history-scrim")
             .debug_selector(|| "history-scrim".into())
@@ -275,7 +276,10 @@ impl Root {
                                     .h(px(220.))
                                     .children(
                                         image.map(|image| img(image).max_w_full().max_h_full()),
-                                    ),
+                                    )
+                                    .when(spinning, |frame| {
+                                        frame.child(spinner("history-dialog-spinner"))
+                                    }),
                             )
                             .children(details.into_iter().map(|line| {
                                 div()

@@ -415,6 +415,10 @@ fn in_flight_entries_show_progress(cx: &mut TestAppContext) {
     let line = strip.read_with(&cx, |strip, _| strip.lines()[0].clone());
     assert!(line.contains("Generating"), "{line}");
     assert!(line.contains("40"), "{line}");
+    assert_eq!(
+        strip.read_with(&cx, |strip, _| strip.spinners()),
+        vec![true]
+    );
     strip.update(&mut cx, |strip, cx| strip.select(0, cx));
     let actions = strip.read_with(&cx, |strip, _| strip.actions());
     assert_eq!(actions, vec!["Dismiss".to_string()]);
@@ -446,6 +450,10 @@ fn the_strip_replaces_the_quote_with_the_settled_cost(cx: &mut TestAppContext) {
     strip.update(&mut cx, |strip, cx| strip.refresh(cx));
     let settled = strip.read_with(&cx, |strip, _| strip.costs());
     assert!((settled[0].unwrap() - 4.5).abs() < 1e-9, "{settled:?}");
+    assert_eq!(
+        strip.read_with(&cx, |strip, _| strip.spinners()),
+        vec![false]
+    );
 }
 
 #[gpui::test]
@@ -655,6 +663,7 @@ fn an_in_flight_row_opens_with_dismiss_only(cx: &mut TestAppContext) {
     let dialog = strip.update(&mut cx, |strip, cx| strip.dialog(cx).expect("modal"));
     assert_eq!(dialog.actions, vec!["Dismiss".to_string()]);
     assert!(dialog.image.is_none());
+    assert!(dialog.spinning);
 }
 
 #[gpui::test]

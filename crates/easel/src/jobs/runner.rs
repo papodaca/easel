@@ -53,6 +53,7 @@ pub struct LiveJob {
     pub token: u64,
     pub id: Option<easel_core::providers::JobId>,
     pub state: JobState,
+    pub created_at: String,
     pub cost: Option<f64>,
     pub status: String,
     pub bytes: Option<Vec<u8>>,
@@ -225,6 +226,7 @@ impl JobRunner {
                     .map(|submitted| submitted.job_id.clone())
                     .or_else(|| slot.local_id.clone()),
                 state: slot.state.clone(),
+                created_at: slot.request.created_at.clone(),
                 cost: slot.cost,
                 status: slot.status.clone(),
                 bytes: slot.bytes.clone(),
@@ -1954,7 +1956,70 @@ mod tests {
                 .any(|request| request.auth.is_none() && request.url.contains("delivery"))
         );
         let dumped = format!("{seen:?}");
-        assert!(!dumped.contains("bfl-test-key-xyz"));
+        assert!(!dumped.contains("bfl-test-key-xxx"));
+    }
+
+    #[gpui::test]
+    fn a_402_then_a_later_success_lists_newest_first(cx: &mut TestAppContext) {
+        let ready = r#"{"status":"Ready","result":{"sample":"https://delivery.bfl.ai/img.png","cost":4.5}}"#;
+        let harness = open(
+            cx,
+            "order",
+            vec![
+                Ok(http(200, submit_body("jobold"))),
+                Ok(http(402, "no credits")),
+                Ok(http(200, submit_body("jobnew"))),
+                Ok(http(200, ready)),
+                Ok(http(200, png())),
+            ],
+        );
+        let mut older = request();
+        older.created_at = "2026-10-15T00:00:00Z".into();
+        harness
+            .runner
+            .update(cx, |runner, cx| runner.submit(older, cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(harness.history.list().unwrap().len(), 1);
+
+        let mut newer = request();
+        newer.created_at = "2026-10-15T00:00:01Z".into();
+        harness
+            .runner
+            .update(cx, |runner, cx| runner.submit(newer, cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+
+        let listed = harness.history.list().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(
+            matches!(listed[0].state, JobState::Done { .. }),
+            "{listed:?}"
+        );
+        assert!(
+            matches!(
+                listed[1].state,
+                JobState::Failed {
+                    error: ProviderError::OutOfCredits { .. }
+                }
+            ),
+            "{listed:?}"
+        );
+
+        let app = cx.update(|cx| cx.new(|_| crate::app_state::AppState::new()));
+        let strip = cx.update({
+            let runner = harness.runner.clone();
+            let history = harness.history.clone();
+            move |cx| {
+                cx.new(|cx| crate::bottom_strip::BottomStrip::new(app, Some(runner), history, cx))
+            }
+        });
+        strip.update(cx, |strip, cx| strip.refresh(cx));
+        let lines = strip.read_with(cx, |strip, _| strip.lines());
+        assert!(lines[0].starts_with("Done"), "{lines:?}");
+        assert_eq!(lines[1], "out of credits");
     }
 
     #[gpui::test]

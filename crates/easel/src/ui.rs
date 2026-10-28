@@ -1,9 +1,12 @@
 //! Small styled building blocks shared by every region: buttons, pane headers,
 //! and the 1 px lines between panes.
 
+use std::time::Duration;
+
 use gpui::{
-    App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, rgb,
+    Animation, AnimationExt, App, ClickEvent, ElementId, InteractiveElement, IntoElement,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, Transformation, Window, div,
+    prelude::FluentBuilder, px, radians, rgb, svg,
 };
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -135,4 +138,22 @@ pub fn muted_text(text: impl Into<SharedString>) -> gpui::Div {
         .text_sm()
         .text_color(rgb(crate::theme::TEXT_MUTED))
         .child(text.into())
+}
+
+/// A 16 px arc that turns while a history row is still running.
+pub fn spinner(id: impl Into<ElementId>) -> impl IntoElement {
+    svg()
+        .path("icons/spinner.svg")
+        .size(px(16.))
+        .flex_none()
+        .text_color(rgb(crate::theme::TEXT_MUTED))
+        .with_animation(
+            id,
+            Animation::new(Duration::from_millis(800)).repeat(),
+            |icon, delta| {
+                icon.with_transformation(Transformation::rotate(radians(
+                    delta * std::f32::consts::TAU,
+                )))
+            },
+        )
 }

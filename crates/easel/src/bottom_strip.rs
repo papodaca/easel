@@ -19,7 +19,7 @@ use crate::image_load::decode_image;
 use crate::jobs::{JobRunner, LiveJob, inspection_from, promote};
 use crate::notifications::Notifications;
 use crate::theme;
-use crate::ui::pane_header;
+use crate::ui::{pane_header, spinner};
 
 const CARD_LIMIT: usize = 2 * 1024;
 const DETAIL_LIMIT: usize = 16 * 1024;
@@ -46,6 +46,7 @@ pub struct HistoryDialog {
     pub prompt: String,
     pub actions: Vec<String>,
     pub confirming: bool,
+    pub spinning: bool,
 }
 
 pub struct GridDialog {
@@ -158,6 +159,14 @@ impl BottomStrip {
         self.rows.iter().map(|row| row.line.clone()).collect()
     }
 
+    #[cfg(test)]
+    pub fn spinners(&self) -> Vec<bool> {
+        self.rows
+            .iter()
+            .map(|row| row.state.is_in_flight())
+            .collect()
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn costs(&self) -> Vec<Option<f64>> {
         self.rows.iter().map(|row| row.cost).collect()
@@ -243,26 +252,43 @@ impl BottomStrip {
             .collect();
         let mut seen = std::collections::HashSet::new();
         let mut rows = Vec::new();
+        let mut finished_live = Vec::new();
         for job in live {
-            let persisted_done = matches!(job.state, JobState::Done { .. })
-                && job
-                    .id
-                    .as_ref()
-                    .is_some_and(|id| persisted.contains(id.as_str()));
-            if persisted_done {
+            let stored = job
+                .id
+                .as_ref()
+                .is_some_and(|id| persisted.contains(id.as_str()));
+            if job.state.is_in_flight() {
+                if let Some(id) = &job.id {
+                    seen.insert(id.as_str().to_string());
+                }
+                rows.push(self.row_from_live(job));
                 continue;
             }
-            if let Some(id) = &job.id {
-                seen.insert(id.as_str().to_string());
+            // A finished row that history already has is placed by created_at.
+            // Leaving it in the live prefix pinned an older 402 above a later success.
+            if stored {
+                continue;
             }
-            rows.push(self.row_from_live(job));
+            finished_live.push(job);
         }
+        let mut finished = Vec::new();
         for summary in listed {
             if seen.contains(summary.id.as_str()) {
                 continue;
             }
-            rows.push(self.row_from_history(summary.state, summary.cost, summary.id));
+            let created_at = summary.created_at.clone();
+            finished.push((
+                created_at,
+                self.row_from_history(summary.state, summary.cost, summary.id),
+            ));
         }
+        for job in finished_live {
+            let created_at = job.created_at.clone();
+            finished.push((created_at, self.row_from_live(job)));
+        }
+        finished.sort_by(|left, right| right.0.cmp(&left.0));
+        rows.extend(finished.into_iter().map(|(_, row)| row));
         if self.selected.is_some_and(|index| index >= rows.len()) {
             self.selected = None;
             self.pending_discard = false;
@@ -600,6 +626,7 @@ impl BottomStrip {
             prompt,
             actions,
             confirming: self.pending_discard,
+            spinning: state.is_in_flight(),
         })
     }
 
@@ -949,6 +976,16 @@ impl Render for BottomStrip {
             let line = row.line.clone();
             let cost = row.cost.map(|cost| format!("{cost:.2}"));
             let thumb = row.thumb.clone();
+            let spinning = row.state.is_in_flight();
+            let spin_id = row
+                .id
+                .as_ref()
+                .map(|id| format!("history-spinner-{}", id.as_str()))
+                .or_else(|| {
+                    row.token
+                        .map(|token| format!("history-spinner-token-{token}"))
+                })
+                .unwrap_or_else(|| format!("history-spinner-{index}"));
             let bounds_view = view.clone();
             entries.push(
                 div()
@@ -1005,7 +1042,20 @@ impl Render for BottomStrip {
                         .absolute()
                         .size_full(),
                     )
-                    .children(thumb.map(|image| img(image).w(px(40.)).h(px(40.))))
+                    .when(spinning, |entry| {
+                        entry.child(
+                            div()
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .justify_center()
+                                .size(px(40.))
+                                .child(spinner(spin_id)),
+                        )
+                    })
+                    .when(!spinning, |entry| {
+                        entry.children(thumb.map(|image| img(image).size(px(40.))))
+                    })
                     .child(
                         div()
                             .flex()

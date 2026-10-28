@@ -19,7 +19,7 @@ const FONTS: [&[u8]; 3] = [
 
 const APP_ICON_SVG: &[u8] = include_bytes!("../assets/icons/app.svg");
 
-const ICONS: [(&str, &[u8]); 6] = [
+const ICONS: [(&str, &[u8]); 7] = [
     ("icons/app.svg", APP_ICON_SVG),
     (
         "icons/minimize.svg",
@@ -40,6 +40,10 @@ const ICONS: [(&str, &[u8]); 6] = [
     (
         "icons/chevron-left.svg",
         include_bytes!("../assets/icons/chevron-left.svg"),
+    ),
+    (
+        "icons/spinner.svg",
+        include_bytes!("../assets/icons/spinner.svg"),
     ),
 ];
 

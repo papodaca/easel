@@ -272,6 +272,7 @@ mod tests {
             token,
             id: None,
             state,
+            created_at: String::new(),
             cost: None,
             status: status.into(),
             bytes: None,
