@@ -11,8 +11,8 @@ use easel_core::sheet::{self, SheetLayout};
 use gpui::{
     App, BorderStyle, Bounds, Context, CursorStyle, FocusHandle, Focusable, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder, Pixels,
-    Render, ScrollDelta, ScrollWheelEvent, SharedString, Styled, TextAlign, TextRun, Window,
-    canvas, div, font, point, prelude::*, px, quad, rems, rgb, size,
+    Render, ScrollDelta, ScrollEvent, SharedString, Styled, TextAlign, TextRun, Window, canvas,
+    div, font, point, prelude::*, px, quad, rems, rgb, size,
 };
 
 use crate::actions::{ActualSize, BoxTool, DeleteBox, Fit, SelectTool};
@@ -282,7 +282,7 @@ impl Canvas {
         }
     }
 
-    fn zoom_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+    fn zoom_wheel(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) {
         let local = Point {
             x: (event.position.x - self.bounds.origin.x).as_f32(),
             y: (event.position.y - self.bounds.origin.y).as_f32(),
@@ -1519,7 +1519,7 @@ impl Render for Canvas {
                     .absolute()
                     .size_full()
                     .cursor(self.pointer)
-                    .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                    .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
                         this.zoom_wheel(event, cx);
                     }))
                     .on_mouse_down(
@@ -1550,7 +1550,7 @@ mod tests {
 
     use easel_core::geometry::{Point, Size, Viewport};
     use gpui::{
-        Focusable as _, ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point,
+        Focusable as _, ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext, point,
         prelude::*, px,
     };
 
@@ -1656,7 +1656,7 @@ mod tests {
             canvas.viewport().view_to_image(local)
         });
         cx.simulate_mouse_move(cursor, None, Default::default());
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: cursor,
             delta: ScrollDelta::Lines(point(0.0, -1.0)),
             ..Default::default()

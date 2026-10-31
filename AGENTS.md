@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rules for working on easel, a gpui desktop app pinned to Zed `v1.25.3`.
+Rules for working on easel, a gpui desktop app pinned to Zed `v1.26.2`.
 
 ## Look and feel
 

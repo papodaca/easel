@@ -16,9 +16,9 @@ bytes = "1"
 image = { workspace = true, features = ["jpeg", "png", "webp"] }
 resvg = "0.46"
 log = "0.4"
-gpui = { git = "https://github.com/zed-industries/zed", rev = "8dd255c3eafb5231056fe4e6f601cedd011f1c93" } # v1.25.3
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "8dd255c3eafb5231056fe4e6f601cedd011f1c93", features = ["wayland", "x11"] } # v1.25.3
-gpui_tokio = { git = "https://github.com/zed-industries/zed", rev = "8dd255c3eafb5231056fe4e6f601cedd011f1c93" } # v1.25.3
+gpui = { git = "https://github.com/zed-industries/zed", rev = "c4273271092b0287f7d181f616bd5171e0a2f70c" } # v1.26.2
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "c4273271092b0287f7d181f616bd5171e0a2f70c", features = ["wayland", "x11"] } # v1.26.2
+gpui_tokio = { git = "https://github.com/zed-industries/zed", rev = "c4273271092b0287f7d181f616bd5171e0a2f70c" } # v1.26.2
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "http2", "charset", "multipart"] }
 serde_json.workspace = true
 url = "2"
@@ -28,5 +28,5 @@ unicode-segmentation = "1"
 zeroize = "1"
 
 [dev-dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", rev = "8dd255c3eafb5231056fe4e6f601cedd011f1c93", features = ["test-support"] } # v1.25.3
+gpui = { git = "https://github.com/zed-industries/zed", rev = "c4273271092b0287f7d181f616bd5171e0a2f70c", features = ["test-support"] } # v1.26.2
 mockito = "1"
